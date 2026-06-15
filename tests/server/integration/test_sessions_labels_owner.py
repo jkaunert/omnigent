@@ -54,9 +54,8 @@ async def test_labels_empty_on_new_session(
     assert resp.status_code == 200
     data = resp.json()
     assert data["id"] == session["id"]
-    # Labels may contain auto-injected keys (e.g. closed status);
-    # at minimum no user-supplied labels are present.
     assert isinstance(data["labels"], dict)
+    assert data["labels"] == {}
 
 
 async def test_labels_set_via_create(
@@ -106,7 +105,9 @@ async def test_labels_updated_via_patch(
 async def test_labels_persist_across_updates(
     client: httpx.AsyncClient,
 ) -> None:
-    """Successive PATCH updates overwrite labels correctly."""
+    """Successive PATCHes use upsert semantics: mentioned keys are
+    overwritten while previously-set keys not included in the payload
+    remain untouched."""
     agent = await create_test_agent(client)
     session = await _create_session(
         client,
@@ -115,21 +116,27 @@ async def test_labels_persist_across_updates(
     )
     sid = session["id"]
 
-    # First update
-    await client.patch(
+    # First update – adds "extra", updates "version"
+    patch1 = await client.patch(
         f"/v1/sessions/{sid}",
         json={"labels": {"version": "2", "extra": "yes"}},
     )
+    assert patch1.status_code == 200
 
-    # Second update
-    await client.patch(
+    # Second update – updates "version" only; "extra" should persist
+    patch2 = await client.patch(
         f"/v1/sessions/{sid}",
         json={"labels": {"version": "3"}},
     )
+    assert patch2.status_code == 200
 
     resp = await client.get(f"/v1/sessions/{sid}/labels")
     assert resp.status_code == 200
-    assert resp.json()["labels"]["version"] == "3"
+    labels = resp.json()["labels"]
+    assert labels["version"] == "3"
+    # Verify upsert: "extra" was not mentioned in the second PATCH
+    # so it must still be present.
+    assert labels["extra"] == "yes"
 
 
 # ── GET /v1/sessions/{id}/owner ──────────────────────────
