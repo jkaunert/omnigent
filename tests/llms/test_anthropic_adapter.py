@@ -403,16 +403,16 @@ async def test_stream_to_chat_chunks_text_delta() -> None:
 
     lines = [
         "data: "
-        '{"type": "message_start", "message": {"id": "msg_1",'
-        ' "model": "claude-test",'
-        ' "usage": {"input_tokens": 10}}}',
+        + '{"type": "message_start", "message": {"id": "msg_1",'
+        + ' "model": "claude-test",'
+        + ' "usage": {"input_tokens": 10}}}',
         'data: {"type": "content_block_start", "content_block": {"type": "text"}}',
         'data: {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Hello"}}',
         'data: {"type": "content_block_delta", "delta": {"type": "text_delta", "text": " world"}}',
         "data: "
-        '{"type": "message_delta",'
-        ' "delta": {"stop_reason": "end_turn"},'
-        ' "usage": {"output_tokens": 5}}',
+        + '{"type": "message_delta",'
+        + ' "delta": {"stop_reason": "end_turn"},'
+        + ' "usage": {"output_tokens": 5}}',
     ]
 
     async def _aiter():
@@ -439,25 +439,25 @@ async def test_stream_to_chat_chunks_tool_use() -> None:
 
     lines = [
         "data: "
-        '{"type": "message_start", "message": {"id": "msg_2",'
-        ' "model": "claude-test",'
-        ' "usage": {"input_tokens": 5}}}',
+        + '{"type": "message_start", "message": {"id": "msg_2",'
+        + ' "model": "claude-test",'
+        + ' "usage": {"input_tokens": 5}}}',
         "data: "
-        '{"type": "content_block_start",'
-        ' "content_block": {"type": "tool_use",'
-        ' "id": "tu_1", "name": "get_weather"}}',
+        + '{"type": "content_block_start",'
+        + ' "content_block": {"type": "tool_use",'
+        + ' "id": "tu_1", "name": "get_weather"}}',
         "data: "
-        '{"type": "content_block_delta",'
-        ' "delta": {"type": "input_json_delta",'
-        ' "partial_json": "{\\"city\\":"}}',
+        + '{"type": "content_block_delta",'
+        + ' "delta": {"type": "input_json_delta",'
+        + ' "partial_json": "{\\"city\\":"}}',
         "data: "
-        '{"type": "content_block_delta",'
-        ' "delta": {"type": "input_json_delta",'
-        ' "partial_json": "\\"London\\"}"}}',
+        + '{"type": "content_block_delta",'
+        + ' "delta": {"type": "input_json_delta",'
+        + ' "partial_json": "\\"London\\"}"}}',
         "data: "
-        '{"type": "message_delta",'
-        ' "delta": {"stop_reason": "tool_use"},'
-        ' "usage": {"output_tokens": 10}}',
+        + '{"type": "message_delta",'
+        + ' "delta": {"stop_reason": "tool_use"},'
+        + ' "usage": {"output_tokens": 10}}',
     ]
 
     async def _aiter():
@@ -480,15 +480,15 @@ async def test_stream_skips_non_data_lines() -> None:
     lines = [
         "event: message_start",
         "data: "
-        '{"type": "message_start", "message":'
-        ' {"id": "msg_3", "model": "claude-test",'
-        ' "usage": {}}}',
+        + '{"type": "message_start", "message":'
+        + ' {"id": "msg_3", "model": "claude-test",'
+        + ' "usage": {}}}',
         ": comment line",
         "",
         "data: "
-        '{"type": "message_delta",'
-        ' "delta": {"stop_reason": "end_turn"},'
-        ' "usage": {"output_tokens": 1}}',
+        + '{"type": "message_delta",'
+        + ' "delta": {"stop_reason": "end_turn"},'
+        + ' "usage": {"output_tokens": 1}}',
     ]
 
     async def _aiter():

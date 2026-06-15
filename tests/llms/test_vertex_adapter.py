@@ -106,10 +106,13 @@ def test_get_base_url_raises() -> None:
 def test_build_vertex_url_different_region() -> None:
     """URL changes with region."""
     url = _build_vertex_url("proj-2", "europe-west4")
-    expected = "https://europe-west4-aiplatform.googleapis.com"
-    assert url.startswith(expected)
-    assert "/projects/proj-2/" in url
-    assert "/locations/europe-west4/" in url
+    expected_url = (
+        "https://europe-west4-aiplatform.googleapis.com"
+        "/v1/projects/proj-2"
+        "/locations/europe-west4"
+        "/publishers/google/models"
+    )
+    assert url == expected_url
 
 
 # ── Resolve preserves extra keys ─────────────────────────
