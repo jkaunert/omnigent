@@ -13,14 +13,18 @@ Two install shapes are supported:
 * **Installed wheel** (``uv tool install omnigent``,
   ``pip install omnigent``, ``pipx install``, Homebrew, etc.): no clone
   is reachable on disk, so we compare the installed version against the
-  latest release on PyPI and nag *only when a strictly newer release
-  exists* — never merely because the install is old. To avoid adding
-  latency to the hot path, the foreground only ever reads the cached
-  "latest version" and prints from it; the (network) PyPI lookup runs in
-  a detached background process (:func:`refresh_update_cache`) that
-  refreshes the cache for the next invocation. The notice fires once per
-  new release (tracked via ``last_notified_version``) and points the
-  user at ``omni upgrade``.
+  latest release on the *configured package index* (via the Simple
+  Repository API — :func:`fetch_latest_version`) and nag *only when a
+  strictly newer release exists* — never merely because the install is
+  old. The index is resolved from ``UV_INDEX_URL`` / ``PIP_INDEX_URL`` /
+  ``OMNIGENT_INDEX_URL`` (default pypi.org), so it works on corporate
+  mirrors and air-gapped networks and stays consistent with what
+  ``omni upgrade`` actually pulls. To avoid adding latency to the hot
+  path, the foreground only ever reads the cached "latest version" and
+  prints from it; the (network) lookup runs in a detached background
+  process (:func:`refresh_update_cache`) that refreshes the cache for the
+  next invocation. The notice fires once per new release (tracked via
+  ``last_notified_version``) and points the user at ``omni upgrade``.
 
 The dispatcher in ``maybe_show_update_notice`` picks the shape based on
 whether a ``.git/`` directory is reachable from this module's path.
@@ -41,8 +45,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    # Imported only for type hints; the Rich import remains lazy at
-    # runtime so importing this module stays cheap.
+    # Imported only for type hints; the heavy/optional imports remain lazy
+    # at runtime so importing this module stays cheap.
+    from collections.abc import Iterable
+
+    import httpx
+    from packaging.version import Version
     from rich.console import Console
 
 _ENV_SKIP = "OMNIGENT_NO_UPDATE_CHECK"
@@ -51,15 +59,26 @@ _CACHE_FILE = _CACHE_DIR / ".update_check.json"
 _STALENESS_SECONDS = 4 * 60 * 60  # 4 hours
 _GIT_TIMEOUT_SECONDS = 5
 _DIST_NAME = "omnigent"
-# PyPI JSON API — ``info.version`` is the latest *stable* release (PyPI
-# excludes pre-releases from that field unless every release is a
-# pre-release). This is the source of truth for "is a newer release
-# out?" because the project publishes to PyPI but does not cut GitHub
-# Releases (see .github/workflows/release-omnigent.yml).
-_PYPI_JSON_URL = f"https://pypi.org/pypi/{_DIST_NAME}/json"
-# Keep the background PyPI lookup snappy. It runs detached so it never
+# "Is a newer release out?" is answered against the *configured* package
+# index via the Simple Repository API (PEP 503/691) — the universal
+# protocol every index speaks (pypi.org, a corporate mirror, devpi,
+# Artifactory, the Databricks proxy). We deliberately do NOT use PyPI's
+# JSON API (`/pypi/<name>/json`): that is Warehouse-specific and 404s on
+# mirrors, so it would silently never work on air-gapped / mirror-only
+# networks. Querying the same index the user installs from also keeps the
+# notice consistent with what ``omni upgrade`` (uv/pip) actually pulls.
+_DEFAULT_INDEX_URL = "https://pypi.org/simple"
+# Env vars that point at the default index, in precedence order. The
+# explicit ``OMNIGENT_INDEX_URL`` wins; then uv's and pip's. Config-file
+# index URLs (uv.toml / pip.conf) are intentionally NOT parsed — set the
+# env override for those. Credentials embedded in the URL are honored
+# (httpx applies them), so authenticated mirrors work transparently.
+_INDEX_ENV_VARS = ("OMNIGENT_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX_URL", "PIP_INDEX_URL")
+# PEP 691 JSON content type to request (falls back to PEP 503 HTML).
+_SIMPLE_JSON_ACCEPT = "application/vnd.pypi.simple.v1+json"
+# Keep the background index lookup snappy. It runs detached so it never
 # blocks the CLI, but a tight timeout still bounds the orphan's lifetime.
-_PYPI_TIMEOUT_SECONDS = 3.0
+_INDEX_TIMEOUT_SECONDS = 3.0
 # The placeholder that PEP 610 tooling (pip, newer uv) writes into
 # ``direct_url.json`` in place of a URL's userinfo. See
 # ``_unredact_ssh_userinfo`` for why we have to repair it.
@@ -295,38 +314,143 @@ def _is_newer(latest: str, current: str) -> bool:
         return latest != current and bool(latest)
 
 
-def fetch_latest_pypi_version() -> str | None:
-    """Fetch the latest released ``omnigent`` version from the PyPI JSON API.
+def _resolve_index_url() -> str:
+    """Resolve the package index to query, honoring uv/pip env config.
 
-    Network call with a tight timeout, swallowing every error so the
-    update check can never break (or slow) the CLI. Intended to run from
-    the detached background refresh, not the hot path.
+    Checks :data:`_INDEX_ENV_VARS` in precedence order and falls back to
+    :data:`_DEFAULT_INDEX_URL`. uv's index vars may carry several
+    whitespace/comma-separated URLs; the first is the primary index.
 
-    :returns: The latest stable version string from ``info.version``
-        (e.g. ``"0.2.0"``), or ``None`` on any network / parse error or
-        non-200 response.
+    :returns: The index base URL with any trailing slash stripped, e.g.
+        ``"https://pypi.org/simple"``.
+    """
+    for var in _INDEX_ENV_VARS:
+        value = os.environ.get(var)
+        if value:
+            tokens = value.replace(",", " ").split()
+            if tokens:
+                return tokens[0].rstrip("/")
+    return _DEFAULT_INDEX_URL
+
+
+def fetch_latest_version() -> str | None:
+    """Fetch the latest stable ``omnigent`` release from the configured index.
+
+    Queries the Simple Repository API of the resolved index
+    (:func:`_resolve_index_url`) — PEP 691 JSON when the index serves it,
+    PEP 503 HTML otherwise. Pre-releases and dev releases are excluded so
+    we never nag about a non-final build. Network call with a tight
+    timeout, swallowing every error so the update check can never break
+    (or slow) the CLI; intended for the detached background refresh, not
+    the hot path.
+
+    :returns: The latest stable version string (e.g. ``"0.2.0"``), or
+        ``None`` on any network / parse error, a non-200 response, or when
+        no stable release is found.
     """
     import httpx
+    from packaging.utils import canonicalize_name
 
+    url = f"{_resolve_index_url()}/{canonicalize_name(_DIST_NAME)}/"
     try:
-        resp = httpx.get(_PYPI_JSON_URL, timeout=_PYPI_TIMEOUT_SECONDS)
+        resp = httpx.get(
+            url,
+            headers={"Accept": _SIMPLE_JSON_ACCEPT},
+            timeout=_INDEX_TIMEOUT_SECONDS,
+            follow_redirects=True,
+        )
     except httpx.HTTPError:
         return None
     if resp.status_code != 200:
         return None
+
+    versions = _parse_simple_versions(resp)
+    stable = [v for v in versions if not (v.is_prerelease or v.is_devrelease)]
+    return str(max(stable)) if stable else None
+
+
+def _parse_simple_versions(resp: httpx.Response) -> list[Version]:
+    """Extract candidate versions from a Simple-API response.
+
+    Prefers the PEP 691 JSON body (``versions`` per PEP 700, else the
+    ``files`` list); falls back to scraping filenames from the PEP 503
+    HTML index when the server ignored our JSON ``Accept`` header.
+
+    :param resp: A 200 response from ``<index>/<name>/``.
+    :returns: Parsed :class:`~packaging.version.Version` objects (possibly
+        empty); callers filter pre-releases and pick the max.
+    """
+    content_type = resp.headers.get("content-type", "")
+    if "json" in content_type:
+        try:
+            data = resp.json()
+        except ValueError:
+            return []
+        if not isinstance(data, dict):
+            return []
+        listed = data.get("versions")
+        if isinstance(listed, list):
+            return [v for v in (_safe_version(str(x)) for x in listed) if v is not None]
+        files = data.get("files")
+        if isinstance(files, list):
+            return _versions_from_filenames(
+                f.get("filename", "") for f in files if isinstance(f, dict)
+            )
+        return []
+    # PEP 503 HTML fallback: filenames are the <a> link texts / hrefs.
+    import re
+
+    names = re.findall(r">([^<>]+\.(?:whl|tar\.gz|zip))<", resp.text)
+    return _versions_from_filenames(names)
+
+
+def _versions_from_filenames(filenames: Iterable[str]) -> list[Version]:
+    """Parse versions from wheel / sdist filenames, skipping unparseable ones.
+
+    :param filenames: Distribution filenames, e.g.
+        ``["omnigent-0.2.0-py3-none-any.whl", "omnigent-0.2.0.tar.gz"]``.
+    :returns: The versions successfully parsed out of them.
+    """
+    from packaging.utils import (
+        InvalidSdistFilename,
+        InvalidWheelFilename,
+        parse_sdist_filename,
+        parse_wheel_filename,
+    )
+
+    out: list[Version] = []
+    for filename in filenames:
+        try:
+            if filename.endswith(".whl"):
+                out.append(parse_wheel_filename(filename)[1])
+            elif filename.endswith((".tar.gz", ".zip")):
+                out.append(parse_sdist_filename(filename)[1])
+        except (InvalidWheelFilename, InvalidSdistFilename):
+            continue
+    return out
+
+
+def _safe_version(value: str) -> Version | None:
+    """Parse a version string, returning ``None`` instead of raising.
+
+    :param value: A candidate version, e.g. ``"0.2.0"``.
+    :returns: The :class:`~packaging.version.Version`, or ``None`` when
+        *value* is not a valid PEP 440 version.
+    """
+    from packaging.version import InvalidVersion, Version
+
     try:
-        version = resp.json()["info"]["version"]
-    except (ValueError, KeyError, TypeError):
+        return Version(value)
+    except InvalidVersion:
         return None
-    return version if isinstance(version, str) and version else None
 
 
 def refresh_update_cache() -> None:
-    """Refresh the cached "latest PyPI version" for the wheel path.
+    """Refresh the cached "latest released version" for the wheel path.
 
     Runs in a detached background process spawned by
     :func:`_spawn_background_refresh` (via ``python -c``), so it must be
-    completely silent and must never raise. Performs the network PyPI
+    completely silent and must never raise. Performs the network index
     lookup the foreground deliberately avoids and writes the result to
     the shared cache, preserving ``last_notified_version`` so a pending
     "fire once per release" notice is not re-armed.
@@ -336,13 +460,13 @@ def refresh_update_cache() -> None:
     with contextlib.suppress(Exception):
         if os.environ.get(_ENV_SKIP):
             return
-        # Only the wheel shape consults PyPI; a clone refreshes via git.
+        # Only the wheel shape consults the index; a clone refreshes via git.
         if _find_repo_root() is not None:
             return
         info = _read_installed_wheel_info()
         if info is None or info.is_editable:
             return
-        latest = fetch_latest_pypi_version()
+        latest = fetch_latest_version()
         if latest is None:
             return
         prev = _read_cache()

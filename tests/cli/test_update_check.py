@@ -1180,46 +1180,156 @@ def test_is_newer_tolerates_garbage() -> None:
     assert _is_newer("", "0.1.0") is False
 
 
-def test_fetch_latest_pypi_version_parses_info_version(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A 200 with ``info.version`` returns that version string."""
+class _FakeResp:
+    """Minimal httpx.Response stand-in for the Simple-API parser."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        content_type: str = "application/vnd.pypi.simple.v1+json",
+        json_body: object | None = None,
+        text: str = "",
+    ) -> None:
+        self.status_code = status_code
+        self.headers = {"content-type": content_type}
+        self._json_body = json_body
+        self.text = text
+
+    def json(self) -> object:
+        if self._json_body is None:
+            raise ValueError("no json body")
+        return self._json_body
+
+
+_INDEX_ENV_VARS = ("OMNIGENT_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX_URL", "PIP_INDEX_URL")
+
+
+def _clear_index_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset every index env var so a test starts from the pypi.org default."""
+    for var in _INDEX_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_fetch_latest_version_pep691_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PEP 691 ``versions`` → latest *stable* (pre/dev releases excluded)."""
     import httpx
 
-    from omnigent.update_check import fetch_latest_pypi_version
+    from omnigent.update_check import fetch_latest_version
 
-    class _Resp:
-        status_code = 200
+    _clear_index_env(monkeypatch)
+    captured: dict[str, object] = {}
 
-        def json(self) -> dict[str, object]:
-            return {"info": {"version": "0.3.1"}}
+    def _get(url: str, **kwargs: object) -> _FakeResp:
+        captured["url"] = url
+        captured["headers"] = kwargs.get("headers")
+        return _FakeResp(json_body={"versions": ["0.1.0", "0.2.0", "0.3.0rc1", "0.9.0.dev1"]})
 
-    monkeypatch.setattr(httpx, "get", lambda *_a, **_k: _Resp())
-    assert fetch_latest_pypi_version() == "0.3.1"
+    monkeypatch.setattr(httpx, "get", _get)
+
+    assert fetch_latest_version() == "0.2.0"
+    # Default index + normalized project name + JSON Accept header.
+    assert captured["url"] == "https://pypi.org/simple/omnigent/"
+    assert captured["headers"] == {"Accept": "application/vnd.pypi.simple.v1+json"}
 
 
-def test_fetch_latest_pypi_version_swallows_errors(
+def test_fetch_latest_version_from_files_when_no_versions_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Network error / non-200 / bad JSON all return ``None`` (never raise)."""
+    """An index without a ``versions`` key → derive from wheel/sdist filenames."""
     import httpx
 
-    from omnigent.update_check import fetch_latest_pypi_version
+    from omnigent.update_check import fetch_latest_version
+
+    _clear_index_env(monkeypatch)
+    body = {
+        "files": [
+            {"filename": "omnigent-0.1.0-py3-none-any.whl"},
+            {"filename": "omnigent-0.2.0.tar.gz"},
+            {"filename": "omnigent-0.3.0rc1-py3-none-any.whl"},  # prerelease → excluded
+            {"filename": "not-a-distribution.txt"},  # ignored
+        ]
+    }
+    monkeypatch.setattr(httpx, "get", lambda *_a, **_k: _FakeResp(json_body=body))
+
+    assert fetch_latest_version() == "0.2.0"
+
+
+def test_fetch_latest_version_html_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A PEP 503 HTML index (no JSON) → scrape filenames from the links."""
+    import httpx
+
+    from omnigent.update_check import fetch_latest_version
+
+    _clear_index_env(monkeypatch)
+    html = (
+        "<!DOCTYPE html><html><body>"
+        '<a href="/p/omnigent-0.1.0-py3-none-any.whl#sha256=a">omnigent-0.1.0-py3-none-any.whl</a>'
+        '<a href="/p/omnigent-0.2.0.tar.gz#sha256=b">omnigent-0.2.0.tar.gz</a>'
+        "</body></html>"
+    )
+    monkeypatch.setattr(
+        httpx, "get", lambda *_a, **_k: _FakeResp(content_type="text/html", text=html)
+    )
+
+    assert fetch_latest_version() == "0.2.0"
+
+
+def test_fetch_latest_version_none_when_only_prereleases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only pre-releases available → no stable release, returns ``None``."""
+    import httpx
+
+    from omnigent.update_check import fetch_latest_version
+
+    _clear_index_env(monkeypatch)
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda *_a, **_k: _FakeResp(json_body={"versions": ["0.3.0rc1", "0.9.0.dev1"]}),
+    )
+
+    assert fetch_latest_version() is None
+
+
+def test_fetch_latest_version_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Network error and non-200 both return ``None`` (never raise)."""
+    import httpx
+
+    from omnigent.update_check import fetch_latest_version
+
+    _clear_index_env(monkeypatch)
 
     def _boom(*_a: object, **_k: object) -> object:
         raise httpx.ConnectError("offline")
 
     monkeypatch.setattr(httpx, "get", _boom)
-    assert fetch_latest_pypi_version() is None
+    assert fetch_latest_version() is None
 
-    class _Resp404:
-        status_code = 404
+    monkeypatch.setattr(httpx, "get", lambda *_a, **_k: _FakeResp(status_code=404))
+    assert fetch_latest_version() is None
 
-        def json(self) -> dict[str, object]:
-            return {}
 
-    monkeypatch.setattr(httpx, "get", lambda *_a, **_k: _Resp404())
-    assert fetch_latest_pypi_version() is None
+def test_resolve_index_url_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_resolve_index_url`` follows env precedence and defaults to pypi.org/simple."""
+    from omnigent.update_check import _resolve_index_url
+
+    _clear_index_env(monkeypatch)
+    assert _resolve_index_url() == "https://pypi.org/simple"
+
+    monkeypatch.setenv("PIP_INDEX_URL", "https://pip.example/simple/")
+    assert _resolve_index_url() == "https://pip.example/simple"
+
+    # uv outranks pip; explicit override outranks everything.
+    monkeypatch.setenv("UV_INDEX_URL", "https://uv.example/simple/")
+    assert _resolve_index_url() == "https://uv.example/simple"
+    monkeypatch.setenv("OMNIGENT_INDEX_URL", "https://override.example/simple")
+    assert _resolve_index_url() == "https://override.example/simple"
+
+    # Multiple whitespace/comma-separated URLs → the first (primary) index.
+    monkeypatch.setenv("OMNIGENT_INDEX_URL", "https://a.example/simple, https://b.example/simple")
+    assert _resolve_index_url() == "https://a.example/simple"
 
 
 def test_refresh_update_cache_writes_latest_and_preserves_notified(
@@ -1246,7 +1356,7 @@ def test_refresh_update_cache_writes_latest_and_preserves_notified(
     dist = _write_fake_dist_info(tmp_path, installer="uv")
     monkeypatch.setattr("omnigent.update_check._get_distribution", lambda: dist)
     monkeypatch.setattr("omnigent.update_check._find_repo_root", lambda: None)
-    monkeypatch.setattr("omnigent.update_check.fetch_latest_pypi_version", lambda: "0.2.0")
+    monkeypatch.setattr("omnigent.update_check.fetch_latest_version", lambda: "0.2.0")
 
     from omnigent.update_check import refresh_update_cache
 
@@ -1271,7 +1381,7 @@ def test_refresh_update_cache_noop_for_clone(
     def _must_not_fetch() -> str:
         raise AssertionError("PyPI fetch attempted in a dev clone")
 
-    monkeypatch.setattr("omnigent.update_check.fetch_latest_pypi_version", _must_not_fetch)
+    monkeypatch.setattr("omnigent.update_check.fetch_latest_version", _must_not_fetch)
 
     from omnigent.update_check import refresh_update_cache
 

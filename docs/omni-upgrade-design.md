@@ -62,7 +62,8 @@ no registered distribution contributes an empty version and is unaffected.)
 1. Bail on a source checkout / editable install (`_find_repo_root()` /
    `is_editable`) → tell the user to `git pull`.
 2. Read the install shape (`_read_installed_wheel_info`) and compare the
-   installed version with PyPI (`fetch_latest_pypi_version`, PEP 440 compare).
+   installed version with the latest on the configured index
+   (`fetch_latest_version`, PEP 440 compare).
    - Already current → report and exit 0.
    - `--check` → print the available delta and exit non-zero (scriptable).
 3. **Drain and wait** (default): poll the local server's *connected* sessions
@@ -83,12 +84,17 @@ Most of steps 2/5 reuse helpers that already existed in `update_check.py`.
 `omnigent/update_check.py`, installed-wheel path; wired into `main()` behind
 `_should_skip_update_check(argv)` and a `sys.stderr.isatty()` gate.
 
-- **Only when newer**: compares installed vs. the cached latest PyPI version;
+- **Only when newer**: compares installed vs. the cached latest version;
   notifies only when `latest > current`.
+- **Configured-index aware**: `fetch_latest_version` queries the resolved
+  index's Simple Repository API (PEP 691 JSON, PEP 503 HTML fallback), not
+  PyPI's Warehouse-only JSON API. The index comes from `OMNIGENT_INDEX_URL` /
+  `UV_INDEX_URL` / `PIP_INDEX_URL` (default `pypi.org/simple`), so it works on
+  corporate mirrors / air-gapped networks and matches what `omni upgrade` pulls.
 - **Fire once per release**: the cache tracks `last_notified_version`; the
   notice shows once per new version, never on every invocation.
 - **Never on the hot path**: the foreground only reads the cache (instant). The
-  network PyPI lookup runs in a **detached** background process
+  network lookup runs in a **detached** background process
   (`refresh_update_cache`, spawned via `python -c` so it can't recurse into the
   CLI) that refreshes the cache for next time.
 - **Quiet + opt-out**: TTY-only, skipped for `--help` / `version` / internal TUI
@@ -101,8 +107,9 @@ itself (that responsibility moved to the command).
 
 ## Decisions
 
-- **Source of truth**: PyPI JSON `info.version` (PyPI is live; no GitHub
-  Releases).
+- **Source of truth**: the configured package index's Simple Repository API
+  (default `pypi.org/simple`; honors `OMNIGENT_INDEX_URL` / `UV_INDEX_URL` /
+  `PIP_INDEX_URL`). Picks the latest non-pre-release. No GitHub Releases are cut.
 - **Drain posture**: drain-and-wait by default, `--force` to stop now.
 - **Restart**: lazy respawn (no auto-restart) — simplest, fewest surprises.
 - **Notice cadence**: once per new release.
@@ -111,6 +118,8 @@ itself (that responsibility moved to the command).
 
 - True rolling drain (new server on a new port, old one finishes) — unnecessary
   for a local single-user server.
-- Pre-release / channel opt-in (`info.version` is stable-only).
+- Pre-release / channel opt-in (the probe filters pre-releases today).
+- Parsing uv.toml / pip.conf index URLs (only env vars are read; use
+  `OMNIGENT_INDEX_URL` otherwise).
 - A `/api/version` drift warning when attaching to a server you didn't spawn.
 - A `config` toggle mirroring `OMNIGENT_NO_UPDATE_CHECK`.

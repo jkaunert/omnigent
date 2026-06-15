@@ -3403,7 +3403,7 @@ def upgrade(check_only: bool, force: bool) -> None:
         _find_repo_root,
         _read_installed_wheel_info,
         _run_upgrade_command,
-        fetch_latest_pypi_version,
+        fetch_latest_version,
     )
 
     # Source checkout / editable install — there's no released wheel to
@@ -3424,11 +3424,11 @@ def upgrade(check_only: bool, force: bool) -> None:
         )
 
     current = importlib.metadata.version("omnigent")
-    latest = fetch_latest_pypi_version()
+    latest = fetch_latest_version()
     if latest is None:
         raise click.ClickException(
-            "Couldn't reach PyPI to check for a newer release. Check your connection "
-            "and try again."
+            "Couldn't reach the package index to check for a newer release. Check your "
+            "connection (or OMNIGENT_INDEX_URL / your configured index) and try again."
         )
     try:
         is_behind = parse(latest) > parse(current)

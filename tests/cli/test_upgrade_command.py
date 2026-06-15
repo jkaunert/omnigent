@@ -48,7 +48,7 @@ def _wheel_install(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_upgrade_up_to_date(monkeypatch: pytest.MonkeyPatch, _wheel_install: None) -> None:
     """Latest == installed → reports up to date, exit 0, nothing stopped/run."""
-    monkeypatch.setattr("omnigent.update_check.fetch_latest_pypi_version", lambda: "0.1.0")
+    monkeypatch.setattr("omnigent.update_check.fetch_latest_version", lambda: "0.1.0")
 
     def _must_not_run(*_a: object, **_k: object) -> int:
         raise AssertionError("upgrade command ran while already up to date")
@@ -66,7 +66,7 @@ def test_upgrade_check_reports_newer_and_exits_nonzero(
     monkeypatch: pytest.MonkeyPatch, _wheel_install: None
 ) -> None:
     """``--check`` with a newer release → prints the delta and exits non-zero, no upgrade."""
-    monkeypatch.setattr("omnigent.update_check.fetch_latest_pypi_version", lambda: "0.2.0")
+    monkeypatch.setattr("omnigent.update_check.fetch_latest_version", lambda: "0.2.0")
 
     def _must_not_run(*_a: object, **_k: object) -> int:
         raise AssertionError("--check must not run the upgrade")
@@ -83,7 +83,7 @@ def test_upgrade_runs_installer_and_drains_first(
     monkeypatch: pytest.MonkeyPatch, _wheel_install: None
 ) -> None:
     """A newer release → drain (no force), stop the server, run the uv command."""
-    monkeypatch.setattr("omnigent.update_check.fetch_latest_pypi_version", lambda: "0.2.0")
+    monkeypatch.setattr("omnigent.update_check.fetch_latest_version", lambda: "0.2.0")
 
     events: list[str] = []
     monkeypatch.setattr(
@@ -117,7 +117,7 @@ def test_upgrade_force_skips_drain_and_force_stops(
     monkeypatch: pytest.MonkeyPatch, _wheel_install: None
 ) -> None:
     """``--force`` skips the drain wait and force-stops the server."""
-    monkeypatch.setattr("omnigent.update_check.fetch_latest_pypi_version", lambda: "0.2.0")
+    monkeypatch.setattr("omnigent.update_check.fetch_latest_version", lambda: "0.2.0")
 
     def _no_drain() -> None:
         raise AssertionError("--force must not wait for sessions to drain")
@@ -141,7 +141,7 @@ def test_upgrade_install_failure_surfaces(
     monkeypatch: pytest.MonkeyPatch, _wheel_install: None
 ) -> None:
     """A non-zero installer exit → ClickException naming the status, exit non-zero."""
-    monkeypatch.setattr("omnigent.update_check.fetch_latest_pypi_version", lambda: "0.2.0")
+    monkeypatch.setattr("omnigent.update_check.fetch_latest_version", lambda: "0.2.0")
     monkeypatch.setattr("omnigent.update_check._run_upgrade_command", lambda *_a, **_k: 3)
 
     result = CliRunner().invoke(cli, ["upgrade"])
@@ -150,14 +150,14 @@ def test_upgrade_install_failure_surfaces(
     assert "exited with status 3" in result.output
 
 
-def test_upgrade_pypi_unreachable(monkeypatch: pytest.MonkeyPatch, _wheel_install: None) -> None:
-    """PyPI unreachable → clear error, no upgrade attempted."""
-    monkeypatch.setattr("omnigent.update_check.fetch_latest_pypi_version", lambda: None)
+def test_upgrade_index_unreachable(monkeypatch: pytest.MonkeyPatch, _wheel_install: None) -> None:
+    """Index unreachable → clear error, no upgrade attempted."""
+    monkeypatch.setattr("omnigent.update_check.fetch_latest_version", lambda: None)
 
     result = CliRunner().invoke(cli, ["upgrade"])
 
     assert result.exit_code != 0
-    assert "PyPI" in result.output
+    assert "package index" in result.output
 
 
 def test_upgrade_rejects_dev_clone(monkeypatch: pytest.MonkeyPatch, _wheel_install: None) -> None:
