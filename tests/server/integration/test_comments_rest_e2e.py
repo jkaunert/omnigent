@@ -231,7 +231,7 @@ async def test_comment_on_nonexistent_session_returns_404(
     auth_client: httpx.AsyncClient,
     db_uri: str,
 ) -> None:
-    """Operations on a session the user has no grant for return 403/404."""
+    """Operations on a nonexistent session return 404."""
     headers = {"X-Forwarded-Email": ALICE}
 
     resp = await auth_client.post(
@@ -244,9 +244,8 @@ async def test_comment_on_nonexistent_session_returns_404(
         },
         headers=headers,
     )
-    # The permission check fires before the comment store, so the user
-    # gets a 403 (no grant) or 404 (session not found) — either is fine.
-    assert resp.status_code in {403, 404}
+    # require_access returns 404 when the conversation doesn't exist.
+    assert resp.status_code == 404
 
 
 async def test_send_formats_multifile_message_with_anchors(
@@ -258,47 +257,47 @@ async def test_send_formats_multifile_message_with_anchors(
     headers = {"X-Forwarded-Email": ALICE}
 
     # Comment with anchor_content on file A
-    c1 = (
-        await auth_client.post(
-            f"/v1/sessions/{session_id}/comments",
-            json={
-                "path": "src/alpha.py",
-                "body": "Rename variable",
-                "start_index": 10,
-                "end_index": 25,
-                "anchor_content": "old_var_name",
-            },
-            headers=headers,
-        )
-    ).json()
+    c1_resp = await auth_client.post(
+        f"/v1/sessions/{session_id}/comments",
+        json={
+            "path": "src/alpha.py",
+            "body": "Rename variable",
+            "start_index": 10,
+            "end_index": 25,
+            "anchor_content": "old_var_name",
+        },
+        headers=headers,
+    )
+    assert c1_resp.status_code == 200
+    c1 = c1_resp.json()
 
     # Comment without anchor_content on file B
-    c2 = (
-        await auth_client.post(
-            f"/v1/sessions/{session_id}/comments",
-            json={
-                "path": "src/beta.py",
-                "body": "Add docstring",
-                "start_index": 0,
-                "end_index": 8,
-            },
-            headers=headers,
-        )
-    ).json()
+    c2_resp = await auth_client.post(
+        f"/v1/sessions/{session_id}/comments",
+        json={
+            "path": "src/beta.py",
+            "body": "Add docstring",
+            "start_index": 0,
+            "end_index": 8,
+        },
+        headers=headers,
+    )
+    assert c2_resp.status_code == 200
+    c2 = c2_resp.json()
 
     # Comment on file A again (should group with the first)
-    c3 = (
-        await auth_client.post(
-            f"/v1/sessions/{session_id}/comments",
-            json={
-                "path": "src/alpha.py",
-                "body": "Fix indentation",
-                "start_index": 50,
-                "end_index": 60,
-            },
-            headers=headers,
-        )
-    ).json()
+    c3_resp = await auth_client.post(
+        f"/v1/sessions/{session_id}/comments",
+        json={
+            "path": "src/alpha.py",
+            "body": "Fix indentation",
+            "start_index": 50,
+            "end_index": 60,
+        },
+        headers=headers,
+    )
+    assert c3_resp.status_code == 200
+    c3 = c3_resp.json()
 
     send_resp = await auth_client.post(
         f"/v1/sessions/{session_id}/comments/send",
@@ -334,6 +333,7 @@ async def test_send_formats_multifile_message_with_anchors(
         f"/v1/sessions/{session_id}/comments",
         headers=headers,
     )
+    assert list_resp.status_code == 200
     statuses = {c["id"]: c["status"] for c in list_resp.json()}
     for cid in [c1["id"], c2["id"], c3["id"]]:
         assert statuses[cid] == "addressed"
@@ -388,6 +388,7 @@ async def test_session_list_includes_comments_fingerprint(
 
     # After adding: count=1 and updated_at is set
     list_resp2 = await auth_client.get("/v1/sessions", headers=headers)
+    assert list_resp2.status_code == 200
     items2 = list_resp2.json()["data"]
     target2 = [s for s in items2 if s["id"] == session_id]
     assert len(target2) == 1
@@ -396,7 +397,7 @@ async def test_session_list_includes_comments_fingerprint(
     assert target2[0]["comments_updated_at"] == comment["updated_at"]
 
     # Add a second comment and verify count bumps
-    await auth_client.post(
+    add2_resp = await auth_client.post(
         f"/v1/sessions/{session_id}/comments",
         json={
             "path": "src/main.py",
@@ -406,7 +407,10 @@ async def test_session_list_includes_comments_fingerprint(
         },
         headers=headers,
     )
+    assert add2_resp.status_code == 200
+
     list_resp3 = await auth_client.get("/v1/sessions", headers=headers)
+    assert list_resp3.status_code == 200
     items3 = list_resp3.json()["data"]
     target3 = [s for s in items3 if s["id"] == session_id]
     assert target3[0]["comments_count"] == 2
