@@ -4,9 +4,8 @@ name: Fork e2e mirror
 # fork-e2e/pr-N branch so e2e runs there as a `push` (with secrets). It's a pure
 # git-ref update via a GitHub App token (refs pushed by the default GITHUB_TOKEN
 # don't trigger workflows); it never checks out or runs fork code. Gated by
-# should-mirror.sh + the Fork Security Scan. Triggers: pull_request_target
-# (open/sync/reopen, + close cleanup), pull_request_review (approval), and
-# workflow_dispatch (maintainer manual trigger by PR number).
+# should-mirror.sh + the Fork Security Scan. pull_request_review is included so a
+# maintainer's approval mirrors immediately, not only on the PR's next push.
 #
 # leak-scan-allow: pull_request_target
 on:
@@ -14,24 +13,19 @@ on:
     types: [opened, synchronize, reopened, closed]
   pull_request_review:
     types: [submitted]
-  workflow_dispatch:
-    inputs:
-      pr:
-        description: "PR number to (re-)evaluate and mirror"
-        required: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: fork-e2e-mirror-${{ github.event.pull_request.number || github.event.inputs.pr }}
+  group: fork-e2e-mirror-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:
   mirror:
     name: mirror
-    # Maintainer dispatch, or any fork PR event (same-repo PRs run e2e directly).
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.fork }}
+    # Fork PRs only -- same-repo PRs run e2e directly via `pull_request`.
+    if: ${{ github.event.pull_request.head.repo.fork }}
     permissions:
       contents: read
       pull-requests: read
@@ -41,6 +35,10 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+      MIRROR_BRANCH: fork-e2e/pr-${{ github.event.pull_request.number }}
     steps:
       - name: Check out gate scripts from main
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -49,89 +47,45 @@ jobs:
           sparse-checkout: .github/scripts
           persist-credentials: false
 
-      - name: Check App secret availability
-        id: secret
-        # A fork pull_request_review may not carry secrets; gate the run on the
-        # App key being present (boolean only) so it skips cleanly, not fails.
-        env:
-          HAS_KEY: ${{ secrets.FORK_E2E_APP_PRIVATE_KEY != '' }}
-        run: |
-          echo "has=$HAS_KEY" >> "$GITHUB_OUTPUT"
-          echo "App secret on '${{ github.event_name }}': $HAS_KEY"
-
-      - name: Resolve PR context
-        id: ctx
-        if: ${{ steps.secret.outputs.has == 'true' }}
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            PR="${{ github.event.inputs.pr }}"
-            RESP=$(gh api "repos/$REPO/pulls/$PR" \
-              --jq '[.head.sha, .author_association, (.head.repo.fork | tostring)] | @tsv')
-            SHA=$(printf '%s' "$RESP" | cut -f1)
-            ASSOC=$(printf '%s' "$RESP" | cut -f2)
-            FORK=$(printf '%s' "$RESP" | cut -f3)
-            ACTION="dispatch"
-          else
-            PR="${{ github.event.pull_request.number }}"
-            SHA="${{ github.event.pull_request.head.sha }}"
-            ASSOC="${{ github.event.pull_request.author_association }}"
-            FORK="${{ github.event.pull_request.head.repo.fork }}"
-            ACTION="${{ github.event.action }}"
-          fi
-          {
-            echo "pr=$PR"; echo "sha=$SHA"; echo "assoc=$ASSOC"
-            echo "fork=$FORK"; echo "action=$ACTION"; echo "branch=fork-e2e/pr-$PR"
-          } >> "$GITHUB_OUTPUT"
-          echo "ctx: pr=$PR fork=$FORK assoc=$ASSOC action=$ACTION"
-
       - name: Mint mirror App token
         id: app-token
         # App token, not GITHUB_TOKEN: its pushes DO trigger the downstream e2e.
-        if: ${{ steps.secret.outputs.has == 'true' && steps.ctx.outputs.fork == 'true' }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           app-id: ${{ vars.FORK_E2E_APP_ID }}
           private-key: ${{ secrets.FORK_E2E_APP_PRIVATE_KEY }}
 
       - name: Delete mirror branch on PR close
-        if: ${{ steps.ctx.outputs.fork == 'true' && steps.ctx.outputs.action == 'closed' }}
+        if: ${{ github.event.action == 'closed' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          BRANCH: ${{ steps.ctx.outputs.branch }}
         run: |
-          gh api -X DELETE "repos/$REPO/git/refs/heads/$BRANCH" >/dev/null 2>&1 \
-            && echo "Deleted $BRANCH" || echo "No $BRANCH to delete"
+          gh api -X DELETE "repos/$REPO/git/refs/heads/$MIRROR_BRANCH" >/dev/null 2>&1 \
+            && echo "Deleted $MIRROR_BRANCH" || echo "No $MIRROR_BRANCH to delete"
 
       - name: Load maintainers
         id: maintainers
-        if: ${{ steps.ctx.outputs.fork == 'true' && steps.ctx.outputs.action != 'closed' }}
+        if: ${{ github.event.action != 'closed' }}
         run: bash .github/scripts/merge-ready/load-maintainers.sh
 
       - name: Evaluate mirror gate
         id: gate
-        if: ${{ steps.ctx.outputs.fork == 'true' && steps.ctx.outputs.action != 'closed' }}
+        if: ${{ github.event.action != 'closed' }}
         env:
           MAINTAINERS: ${{ steps.maintainers.outputs.list }}
-          PR: ${{ steps.ctx.outputs.pr }}
-          AUTHOR_ASSOCIATION: ${{ steps.ctx.outputs.assoc }}
-          MIRROR_BRANCH: ${{ steps.ctx.outputs.branch }}
         run: bash .github/scripts/fork-e2e/should-mirror.sh
 
       - name: Security scan of PR diff
         id: scan
         # Diff TEXT only -- never checks out or runs fork code.
-        if: ${{ steps.ctx.outputs.fork == 'true' && steps.ctx.outputs.action != 'closed' }}
-        env:
-          PR: ${{ steps.ctx.outputs.pr }}
+        if: ${{ github.event.action != 'closed' }}
         run: |
           gh pr diff "$PR" --repo "$REPO" --patch > "$RUNNER_TEMP/pr.diff"
           python3 .github/scripts/fork-e2e/security_scan.py "$RUNNER_TEMP/pr.diff"
 
       - name: Check security-scan override label
         id: override
-        if: ${{ steps.ctx.outputs.fork == 'true' && steps.ctx.outputs.action != 'closed' }}
-        env:
-          PR: ${{ steps.ctx.outputs.pr }}
+        if: ${{ github.event.action != 'closed' }}
         run: |
           if gh pr view "$PR" --repo "$REPO" --json labels --jq '.labels[].name' \
                | grep -qx 'security-scan-override'; then
@@ -141,12 +95,11 @@ jobs:
           fi
 
       - name: Post Fork Security Scan status
-        if: ${{ steps.ctx.outputs.fork == 'true' && steps.ctx.outputs.action != 'closed' }}
+        if: ${{ github.event.action != 'closed' }}
         env:
           CLEAN: ${{ steps.scan.outputs.clean }}
           OVERRIDE: ${{ steps.override.outputs.override }}
           SUMMARY: ${{ steps.scan.outputs.summary }}  # fork text via env, not interpolated
-          SHA: ${{ steps.ctx.outputs.sha }}
         run: |
           if [[ "$CLEAN" == "true" ]]; then
             STATE=success; DESC="$SUMMARY"
@@ -155,26 +108,22 @@ jobs:
           else
             STATE=failure; DESC="$SUMMARY"
           fi
-          gh api "repos/$REPO/statuses/$SHA" \
+          gh api "repos/$REPO/statuses/$HEAD_SHA" \
             -f state="$STATE" -f context="Fork Security Scan" \
             -f description="${DESC:0:140}" >/dev/null
 
       - name: Mirror head SHA onto trusted branch
-        # Dispatch counts as the gate opening; the scan still gates.
         if: >-
-          steps.ctx.outputs.fork == 'true'
-          && steps.ctx.outputs.action != 'closed'
+          github.event.action != 'closed'
+          && steps.gate.outputs.mirror == 'true'
           && (steps.scan.outputs.clean == 'true' || steps.override.outputs.override == 'true')
-          && (steps.gate.outputs.mirror == 'true' || github.event_name == 'workflow_dispatch')
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          SHA: ${{ steps.ctx.outputs.sha }}
-          BRANCH: ${{ steps.ctx.outputs.branch }}
         run: |
-          if gh api "repos/$REPO/git/refs/heads/$BRANCH" >/dev/null 2>&1; then
-            gh api -X PATCH "repos/$REPO/git/refs/heads/$BRANCH" -f sha="$SHA" -F force=true >/dev/null
-            echo "Updated $BRANCH -> $SHA"
+          if gh api "repos/$REPO/git/refs/heads/$MIRROR_BRANCH" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$REPO/git/refs/heads/$MIRROR_BRANCH" -f sha="$HEAD_SHA" -F force=true >/dev/null
+            echo "Updated $MIRROR_BRANCH -> $HEAD_SHA"
           else
-            gh api -X POST "repos/$REPO/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$SHA" >/dev/null
-            echo "Created $BRANCH -> $SHA"
+            gh api -X POST "repos/$REPO/git/refs" -f ref="refs/heads/$MIRROR_BRANCH" -f sha="$HEAD_SHA" >/dev/null
+            echo "Created $MIRROR_BRANCH -> $HEAD_SHA"
           fi
