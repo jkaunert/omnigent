@@ -1755,9 +1755,7 @@ def test_get_openai_client_missing_databricks_sdk_raises_actionable_error(monkey
         _get_openai_async_client(profile=None, model="databricks-gpt-5")
 
 
-def test_get_openai_client_missing_databricks_sdk_with_env_falls_through(
-    monkeypatch, caplog
-):
+def test_get_openai_client_missing_databricks_sdk_with_env_falls_through(monkeypatch, caplog):
     """Missing ``databricks-sdk`` with OPENAI_API_KEY set falls through gracefully.
 
     When ``databricks-sdk`` is absent but env-var credentials are available,
@@ -1785,9 +1783,7 @@ def test_get_openai_client_missing_databricks_sdk_with_env_falls_through(
     with caplog.at_level(logging.WARNING):
         client = _get_openai_async_client(profile="dev", model="databricks-gpt-5")
 
-    assert any(
-        "databricks-sdk" in record.message for record in caplog.records
-    ), (
+    assert any("databricks-sdk" in record.message for record in caplog.records), (
         f"Expected a warning about missing databricks-sdk. "
         f"Got: {[r.message for r in caplog.records]}"
     )
