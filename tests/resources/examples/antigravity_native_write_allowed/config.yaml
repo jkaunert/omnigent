@@ -1,0 +1,26 @@
+# Antigravity native-tool policy-gating e2e bundle (ALLOW arm — positive control).
+#
+# Identical to ../antigravity_native_write_denied EXCEPT it carries NO deny
+# policy. The agent is asked to write the same sentinel file using its bundled
+# native `create_file` tool, and the file SHOULD appear on disk. This proves
+# the native tool can write when nothing blocks it — so when the DENY arm
+# leaves the file absent, the absence is attributable to the policy and not to
+# a model that simply never called the tool.
+#
+# Driven by tests/e2e/omnigent/test_per_harness_antigravity.py.
+spec_version: 1
+name: antigravity_native_write_allowed
+description: >-
+  Antigravity agent with NO write guardrail — the positive control proving the
+  native create_file tool writes to disk when policy does not block it.
+
+executor:
+  type: omnigent
+  config:
+    harness: antigravity
+    model: gemini-3.5-flash
+
+prompt: |
+  You are a coding agent. When the user asks you to create a file, use your
+  native create_file tool to write it at the exact path requested with the
+  exact content requested. Do not ask for confirmation.
