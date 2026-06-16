@@ -12,10 +12,10 @@
 # does not vouch for the contents of this one) and first-timers
 # (FIRST_TIME_CONTRIBUTOR / NONE).
 #
-# This is deliberately stricter than fork-e2e/should-mirror.sh, which trusts
-# CONTRIBUTOR: that gate only decides whether to spend a rate-limited test
-# token, whereas this gate decides whether to inspect for attacks, so it errs
-# toward scanning more.
+# This gate is independent of fork-e2e/should-mirror.sh: that one gates secret-
+# bearing e2e on the maintainer-applied `e2e-approved` label, whereas this gate
+# decides whether to inspect for attacks and so errs toward scanning more (it
+# scans returning CONTRIBUTORs that the label gate would not by itself run).
 #
 # author_association is computed by GitHub from the actor's relationship to the
 # repo at event time; it is not attacker-settable from PR contents.
@@ -85,9 +85,12 @@ skip_label_effective() {
 # Only PRs carry untrusted contributor code through the gate. Every other
 # trigger -- push to main / fork-e2e/** (the mirror branch only exists after a
 # returning-contributor / maintainer-approval gate), schedule, dispatch -- is a
-# trusted context, so proceed without scanning.
+# trusted context, so proceed without scanning. pull_request_review is included
+# because the fork-e2e mirror fires on a maintainer's approval, and that path
+# must still consult the head SHA's Security Scan (the review payload carries
+# the same pull_request + author_association fields).
 case "${EVENT_NAME:-}" in
-  pull_request | pull_request_target) ;;
+  pull_request | pull_request_target | pull_request_review) ;;
   *)
     emit false "non-PR event (${EVENT_NAME:-unknown}); trusted context"
     exit 0
