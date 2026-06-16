@@ -121,6 +121,7 @@ def _install_fake_copilot(
     turn_scripts: list[list[tuple[str, dict[str, Any]]]] | None = None,
     *,
     create_exc: Exception | None = None,
+    start_exc: Exception | None = None,
 ) -> dict[str, Any]:
     """Install a fake ``copilot`` module; return a capture dict.
 
@@ -143,6 +144,8 @@ def _install_fake_copilot(
 
         async def start(self) -> None:
             state["started"] += 1
+            if start_exc is not None:
+                raise start_exc
 
         async def stop(self) -> None:
             state["client_closed"] += 1
@@ -492,3 +495,41 @@ async def test_ensure_session_failure_surfaces_executor_error(
     events = [e async for e in ex.run_turn([_user("hi")], [], "SYS")]
     errors = [e for e in events if isinstance(e, ExecutorError)]
     assert errors and "bad token" in errors[0].message
+
+
+@pytest.mark.asyncio
+async def test_start_failure_stops_client_no_orphan(monkeypatch: pytest.MonkeyPatch) -> None:
+    # client.start() spawns the bundled CLI subprocess before connecting; a
+    # start failure must still call client.stop() (via _safe_stop) so that
+    # subprocess is reaped, not orphaned.
+    state = _install_fake_copilot(monkeypatch, [], start_exc=RuntimeError("start blew up"))
+    ex = CopilotExecutor(github_token="gho_x")
+    events = [e async for e in ex.run_turn([_user("hi")], [], "SYS")]
+    errors = [e for e in events if isinstance(e, ExecutorError)]
+    assert errors and "start blew up" in errors[0].message
+    # The started client was stopped (subprocess reaped), not leaked.
+    assert state["started"] == 1
+    assert state["client_closed"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_error_after_partial_text_is_not_masked(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A SESSION_ERROR / MODEL_CALL_FAILURE after partial text streamed, with no
+    # successful final ASSISTANT_MESSAGE, must surface as an ExecutorError — not
+    # a clean TurnComplete carrying the partial text (which would mask the
+    # failure).
+    _install_fake_copilot(
+        monkeypatch,
+        [
+            [
+                _ev("ASSISTANT_MESSAGE_DELTA", deltaContent="partial..."),
+                _ev("MODEL_CALL_FAILURE", errorMessage="model call failed mid-stream"),
+            ]
+        ],
+    )
+    ex = CopilotExecutor(github_token="gho_x")
+    events = [e async for e in ex.run_turn([_user("hi")], [], "SYS")]
+    errors = [e for e in events if isinstance(e, ExecutorError)]
+    completes = [e for e in events if isinstance(e, TurnComplete)]
+    assert errors and "model call failed mid-stream" in errors[0].message
+    assert not completes  # the turn is failed, not reported complete

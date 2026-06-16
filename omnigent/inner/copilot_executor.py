@@ -21,6 +21,16 @@ handlers *in its own event loop* (``CopilotSession._execute_tool_and_respond``),
 so the bridged handler is a plain coroutine that ``await``\\s ``_tool_executor``
 directly — no ``run_coroutine_threadsafe`` hop.
 
+Known limitation — Copilot's **native** tools (its own ``create`` / ``view`` /
+``edit`` / ``bash``) run *inside* the SDK and never flow through Omnigent's
+bridged-tool dispatch, so (a) they are NOT gated by ``on:[tool_call]`` policies
+(e.g. ``blast_radius``) and (b) they leave no ``function_call`` item in the
+persisted transcript — only the streamed narration is recorded. This mirrors the
+cursor harness's built-in tools. Bridged ``sys_*`` tools ARE policy-gated and
+recorded. Don't rely on ``on:[tool_call]`` guardrails to constrain Copilot's
+built-in file/shell tools; gate at the LLM phase (``PHASE_LLM_REQUEST`` /
+``PHASE_LLM_RESPONSE``, which DO fire) or via the OS-env sandbox instead.
+
 Auth: a **GitHub token** that carries Copilot access — a fine-grained PAT with
 the "Copilot Requests" permission, or an OAuth token from the GitHub CLI (``gh``)
 / Copilot CLI app. Resolved from a spec ``api_key`` or the ambient
@@ -399,8 +409,13 @@ class CopilotExecutor(Executor):
             working_directory=cwd,
             log_level="error",
         )
-        await client.start()
         try:
+            # ``start()`` is inside the try: it spawns the bundled Copilot CLI
+            # subprocess *before* connecting/verifying, and the SDK's own error
+            # path re-raises without terminating that subprocess — only
+            # ``client.stop()`` reaps it. So a start failure (bad token, version
+            # skew) must still hit ``_safe_stop`` below, or it orphans the CLI.
+            await client.start()
             # ``append`` keeps Copilot's own operating instructions (how to use
             # its built-in tools) and layers the Omnigent agent's system prompt
             # on top — a ``replace`` would strip the tool-use guidance the model
@@ -595,7 +610,14 @@ class CopilotExecutor(Executor):
             if not send_task.done():
                 send_task.cancel()
 
-        if turn_error and not response_text:
+        # Surface a mid-turn error event (``SESSION_ERROR`` / ``MODEL_CALL_FAILURE``)
+        # whenever the turn did NOT produce a successful final message — even if
+        # some text streamed first. Reporting a failed turn as a clean
+        # ``TurnComplete`` with partial text would mask the failure (a turn that
+        # errored after partial output would look successful). A real final
+        # ASSISTANT_MESSAGE (``final_event`` set) means the SDK completed the turn,
+        # so a stray earlier event is not treated as fatal.
+        if turn_error and final_event is None:
             await self.close_session(session_key)
             yield ExecutorError(message=f"copilot-sdk run error: {turn_error}", retryable=True)
             return
