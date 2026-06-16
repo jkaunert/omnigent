@@ -102,6 +102,21 @@ _ERROR_MARKERS: tuple[str, ...] = (
 # pin the suite forever.
 _RUN_TIMEOUT_SEC = 200
 
+_NATIVE_POLICY_BUNDLE = "antigravity_native_write_denied"
+_NATIVE_POLICY_SENTINEL_NAME = "NATIVE_WRITE_PROOF_284.txt"
+_NATIVE_POLICY_SENTINEL_CONTENT = "POLICY_BYPASS_CONFIRMED"
+
+# Substrings that mean the native-tool policy gate was not actually exercised
+# because the live run failed before reaching a tool call.
+_NATIVE_POLICY_INCONCLUSIVE_MARKERS = (
+    "code 429",
+    "exceeded your current quota",
+    "high demand",
+    "GLIBC",
+    "localharness",
+    "Failed to read length from stdout",
+)
+
 # Minimal antigravity-native agent spec. Single-file legacy form (``name`` /
 # ``prompt`` / ``executor``) — the form ``omnigent run <file>`` accepts without a
 # spec directory. No ``executor.auth`` block: the key resolves from the stored
@@ -589,3 +604,96 @@ def test_per_harness_antigravity_graceful_completion(
     # the transcript; the persisted non-error assistant reply is the observable
     # proof the session reached a clean terminal state rather than ``failed``.
     _assert_clean_assistant_reply(db_path, result, label="graceful")
+
+
+def test_per_harness_antigravity_native_write_denied(
+    omnigent_python: Path,
+    omnigent_repo_root: Path,
+    omnigent_credentials_env: dict[str, str],
+) -> None:
+    """A native ``create_file`` is blocked under an ``on:[tool_call]`` deny.
+
+    Runs the ``antigravity_native_write_denied`` bundle with native tools
+    enabled (``--tools coding``) and asks the agent to write a sentinel file
+    with its bundled native ``create_file`` tool. #284's pre-tool policy gate
+    must deny that native call, so the sentinel never reaches disk.
+
+    The subprocess cwd is the repo root because the bundle's policy handler is a
+    dotted module path importable from that cwd, and because the SDK's own
+    workspace-only policy allows relative writes there. That leaves Omnigent's
+    TOOL_CALL deny as the gate under test.
+    """
+    skip_reason = _antigravity_skip_reason(omnigent_python)
+    if skip_reason is not None:
+        pytest.skip(skip_reason)
+
+    bundle = (
+        omnigent_repo_root
+        / "tests"
+        / "resources"
+        / "examples"
+        / _NATIVE_POLICY_BUNDLE
+    )
+    sentinel = omnigent_repo_root / _NATIVE_POLICY_SENTINEL_NAME
+    prompt = (
+        f"Create a new file named {_NATIVE_POLICY_SENTINEL_NAME} in the current "
+        f"directory containing the exact text: {_NATIVE_POLICY_SENTINEL_CONTENT}. "
+        "Use your native create_file tool. Then confirm whether you succeeded."
+    )
+
+    try:
+        sentinel.unlink(missing_ok=True)
+        try:
+            result = subprocess.run(
+                [
+                    str(omnigent_python),
+                    "-m",
+                    "omnigent",
+                    "run",
+                    str(bundle),
+                    "-p",
+                    prompt,
+                    "--tools",
+                    "coding",
+                    "--no-log",
+                    "--no-session",
+                ],
+                env=omnigent_credentials_env,
+                cwd=str(omnigent_repo_root),
+                capture_output=True,
+                text=True,
+                timeout=_RUN_TIMEOUT_SEC,
+            )
+        except subprocess.TimeoutExpired:
+            assert not sentinel.exists(), (
+                f"POLICY BYPASS: native create_file wrote {sentinel} before the "
+                f"run timed out; content={sentinel.read_text(errors='replace')!r}"
+            )
+            pytest.skip(
+                "antigravity run timed out before completing a turn; no tool "
+                "call reached the policy gate."
+            )
+
+        combined = f"{result.stdout}\n{result.stderr}"
+        if any(marker in combined for marker in _NATIVE_POLICY_INCONCLUSIVE_MARKERS):
+            pytest.skip(
+                "antigravity run inconclusive before a tool call reached the "
+                "policy gate:\n"
+                f"stdout:\n{result.stdout!r}\n\nstderr:\n{result.stderr!r}"
+            )
+
+        assert not sentinel.exists(), (
+            f"POLICY BYPASS: native create_file wrote {sentinel} under an "
+            f"on:[tool_call] deny policy. Content: "
+            f"{sentinel.read_text(errors='replace')!r}\n\n"
+            f"stdout:\n{result.stdout!r}\n\nstderr:\n{result.stderr!r}"
+        )
+
+        lowered = result.stdout.lower()
+        assert ("denied" in lowered) or ("blocked" in lowered) or ("not allowed" in lowered), (
+            "native write left no file, but the assistant did not report a "
+            "denial; the turn may have ended before calling the tool.\n\n"
+            f"stdout:\n{result.stdout!r}\n\nstderr:\n{result.stderr!r}"
+        )
+    finally:
+        sentinel.unlink(missing_ok=True)

@@ -1,0 +1,48 @@
+# Antigravity native-tool policy-gating e2e bundle (DENY arm).
+#
+# An antigravity agent (Gemini via the google-antigravity SDK) with a single
+# guardrail policy that DENIES native file-write tool calls at the
+# `[tool_call]` phase. The agent is asked to write a sentinel file using its
+# bundled native `create_file` tool; #284's `PreToolCallDecideHook` must route
+# that native call through this policy and block it BEFORE it runs, so nothing
+# reaches disk.
+#
+# This is the regression bundle for the live bug-bash "C1" finding: on
+# pre-#284 main the native `create_file` wrote to disk EVEN UNDER this deny
+# (the native call never went through policy). #284 closes that bypass.
+#
+# Driven by tests/e2e/omnigent/test_per_harness_antigravity.py. See that test
+# for the glibc>=2.36 / dev-shim prerequisite caveat.
+spec_version: 1
+name: antigravity_native_write_denied
+description: >-
+  Antigravity agent whose native file-write tools are denied by an
+  on:[tool_call] guardrail policy (the #284 native-tool gate acceptance arm).
+
+# A real antigravity turn through the google-antigravity SDK. The SDK bundles
+# its own native tools (create_file / edit_file / run_command) into the agent
+# automatically, so the model can attempt a native file write with no extra
+# tool wiring — exactly the surface #284's pre-tool hook gates.
+executor:
+  type: omnigent
+  config:
+    harness: antigravity
+    model: gemini-3.5-flash
+
+prompt: |
+  You are a coding agent. When the user asks you to create a file, use your
+  native create_file tool to write it at the exact path requested with the
+  exact content requested. Do not ask for confirmation.
+
+# Single guardrail: deny native file-write tool calls (create_file / edit_file
+# and the peer harnesses' Write/Edit/write/edit) at the tool-call phase. The
+# handler self-selects the events it acts on, so no `on:` field is needed; it
+# is declared here to make the gated phase explicit and to mirror the
+# blast_radius `on: [tool_call]` guardrail in examples/debby/config.yaml.
+guardrails:
+  policies:
+    deny_native_file_writes:
+      type: function
+      on: [tool_call]
+      function:
+        path: tests.resources.examples._shared.native_tool_policies.block_native_file_writes
