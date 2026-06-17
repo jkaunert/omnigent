@@ -10,9 +10,12 @@
 # list is used as fallback.
 #
 # Used by the issue triage workflow for P0/P1 auto-assignment.
-bbqiu server,runner
-daniellok-db harnesses,runner
-dhruv0811 server,policies
-PattaraS web-ui
-TomeHirata server,harnesses
-serena-ruan repr,policies
+bbqiu server,runner,harnesses
+daniellok-db server,runner,harnesses
+dhruv0811 server,runner,harnesses,policies
+fanzeyi server,runner,harnesses
+PattaraS server,runner,harnesses
+SabhyaC26 server,runner,harnesses
+TomeHirata server,runner,harnesses
+serena-ruan server,runner,harnesses,repr,policies
+hzub web-ui
