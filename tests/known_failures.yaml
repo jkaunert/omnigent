@@ -113,30 +113,6 @@ skips:
     cluster: terminal-d6
     mode: xfail
 
-  - id: tests/e2e/test_repl_approval_e2e.py::test_repl_refusal_shows_deny_sentinel
-    reason: "Pexpect timeout waiting for 'approval required' regex. Same REPL-pexpect timeout family as the earlier test_repl_* entries."
-    issue: 532
-    cluster: repl-pexpect-cli
-    mode: skip
-
-  - id: tests/e2e/test_repl_approval_e2e.py::test_repl_tool_call_approval_allows_tool_to_run
-    reason: "Same REPL approval pexpect-timeout family."
-    issue: 532
-    cluster: repl-pexpect-cli
-    mode: skip
-
-  - id: tests/e2e/test_repl_approval_e2e.py::test_repl_label_driven_ask_refuse_shows_sentinel
-    reason: "Same REPL approval pexpect-timeout family."
-    issue: 532
-    cluster: repl-pexpect-cli
-    mode: skip
-
-  - id: tests/e2e/test_repl_approval_e2e.py::test_repl_subagent_tool_call_ask_tunnels_to_root
-    reason: "Same REPL approval pexpect-timeout family."
-    issue: 532
-    cluster: repl-pexpect-cli
-    mode: skip
-
   - id: tests/e2e/test_sys_terminal_e2e.py::test_sys_terminal_persists_across_turns_e2e
     reason: "Server returns 500 on this test. Likely runner availability or model deployment issue, not narrowed."
     issue: 532
@@ -179,23 +155,6 @@ skips:
     cluster: async-dispatch-inbox-sse
     mode: skip
 
-  - id: tests/e2e/test_repl_approval_e2e.py::test_repl_tool_call_refusal_blocks_tool
-    reason: "Shard 0 bulk: REPL approval pexpect-timeout family (same as other test_repl_approval_e2e entries)."
-    issue: 532
-    cluster: repl-pexpect-cli
-    mode: skip
-
-  - id: tests/e2e/test_repl_approval_e2e.py::test_repl_subagent_ask_tunnels_approval_to_root
-    reason: "Shard 0 bulk: REPL approval pexpect-timeout family."
-    issue: 532
-    cluster: repl-pexpect-cli
-    mode: skip
-
-  - id: tests/e2e/test_repl_approval_e2e.py::test_repl_tool_result_ask_approve_surfaces_tool_output
-    reason: "Shard 0 bulk: REPL approval pexpect-timeout family."
-    issue: 532
-    cluster: repl-pexpect-cli
-    mode: skip
   - id: tests/e2e/test_sandbox_dependencies.py::test_pip_install_and_use_package
     reason: "The repo's uv-managed .venv doesn't expose `python -m pip`, so the agent's `pip install cowsay` errors with 'no module named pip' and the cowsay assertion fails. Dispatch path is correct (agent reaches sys_os_shell and surfaces the env failure as a real tool result); the env assumption is broken. Fix needs `python3 -m ensurepip` in the sandbox setup or a switch to `uv pip install`. The npm sibling test passes — node has no equivalent issue."
     issue: 532
@@ -292,23 +251,6 @@ skips:
     cluster: policy-guardrails
     mode: skip
 
-  - id: tests/e2e/test_repl_approval_e2e.py::test_repl_approve_always_caches_for_later_turns
-    reason: "Shard 1 bulk: REPL approval pexpect-timeout family."
-    issue: 532
-    cluster: repl-pexpect-cli
-    mode: skip
-
-  - id: tests/e2e/test_repl_approval_e2e.py::test_repl_label_driven_ask_approves
-    reason: "Shard 1 bulk: REPL approval pexpect-timeout family."
-    issue: 532
-    cluster: repl-pexpect-cli
-    mode: skip
-
-  - id: tests/e2e/test_repl_approval_e2e.py::test_repl_tool_result_ask_refuse_replaces_output
-    reason: "Shard 1 bulk: REPL approval pexpect-timeout family."
-    issue: 532
-    cluster: repl-pexpect-cli
-    mode: skip
   - id: tests/e2e/test_sys_async_inbox_e2e.py::test_sys_call_async_dispatch_marker_reaches_llm_e2e
     reason: "Shard 1 bulk: sys async-inbox marker delivery."
     issue: 532
@@ -349,18 +291,6 @@ skips:
 
   - id: tests/e2e/omnigent/test_run_omnigent_rate_limit_approval.py::test_run_omnigent_rate_limit_approval_round_trip
     reason: "Shard 3 bulk: pexpect timeout waiting for 'approval required'; hung the whole pytest process under single-worker thread-timeout."
-    issue: 532
-    cluster: repl-pexpect-cli
-    mode: skip
-
-  - id: tests/e2e/test_repl_approval_e2e.py::test_repl_single_approval_allows_llm_response
-    reason: "Shard 3 bulk: REPL approval pexpect family."
-    issue: 532
-    cluster: repl-pexpect-cli
-    mode: skip
-
-  - id: tests/e2e/test_repl_approval_e2e.py::test_repl_two_turns_fires_one_approval_per_turn
-    reason: "Shard 3 bulk: REPL approval pexpect family."
     issue: 532
     cluster: repl-pexpect-cli
     mode: skip
@@ -413,12 +343,6 @@ skips:
     cluster: policy-guardrails
     mode: skip
 
-  - id: tests/e2e/test_repl_approval_e2e.py::test_repl_output_ask_approve_surfaces_llm_reply
-    reason: "Shard 3 bulk: REPL output ask-approve family."
-    issue: 532
-    cluster: repl-pexpect-cli
-    mode: skip
-
   - id: tests/e2e/omnigent/test_run_omnigent_os_env_inherit.py::test_run_omnigent_propagates_os_env_inherit_to_spawned_worker[codex]
     reason: "Shard 3 bulk: os_env propagation, codex variant. Same #426 family."
     issue: 426
@@ -435,11 +359,6 @@ skips:
     reason: "Shard 3 bulk: async-tool failure surfacing."
     issue: 532
     cluster: async-dispatch-inbox-sse
-    mode: skip
-  - id: tests/e2e/test_repl_approval_e2e.py::test_repl_output_ask_refuse_replaces_reply_with_sentinel
-    reason: "Shard 3 bulk: REPL output ask-refuse family."
-    issue: 532
-    cluster: repl-pexpect-cli
     mode: skip
   - id: tests/e2e/omnigent/test_run_omnigent_example_agents.py::test_run_omnigent_example_yaml[agent_with_tools_calculate]
     reason: "Shard 3 bulk: run_omnigent example-yaml agent_with_tools_calculate."

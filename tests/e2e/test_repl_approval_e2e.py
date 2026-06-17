@@ -59,6 +59,24 @@ _SUBAGENT_TOOL_GATE_DIR = _FIXTURES_DIR / "e2e-subagent-tool-gate"
 # finds them most of the time but is flaky on split sequences.
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
+# The visible input-prompt glyph the REPL re-renders once
+# prompt_toolkit's input widget is armed and ready to accept a
+# submission. Matching it AFTER the welcome banner is the fix for
+# the dropped-first-send race: the welcome block (agent name) is
+# painted by the boot path BEFORE the prompt-toolkit application is
+# focused, so a ``send()`` issued the instant the welcome text
+# appears lands in a not-yet-live input and is silently dropped —
+# the turn never starts and every downstream ``expect`` times out.
+# ``❯`` sits mid-left in the layout, so unlike the far-right
+# ``state:`` toolbar badge (which wraps/truncates at the screen edge
+# depending on the agent-name length, e.g. ``state: sleepi\rn``) it
+# is width-independent and survives PTY rendering. This mirrors the
+# merged REPL smoke / Ctrl+C e2e tests, which sync on the same ``❯``
+# prompt rather than the removed ``You>`` / ``state:`` markers.
+_PROMPT_READY = "❯"
+_RUNNING_MARKER = "working"
+_TURN_SETTLED = r"state:\s*s|ready\s+/help"
+
 
 def _strip_ansi(text: str) -> str:
     """
@@ -126,23 +144,36 @@ def _wait_for_prompt_ready(
     welcome_pattern: str = "ask.demo",
 ) -> None:
     """
-    Wait until the REPL is ready for input.
+    Wait until the REPL is actually ready to accept a submission.
 
-    ``omnigent chat <path>`` starts a local server, waits for
-    health, then launches the REPL. The welcome block
-    (TimedFormatter renders the agent name with dashes →
-    spaces) is the signal the prompt is live. Using a
-    generous timeout — agent upload + DBOS boot add latency
-    on cold starts.
+    ``omnigent run <path>`` starts a local server, waits for
+    health, then launches the REPL. Two synchronization points,
+    in order:
+
+    1. The welcome block — ``TimedFormatter`` renders the agent
+       name (dashes → spaces), so ``welcome_pattern`` proves the
+       right agent booted. But the welcome text is painted by the
+       boot path BEFORE prompt_toolkit focuses its input widget,
+       so matching it alone is NOT sufficient: a ``send()`` issued
+       the instant it appears races the widget and is dropped.
+    2. The ``❯`` input prompt — re-rendered once the widget is
+       armed. Waiting for it after the welcome closes the
+       dropped-first-send race that made every approval test time
+       out at the first ``approval required`` expect.
+
+    Using a generous timeout — agent upload + DBOS boot add
+    latency on cold starts.
 
     :param child: Active pexpect child.
-    :param timeout: Max seconds to wait.
+    :param timeout: Max seconds to wait for EACH of the two
+        synchronization points.
     :param welcome_pattern: Regex pattern to match in the
         welcome block. Defaults to ``"ask.demo"`` (for the
         ``ask-demo`` fixture); pass a different pattern for
         other fixtures.
     """
     child.expect(welcome_pattern, timeout=timeout)
+    child.expect(_PROMPT_READY, timeout=timeout)
 
 
 def _read_pending(child: Any, seconds: float = 0.2) -> str:
@@ -160,6 +191,40 @@ def _read_pending(child: Any, seconds: float = 0.2) -> str:
     if isinstance(captured, bytes):
         captured = captured.decode("utf-8", errors="replace")
     return _strip_ansi(captured)
+
+
+def _completed_turn_text(child: Any, timeout: int) -> str:
+    """Wait for a running turn to settle and return stripped output."""
+    child.expect(_RUNNING_MARKER, timeout=timeout)
+    running_frame = child.before or ""
+    child.expect(_TURN_SETTLED, timeout=timeout)
+    captured = running_frame + (child.before or "") + (child.after or "")
+    if isinstance(captured, bytes):
+        captured = captured.decode("utf-8", errors="replace")
+    return _strip_ansi(captured)
+
+
+def _assistant_turn_text(child: Any, timeout: int) -> str:
+    """Wait for turn completion and assert assistant output rendered."""
+    captured = _completed_turn_text(child, timeout=timeout)
+    _assert_assistant_reply_rendered(captured, "turn completion")
+    return captured
+
+
+def _deny_turn_text(child: Any, timeout: int) -> str:
+    """Wait for the policy-deny sentinel and return stripped turn output."""
+    captured = _completed_turn_text(child, timeout=timeout)
+    assert "Denied by policy" in captured, (
+        f"DENY sentinel did not render after refusal.\nCaptured:\n{captured[:1500]}"
+    )
+    return captured
+
+
+def _assert_assistant_reply_rendered(text: str, context: str) -> None:
+    """Assert the prompt-toolkit assistant header rendered for a real reply."""
+    assert "◆" in text, (
+        f"No assistant reply (◆ header) appeared after {context}.\nCaptured:\n{text[:1500]}"
+    )
 
 
 def test_repl_single_approval_allows_llm_response(
@@ -220,18 +285,13 @@ def test_repl_single_approval_allows_llm_response(
         # (sanity on the main-loop routing).
         child.expect("approved", timeout=5)
 
-        # Now expect the LLM's actual reply. gpt-4o against
-        # the ask-demo AGENTS.md should produce a short
-        # greeting ("Hi", "Hello", etc.). We assert on a
-        # minimal substring that any reasonable reply
-        # contains — the test isn't asserting what the model
-        # says, only that SOMETHING of non-trivial length
-        # arrived after approval.
-        child.expect(pexpect.TIMEOUT, timeout=8)
-        buffered = _read_pending(child, seconds=2.0)
-        # Drain a little more in case the response is still
-        # streaming in chunks.
-        buffered += _read_pending(child, seconds=3.0)
+        # Now wait for the LLM's actual reply to fully land. The
+        # elapsed-time label (``<n>.<n>s``) is rendered by
+        # ``TimedFormatter.format_response_end`` ONLY when a
+        # response actually completes — an errored turn renders an
+        # error panel and never paints it — so syncing on it is
+        # itself a "the turn produced a real reply" signal.
+        buffered = _assistant_turn_text(child, timeout=30)
 
         # Exactly one approval banner — regression guard for
         # the "three approvals for one message" bug.
@@ -246,13 +306,15 @@ def test_repl_single_approval_allows_llm_response(
             "`_enforce_input_policies` re-firing on same message?\n"
             f"Buffer snippet:\n{buffered[:800]}"
         )
-        # The agent replied with some text. We don't know the
-        # exact wording, but the AGENTS.md asks for a brief
-        # greeting, so any reasonable reply contains some
-        # letters after the approval.
-        assert re.search(r"[A-Za-z]{3,}", buffered), (
-            f"No LLM response text appeared after approval.\nBuffer snippet:\n{buffered[:800]}"
-        )
+        # The agent replied with real assistant text. The ``◆``
+        # diamond is the formatter's assistant-message header
+        # (``_DiamondMarkdown`` / ``◆ <model>``) — committed to the
+        # transcript ONLY when the model returns text, and never on
+        # the user-prompt echo (``❯``) or an error panel. Asserting
+        # it (instead of a bare ``[A-Za-z]{3,}`` substring, which an
+        # error box's "inner executor error" prose also satisfies)
+        # keeps the "approval surfaces the LLM reply" tooth.
+        _assert_assistant_reply_rendered(buffered, "approval")
     finally:
         # Best-effort clean shutdown — /quit is the REPL's
         # documented exit command, but if it's stuck we fall
@@ -355,7 +417,7 @@ def test_repl_two_turns_fires_one_approval_per_turn(
         child.expect("approved", timeout=5)
         # Wait for the turn to fully land — the stream-done
         # elapsed-time label is the cleanest signal.
-        child.expect(r"\d+\.\d+s", timeout=30)
+        _assistant_turn_text(child, timeout=30)
 
         # Drain anything queued so the next expect starts
         # from a clean slate. Generous wait because the REPL
@@ -386,10 +448,19 @@ def test_repl_two_turns_fires_one_approval_per_turn(
             "may have regressed.\n"
             f"Tail captured (ANSI-stripped):\n{banner_tail[:800]}"
         )
-        # And the banner MUST NOT show 'Hello' as its preview —
-        # that would be the historical-message regression.
-        assert "preview: Hello" not in banner_tail, (
-            "Turn 2's approval is previewing the prior turn's 'Hello' — "
+        # And turn 2's banner window MUST NOT contain the prior
+        # turn's 'Hello' — that would be the historical-message
+        # regression (a second banner previewing the turn-1
+        # message). The preview now renders the gated content as a
+        # JSON message object (``preview: {"role": "user",
+        # "content": [{"type": "input_text", "text": "kk"}]}``), so
+        # the old ``"preview: Hello"`` literal could never match the
+        # current format and silently caught nothing. ``banner_tail``
+        # is drained only AFTER turn 2's ``approval required``, so
+        # turn 1's already-consumed 'Hello' cannot leak in — any
+        # 'Hello' here is a re-fired historical ASK.
+        assert "Hello" not in banner_tail, (
+            "Turn 2's approval window previewed the prior turn's 'Hello' — "
             "`_enforce_input_policies` re-firing on historical messages.\n"
             f"Tail:\n{banner_tail[:800]}"
         )
@@ -397,7 +468,7 @@ def test_repl_two_turns_fires_one_approval_per_turn(
         # Approve and confirm one-and-done.
         child.send("y" + "\r")
         child.expect("approved", timeout=5)
-        child.expect(r"\d+\.\d+s", timeout=30)
+        _assistant_turn_text(child, timeout=30)
 
         # Final sweep: no extra approval banners after the
         # two we expected.
@@ -460,7 +531,7 @@ def test_repl_approve_always_caches_for_later_turns(
         # Echo line confirms the REPL parsed "a" as
         # APPROVE_ALWAYS, not as a generic non-"y" refusal.
         child.expect("approved always", timeout=5)
-        child.expect(r"\d+\.\d+s", timeout=30)
+        _assistant_turn_text(child, timeout=30)
 
         # Drain between turns so the next buffer is clean.
         _read_pending(child, seconds=1.5)
@@ -473,11 +544,7 @@ def test_repl_approve_always_caches_for_later_turns(
         # output — banner (if any) + auto-approved line (if
         # any) + LLM response + elapsed-time prefix.
         child.send("follow up please" + "\r")
-        child.expect(r"\d+\.\d+s", timeout=45)
-        turn_two_raw = child.before or ""
-        if isinstance(turn_two_raw, bytes):
-            turn_two_raw = turn_two_raw.decode("utf-8", errors="replace")
-        turn_two = _strip_ansi(turn_two_raw)
+        turn_two = _assistant_turn_text(child, timeout=45)
 
         assert "auto-approved" in turn_two, (
             "Turn 2 did not render the auto-approve audit line.\n"
@@ -556,17 +623,14 @@ def test_repl_tool_call_approval_allows_tool_to_run(
         child.send("y" + "\r")
         child.expect("approved", timeout=5)
         # Wait for turn completion (elapsed-time marker).
-        child.expect(r"\d+\.\d+s", timeout=45)
-        full_turn = child.before or ""
-        if isinstance(full_turn, bytes):
-            full_turn = full_turn.decode("utf-8", errors="replace")
-        full_turn = _strip_ansi(full_turn)
+        full_turn = _assistant_turn_text(child, timeout=45)
         # The echo tool runs; its output prefix 'echo:' should
         # reach the LLM's reply (the AGENTS.md tells it to
         # include the tool's output).
         assert "echo:" in full_turn or "testing123" in full_turn, (
             f"Tool output did not make it into the LLM's reply.\nCaptured:\n{full_turn[:1500]}"
         )
+        _assert_assistant_reply_rendered(full_turn, "TOOL_CALL approval")
     finally:
         try:
             child.send("/quit" + "\r")
@@ -611,11 +675,7 @@ def test_repl_tool_call_refusal_blocks_tool(
         # the blocked sentinel as the tool output, then
         # either reports the denial or stops. Elapsed-time
         # marker signals the turn ended.
-        child.expect(r"\d+\.\d+s", timeout=60)
-        full_turn = child.before or ""
-        if isinstance(full_turn, bytes):
-            full_turn = full_turn.decode("utf-8", errors="replace")
-        full_turn = _strip_ansi(full_turn)
+        full_turn = _deny_turn_text(child, timeout=60)
         # The sentinel must appear in the tool output path —
         # this is the regression guard for the pre-persist
         # ordering invariant.
@@ -660,10 +720,10 @@ def test_repl_subagent_ask_tunnels_approval_to_root(
       ``root_task_id``-based tunneling for the synthetic
       function_call works exactly like for client-side
       tool calls.
-    - The banner's phase must be ``input`` — the sub-agent's
+    - The banner's phase must be ``request`` — the sub-agent's
       gate, not the parent's. Both the policy_name and the
       phase field come from the SUB-AGENT's spec, so
-      matching ``worker_input_gate`` + ``input`` on the
+      matching ``worker_input_gate`` + ``request`` on the
       banner proves the right engine fired.
     - After approving, the parent's reply must exist —
       proves the wake path unblocks the sub-agent, its LLM
@@ -690,13 +750,18 @@ def test_repl_subagent_ask_tunnels_approval_to_root(
         # spawn + sub-agent boot fires first.
         child.expect("approval required", timeout=60)
         banner_tail = _read_pending(child, seconds=1.5)
-        # Phase must be INPUT (the sub-agent's INPUT site),
-        # policy_name must be the sub-agent's policy. These
-        # two together prove the routing path: the ASK came
-        # from the WORKER's engine, surfaced on the ROOT
-        # stream.
-        assert "input" in banner_tail, (
-            "Sub-agent ASK banner did not show phase=input — routing may "
+        # Phase must be the request (INPUT) phase — the
+        # sub-agent's INPUT site — and policy_name must be the
+        # sub-agent's policy. These two together prove the
+        # routing path: the ASK came from the WORKER's engine,
+        # surfaced on the ROOT stream. The banner renders the
+        # phase string verbatim from the policy's ``on_phases``
+        # entry, which for an INPUT-phase gate is ``request``
+        # (the worker fixture declares ``on_phases: [request]``);
+        # the old assertion looked for ``input``, a phase label
+        # the engine never emits on the banner.
+        assert "request" in banner_tail, (
+            "Sub-agent ASK banner did not show phase=request — routing may "
             "have attached the wrong phase or the ASK never tunneled "
             "to the root SSE stream.\n"
             f"Banner:\n{banner_tail[:800]}"
@@ -710,19 +775,15 @@ def test_repl_subagent_ask_tunnels_approval_to_root(
         child.expect("approved", timeout=5)
         # Let the full turn complete — sub-agent runs, returns,
         # parent summarizes, turn ends.
-        child.expect(r"\d+\.\d+s", timeout=90)
-        full_turn = child.before or ""
-        if isinstance(full_turn, bytes):
-            full_turn = full_turn.decode("utf-8", errors="replace")
-        full_turn = _strip_ansi(full_turn)
-        # Some LLM text arrived after the approval — the
-        # parent's final reply. Exact wording depends on the
-        # model, but we can assert at least a few words
-        # appeared (words with 3+ letters).
-        assert re.search(r"[A-Za-z]{3,}\s+[A-Za-z]{3,}", full_turn), (
-            "Parent never produced a final reply after sub-agent "
-            f"approval.\nCaptured:\n{full_turn[:1500]}"
-        )
+        full_turn = _assistant_turn_text(child, timeout=90)
+        # The parent produced a real assistant reply after the
+        # sub-agent approval. The ``◆`` diamond is the assistant
+        # message header (``◆ <model>``), committed only when the
+        # model returns text and never on an error panel — so it is
+        # the "parent composed a final response" tooth. (A bare
+        # ``[A-Za-z]{3,}`` word check would also pass on an error
+        # box's prose, hiding a broken wake path.)
+        _assert_assistant_reply_rendered(full_turn, "sub-agent approval")
     finally:
         try:
             child.send("/quit" + "\r")
@@ -788,7 +849,7 @@ def test_repl_label_driven_ask_approves(
         # (condition checks the pre-evaluation snapshot).
         child.send("hello BANANA_TRIGGER" + "\r")
         # The LLM still replies normally. Wait for turn end.
-        child.expect(r"\d+\.\d+s", timeout=45)
+        _assistant_turn_text(child, timeout=45)
         turn_one = child.before or ""
         if isinstance(turn_one, bytes):
             turn_one = turn_one.decode("utf-8", errors="replace")
@@ -816,7 +877,7 @@ def test_repl_label_driven_ask_approves(
         child.send("y" + "\r")
         child.expect("approved", timeout=5)
         # Turn 2 completes — LLM replies normally.
-        child.expect(r"\d+\.\d+s", timeout=45)
+        _assistant_turn_text(child, timeout=45)
     finally:
         try:
             child.send("/quit" + "\r")
@@ -856,7 +917,7 @@ def test_repl_label_driven_ask_refuse_shows_sentinel(
         )
         # Turn 1: taint.
         child.send("hi BANANA_TRIGGER" + "\r")
-        child.expect(r"\d+\.\d+s", timeout=45)
+        _assistant_turn_text(child, timeout=45)
         _read_pending(child, seconds=1.0)
 
         # Turn 2: ASK fires, user refuses.
@@ -864,11 +925,7 @@ def test_repl_label_driven_ask_refuse_shows_sentinel(
         child.expect("approval required", timeout=45)
         child.send("n" + "\r")
         child.expect("refused", timeout=5)
-        child.expect(r"\d+\.\d+s", timeout=45)
-        full_turn = child.before or ""
-        if isinstance(full_turn, bytes):
-            full_turn = full_turn.decode("utf-8", errors="replace")
-        full_turn = _strip_ansi(full_turn)
+        full_turn = _deny_turn_text(child, timeout=45)
         assert "Denied by policy" in full_turn, (
             "Refused label-gated ASK did not produce a DENY sentinel.\n"
             f"Captured:\n{full_turn[:1500]}"
@@ -932,17 +989,11 @@ def test_repl_output_ask_approve_surfaces_llm_reply(
         )
         child.send("y" + "\r")
         child.expect("approved", timeout=5)
-        child.expect(r"\d+\.\d+s", timeout=45)
-        full_turn = child.before or ""
-        if isinstance(full_turn, bytes):
-            full_turn = full_turn.decode("utf-8", errors="replace")
-        full_turn = _strip_ansi(full_turn)
-        # The LLM reply arrives AFTER approve — at least a
-        # real word (3+ letters) shows up somewhere. Short
-        # greetings like "Hi there!" are valid replies.
-        assert re.search(r"[A-Za-z]{3,}", full_turn), (
-            f"No LLM reply text appeared after OUTPUT approve.\nCaptured:\n{full_turn[:1500]}"
-        )
+        full_turn = _assistant_turn_text(child, timeout=45)
+        # The LLM reply arrives AFTER approve. The assistant
+        # diamond is stronger than an arbitrary word check, which
+        # could pass on error-panel prose instead of a rendered reply.
+        _assert_assistant_reply_rendered(full_turn, "OUTPUT approval")
         # Critical: OUTPUT approve must NOT surface a DENY
         # sentinel — regression guard for the helper
         # substituting text on the wrong branch.
@@ -991,11 +1042,7 @@ def test_repl_output_ask_refuse_replaces_reply_with_sentinel(
         child.expect("approval required", timeout=45)
         child.send("n" + "\r")
         child.expect("refused", timeout=5)
-        child.expect(r"\d+\.\d+s", timeout=45)
-        full_turn = child.before or ""
-        if isinstance(full_turn, bytes):
-            full_turn = full_turn.decode("utf-8", errors="replace")
-        full_turn = _strip_ansi(full_turn)
+        full_turn = _deny_turn_text(child, timeout=45)
         assert "Denied by policy" in full_turn, (
             f"OUTPUT refuse did not substitute the DENY sentinel.\nCaptured:\n{full_turn[:1500]}"
         )
@@ -1062,16 +1109,13 @@ def test_repl_tool_result_ask_approve_surfaces_tool_output(
         )
         child.send("y" + "\r")
         child.expect("approved", timeout=5)
-        child.expect(r"\d+\.\d+s", timeout=45)
-        full_turn = child.before or ""
-        if isinstance(full_turn, bytes):
-            full_turn = full_turn.decode("utf-8", errors="replace")
-        full_turn = _strip_ansi(full_turn)
+        full_turn = _assistant_turn_text(child, timeout=45)
         # Tool output must flow to the LLM and appear in reply.
         assert "pineapple" in full_turn.lower() or "echo" in full_turn, (
             "Tool output did not reach the LLM's reply after TOOL_RESULT "
             f"approve.\nCaptured:\n{full_turn[:1500]}"
         )
+        _assert_assistant_reply_rendered(full_turn, "TOOL_RESULT approval")
     finally:
         try:
             child.send("/quit" + "\r")
@@ -1114,11 +1158,7 @@ def test_repl_tool_result_ask_refuse_replaces_output(
         child.expect("approval required", timeout=45)
         child.send("n" + "\r")
         child.expect("refused", timeout=5)
-        child.expect(r"\d+\.\d+s", timeout=60)
-        full_turn = child.before or ""
-        if isinstance(full_turn, bytes):
-            full_turn = full_turn.decode("utf-8", errors="replace")
-        full_turn = _strip_ansi(full_turn)
+        full_turn = _deny_turn_text(child, timeout=60)
         assert "Denied by policy" in full_turn, (
             "TOOL_RESULT refuse did not produce a DENY sentinel on the "
             f"tool output.\nCaptured:\n{full_turn[:1500]}"
@@ -1188,17 +1228,10 @@ def test_repl_subagent_tool_call_ask_tunnels_to_root(
         )
         child.send("y" + "\r")
         child.expect("approved", timeout=5)
-        child.expect(r"\d+\.\d+s", timeout=120)
-        full_turn = child.before or ""
-        if isinstance(full_turn, bytes):
-            full_turn = full_turn.decode("utf-8", errors="replace")
-        full_turn = _strip_ansi(full_turn)
+        full_turn = _assistant_turn_text(child, timeout=120)
         # Parent's final reply should contain something from
         # the sub-agent's reply, which used the tool output.
-        assert re.search(r"[A-Za-z]{3,}\s+[A-Za-z]{3,}", full_turn), (
-            "Parent never produced a final reply after sub-agent "
-            f"TOOL_CALL approval.\nCaptured:\n{full_turn[:1500]}"
-        )
+        _assert_assistant_reply_rendered(full_turn, "sub-agent TOOL_CALL approval")
     finally:
         try:
             child.send("/quit" + "\r")
