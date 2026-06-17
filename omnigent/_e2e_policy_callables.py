@@ -29,7 +29,9 @@ from omnigent.spec.types import PolicyAction
 _SENTINEL = "BLOCK_THIS_TOKEN"
 
 
-_ALLOW: dict[str, Any] = {"result": "ALLOW"}
+def _allow() -> dict[str, Any]:
+    """Return a fresh ALLOW decision for test policy callables."""
+    return {"result": "ALLOW"}
 
 
 def block_on_sentinel(event: PolicyEvent) -> PolicyResponse:
@@ -47,7 +49,7 @@ def block_on_sentinel(event: PolicyEvent) -> PolicyResponse:
             "result": "DENY",
             "reason": f"contains reserved token {_SENTINEL!r}",
         }
-    return _ALLOW
+    return _allow()
 
 
 # Trigger token for the e2e-label-gate fixture. When a user
