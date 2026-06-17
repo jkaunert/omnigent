@@ -61,6 +61,8 @@ def test_clean_environment_emits_no_warning(caplog: pytest.LogCaptureFixture) ->
         "sqlite:////tmp/test.db",
         "sqlite:////tmp/foo/test.db",
         "sqlite:///foo_test.db",
+        "sqlite:////home/user/project/tests/session.db",
+        "sqlite:///tests/session.db",
         "sqlite:////var/data/my_test_store.db",
     ],
 )
@@ -73,6 +75,10 @@ def test_looks_like_test_db_accepts_throwaway_uris(db_uri: str) -> None:
     [
         "",
         "sqlite:////home/alice/.omnigent/chat.db",
+        "sqlite:///testing.db",
+        "sqlite:///test123.db",
+        "sqlite:///contest.db",
+        "sqlite:///latest.db",
         "postgresql://prod-host:5432/omnigent",
         "postgresql://prod-test-cluster/app",
         "postgres://h/latest",
@@ -83,8 +89,13 @@ def test_looks_like_test_db_rejects_real_uris(db_uri: str) -> None:
 
 
 @pytest.mark.parametrize("db_uri", ["", "   "])
-def test_empty_db_uri_skips_db_check(db_uri: str) -> None:
-    assert check_test_environment(env=_TEST_ENV, db_uri=db_uri, warn_only=False) == []
+def test_empty_db_uri_skips_db_check(
+    db_uri: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.DEBUG):
+        assert check_test_environment(env=_TEST_ENV, db_uri=db_uri, warn_only=False) == []
+    assert any("db_uri is blank; skipping DB check" in r.getMessage() for r in caplog.records)
 
 
 def test_looks_like_pytest_via_flag() -> None:
@@ -223,7 +234,22 @@ def test_escape_hatch_downgrades_hard_fail_to_warning(
             warn_only=False,
         )
     assert any("does not look like a test DB" in v for v in violations)
+    assert any("escape hatch active" in w for w in _guardrail_warnings(caplog.records))
     assert any("does not look like a test DB" in w for w in _guardrail_warnings(caplog.records))
+
+
+def test_escape_hatch_message_only_for_hard_fail_suppression(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    env = {**_TEST_ENV, "OMNIGENT_DISABLE_TEST_GUARDRAILS": "yes"}
+    with caplog.at_level(logging.WARNING):
+        check_test_environment(
+            env=env,
+            db_uri="sqlite:////home/alice/.omnigent/chat.db",
+            warn_only=True,
+        )
+        check_test_environment(env=env, db_uri=_TMP_DB, warn_only=False)
+    assert not any("escape hatch active" in r.getMessage() for r in caplog.records)
 
 
 def test_dev_port_base_url_hard_fails() -> None:

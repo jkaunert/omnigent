@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -104,8 +105,8 @@ def looks_like_test_db(db_uri: str) -> bool:
     """Return whether *db_uri* looks like a throwaway test database.
 
     Accepts in-memory SQLite, file SQLite under a system temp dir, or a
-    file-backed SQLite path with ``test`` as a delimited path/name token.
-    Everything else (a real ``~/.omnigent/chat.db``, a Postgres
+    file-backed SQLite path with ``test`` or ``tests`` as a delimited
+    path/name token. Everything else (a real ``~/.omnigent/chat.db``, a Postgres
     ``DATABASE_URL``) is treated as a non-test DB.
 
     :param db_uri: A SQLAlchemy-style URI, e.g. ``sqlite:///…`` .
@@ -152,15 +153,13 @@ def _sqlite_path(db_uri: str) -> Path | None:
 
 
 def _sqlite_path_has_test_token(path: Path) -> bool:
-    """Return whether a SQLite path has ``test`` as a delimited token."""
+    """Return whether a SQLite path has ``test``/``tests`` as a delimited token."""
     return any(_has_test_token(part) for part in path.parts)
 
 
 def _has_test_token(value: str) -> bool:
-    """Return whether ``test`` appears between non-alphanumeric separators."""
-    import re
-
-    return re.search(r"(?<![a-z0-9])test(?![a-z0-9])", value.lower()) is not None
+    """Return whether ``test``/``tests`` appears as a delimited token."""
+    return re.search(r"(?<![a-z0-9])tests?(?![a-z0-9])", value.lower()) is not None
 
 
 def _under_temp_dir(path: Path) -> bool:
@@ -241,6 +240,9 @@ def check_test_environment(
     ``OMNIGENT_DISABLE_TEST_GUARDRAILS`` is truthy, in which case
     violations are logged and returned instead.
 
+    The pytest session hook passes ``warn_only=False``; the ``True``
+    default is retained for ad-hoc/library callers.
+
     :param env: Environment mapping; defaults to ``os.environ``.
     :param db_uri: The resolved store DB URI for this run; empty values
         skip the DB check.
@@ -260,11 +262,14 @@ def check_test_environment(
             "(no PYTEST_CURRENT_TEST / OMNIGENT_TEST_MODE and pytest not imported)"
         )
 
-    if db_uri.strip() and not looks_like_test_db(db_uri):
-        violations.append(
-            f"db_uri {db_uri!r} does not look like a test DB "
-            "(expected an in-memory/tmp SQLite or a SQLite path with 'test')"
-        )
+    if db_uri.strip():
+        if not looks_like_test_db(db_uri):
+            violations.append(
+                f"db_uri {db_uri!r} does not look like a test DB "
+                "(expected an in-memory/tmp SQLite or a SQLite path with 'test'/'tests')"
+            )
+    else:
+        _logger.debug("%s db_uri is blank; skipping DB check", _WARN_PREFIX)
 
     if base_url is not None:
         reason = base_url_violation(base_url)
@@ -274,7 +279,14 @@ def check_test_environment(
     if not violations:
         return violations
 
-    if warn_only or _guardrails_disabled(env):
+    guardrails_disabled = _guardrails_disabled(env)
+    if warn_only or guardrails_disabled:
+        if not warn_only and guardrails_disabled:
+            _logger.warning(
+                "%s escape hatch active (%s) — hard-fail suppressed",
+                _WARN_PREFIX,
+                _DISABLE_GUARDRAILS_ENV_VAR,
+            )
         for reason in violations:
             _logger.warning("%s %s", _WARN_PREFIX, reason)
         return violations
