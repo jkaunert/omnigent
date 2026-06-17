@@ -21,7 +21,6 @@ capture.
 from __future__ import annotations
 
 import asyncio
-import shlex
 import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -39,6 +38,11 @@ pytestmark = pytest.mark.skipif(
 
 _MARKER_BUDGET_S = 5.0
 _POLL_INTERVAL_S = 0.1
+
+
+def _dewrap(screen: str) -> str:
+    """Join the pane's ``-x 80`` soft-wrapped rows so a needle straddling the wrap matches."""
+    return screen.replace("\n", "")
 
 
 def _bash_spec(cwd: Path, *, allow_cwd_override: bool = False) -> TerminalEnvSpec:
@@ -67,7 +71,7 @@ async def _read_until(
     waited = 0.0
     screen = ""
     while waited < budget_s:
-        screen = (await instance.read()).get("screen", "")
+        screen = _dewrap((await instance.read()).get("screen", ""))
         if needle in screen:
             return screen
         await asyncio.sleep(_POLL_INTERVAL_S)
@@ -127,7 +131,7 @@ async def test_working_directory_change_persists_across_sends(
     subdir.mkdir()
     instance = await reg.launch("conv_a", "bash", "s1", _bash_spec(tmp_path))
 
-    await instance.send(text=f"cd {shlex.quote(str(subdir))}", keys="Enter")
+    await instance.send(text="cd nested_dir", keys="Enter")
     await instance.send(text="pwd", keys="Enter")
 
     needle = _path_tail(tmp_path.name, "nested_dir")
