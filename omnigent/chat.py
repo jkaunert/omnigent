@@ -30,6 +30,7 @@ import yaml
 from omnigent_client import (
     OmnigentClient,
     SessionToolCallInfo,
+    StreamHooks,
     ToolCallable,
     ToolCallInfo,
     ToolHandler,
