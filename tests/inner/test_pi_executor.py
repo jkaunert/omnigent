@@ -2760,7 +2760,9 @@ def test_rpc_start_log_does_not_leak_system_prompt(monkeypatch, caplog) -> None:
     with caplog.at_level(logging.DEBUG, logger="omnigent.inner.pi_executor"):
         _run(_test())
 
-    spawn_logs = [r.getMessage() for r in caplog.records if "PiExecutor: spawning" in r.getMessage()]
+    spawn_logs = [
+        r.getMessage() for r in caplog.records if "PiExecutor: spawning" in r.getMessage()
+    ]
     assert spawn_logs, "expected a 'PiExecutor: spawning' debug log line"
     spawn_line = spawn_logs[0]
 
@@ -2830,7 +2832,9 @@ def test_run_turn_spawn_log_redacts_system_prompt_end_to_end(monkeypatch, caplog
     assert "--append-system-prompt" in argv
     assert argv[argv.index("--append-system-prompt") + 1] == test_prompt
 
-    spawn_logs = [r.getMessage() for r in caplog.records if "PiExecutor: spawning" in r.getMessage()]
+    spawn_logs = [
+        r.getMessage() for r in caplog.records if "PiExecutor: spawning" in r.getMessage()
+    ]
     assert spawn_logs, "expected a 'PiExecutor: spawning' debug log line"
     spawn_line = spawn_logs[0]
 
