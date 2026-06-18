@@ -824,6 +824,20 @@ async def _run_tunnel_from_env() -> None:
     binding_token = _runner_tunnel_binding_token_from_env()
     parent_pid = _runner_parent_pid_from_env()
     runner_id = get_stable_runner_id()
+
+    # Initialize MLflow tracing in the runner process so the
+    # ExecutorAdapter can emit spans for agent turns, tool calls,
+    # and LLM interactions. No-op when OTEL_EXPORTER_OTLP_ENDPOINT
+    # is unset or mlflow is not installed.
+    try:
+        from omnigent.runtime import telemetry
+
+        telemetry.init()
+    except ImportError:
+        _logger.debug("telemetry init skipped in runner (mlflow not installed)")
+    except Exception:  # noqa: BLE001 — best-effort; tracing failure must not crash the runner
+        _logger.debug("telemetry init failed in runner", exc_info=True)
+
     # Reuse the tunnel's token factory for the app's httpx client so the
     # runner resolves Databricks auth once at boot, not twice.
     app = create_app(auth_token_factory=auth_token_factory)
@@ -947,6 +961,8 @@ def _install_signal_handlers(
     if adopted_event is not None:
         from omnigent.runner.identity import RUNNER_ADOPT_SIGNAL
 
+        if RUNNER_ADOPT_SIGNAL is None:
+            return
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(RUNNER_ADOPT_SIGNAL, adopted_event.set)
 
