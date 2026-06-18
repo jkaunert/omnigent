@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import socket
 import unittest
@@ -27,6 +28,7 @@ from omnigent.inner.pi_executor import (
     _generate_extension_js,
     _pi_provider_for_model,
     _PiRpcSession,
+    _redact_argv_for_log,
     _sanitize_schema,
     _ToolServer,
 )
@@ -2657,6 +2659,81 @@ def test_rpc_start_spawns_with_exact_env(monkeypatch) -> None:
 
     # Exactly the executor-built env — nothing merged from os.environ.
     assert captured["env"] == {"PATH": "/usr/bin", "PI_CODING_AGENT_DIR": "/tmp/pi-agent"}
+
+
+def test_redact_argv_for_log_hides_system_prompt() -> None:
+    """``_redact_argv_for_log`` replaces the system-prompt value with a
+    length-only placeholder while leaving every other flag visible."""
+    secret = "SUPER SECRET SYSTEM PROMPT that must never hit the logs"
+    args = [
+        "/fake/pi",
+        "--mode",
+        "rpc",
+        "--no-session",
+        "--model",
+        "databricks/some-model",
+        "--append-system-prompt",
+        secret,
+        "--extension",
+        "/tmp/ext.js",
+    ]
+
+    redacted = _redact_argv_for_log(args)
+
+    rendered = " ".join(redacted)
+    assert secret not in rendered
+    assert f"[system prompt {len(secret)} chars]" in redacted
+    # Other flags stay visible for debugging.
+    assert "--mode" in redacted
+    assert "rpc" in redacted
+    assert "--model" in redacted
+    assert "databricks/some-model" in redacted
+    assert "--extension" in redacted
+    assert "/tmp/ext.js" in redacted
+
+
+def test_rpc_start_log_does_not_leak_system_prompt(monkeypatch, caplog) -> None:
+    """``_PiRpcSession.start`` must not write the full ``--append-system-prompt``
+    value to the debug log; it should be redacted to a length placeholder.
+
+    Guards F92: the old code logged ``" ".join(args)`` verbatim, leaking the
+    entire system prompt into debug logs.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    :param caplog: Pytest log-capture fixture.
+    """
+    from omnigent.inner import pi_executor as pi_mod
+
+    test_prompt = "TOP-SECRET-SYSTEM-PROMPT-DO-NOT-LOG-12345"
+
+    async def _fake_spawn(*args, **kwargs):
+        return _FakeProcess(stdout_lines=[], stderr_lines=[])
+
+    monkeypatch.setattr(pi_mod, "_create_subprocess_exec", _fake_spawn)
+
+    async def _test():
+        rpc = _PiRpcSession()
+        await rpc.start(
+            "/fake/pi",
+            env={"PATH": "/usr/bin"},
+            model="some-model",
+            system_prompt=test_prompt,
+            extra_args=["--extension", "/tmp/ext.js"],
+        )
+        await rpc.close()
+
+    with caplog.at_level(logging.DEBUG, logger="omnigent.inner.pi_executor"):
+        _run(_test())
+
+    spawn_logs = [r.getMessage() for r in caplog.records if "PiExecutor: spawning" in r.getMessage()]
+    assert spawn_logs, "expected a 'PiExecutor: spawning' debug log line"
+    spawn_line = spawn_logs[0]
+
+    assert test_prompt not in spawn_line
+    assert f"[system prompt {len(test_prompt)} chars]" in spawn_line
+    # Non-sensitive flags remain visible for debugging.
+    assert "--mode" in spawn_line
+    assert "--extension" in spawn_line
 
 
 def test_run_turn_spawn_env_has_no_host_secrets(monkeypatch) -> None:
