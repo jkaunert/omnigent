@@ -77,8 +77,9 @@ OMNIGENT_EXECUTOR_TYPE = "omnigent"
 # Derived from the single
 # :data:`~omnigent.runtime.harness_descriptors.HARNESS_DESCRIPTORS`
 # registration (canonical ids and their aliases). ``open-responses`` is a
-# descriptor too, so it stays in the allowlist; ``opencode-native`` joins
-# automatically. The conformance suite asserts this equals the descriptors.
+# descriptor too, so it stays in the allowlist; ``opencode-native`` and
+# ``cursor-native`` join automatically. The conformance suite asserts this
+# equals the descriptors.
 OMNIGENT_HARNESSES = frozenset(canonical_harness_ids())
 # User-facing aliases accepted in specs and normalized before runtime dispatch.
 OMNIGENT_HARNESS_ALIASES = frozenset(all_harness_aliases())

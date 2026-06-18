@@ -17,6 +17,7 @@ function stub(name: string) {
 
 vi.mock("@/components/icons/ClaudeIcon", () => ({ ClaudeIcon: stub("claude") }));
 vi.mock("@/components/icons/CodexIcon", () => ({ CodexIcon: stub("codex") }));
+vi.mock("@/components/icons/CursorIcon", () => ({ CursorIcon: stub("cursor") }));
 vi.mock("@/components/icons/NessieIcon", () => ({ NessieIcon: stub("nessie") }));
 vi.mock("@/components/icons/OpenCodeIcon", () => ({ OpenCodeIcon: stub("opencode") }));
 vi.mock("@/components/icons/PiIcon", () => ({ PiIcon: stub("pi") }));
@@ -50,6 +51,9 @@ describe("AgentCard icon selection", () => {
     { name: "opencode-native-ui", harness: "opencode-native", expected: "opencode" },
     { name: "claude-native-ui", harness: "claude-native", expected: "claude" },
     { name: "pi-native-ui", harness: "pi-native", expected: "pi" },
+    { name: "cursor-native-ui", harness: "cursor-native", expected: "cursor" },
+    // The SDK "cursor" harness also reads as Cursor via the harness fallback.
+    { name: "x", harness: "cursor", expected: "cursor" },
     { name: "x", harness: "claude-sdk", expected: "claude" },
     { name: "pi", harness: "pi", expected: "pi" },
     // The pi match is exact: a harness merely containing "pi" stays generic.

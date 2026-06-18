@@ -192,6 +192,7 @@ from omnigent.server.routes._host_worktree import CreatedWorktree
 from omnigent.server.schemas import (
     AgentObject,
     ChildSessionSummary,
+    CompletedEvent,
     ConversationDeleted,
     CreatedSessionResponse,
     ElicitationRequestEvent,
@@ -207,6 +208,7 @@ from omnigent.server.schemas import (
     PaginatedList,
     PermissionObject,
     PolicySummary,
+    ResponseObject,
     SandboxStatus,
     ServerStreamEvent,
     SessionAgentChangedEvent,
@@ -2350,7 +2352,11 @@ def _resolve_llm_model(conv: Conversation | None) -> str | None:
             agent.id, agent.bundle_location, expand_env=agent.session_id is None
         )
         return loaded.spec.llm.model if loaded.spec.llm else None
-    except (KeyError, AttributeError, ValueError, ImportError, OSError):
+    except (KeyError, AttributeError, ValueError, ImportError, OSError, RuntimeError):
+        # ``RuntimeError`` covers ``get_agent_cache()`` before the runtime is
+        # initialized: this is a best-effort display resolver (now also called
+        # on native cost-only broadcasts), so an uninitialized runtime must
+        # degrade to "model unknown" — the cost still records, just unattributed.
         return None
 
 
@@ -2830,14 +2836,32 @@ def _persist_native_cumulative_usage(
             + int(current.get("output_tokens", 0))
         )
 
-    # Resolve the model only when tokens are present — both the token-pricing
-    # branch and the per-model attribution below need it, and both are gated on
-    # tokens. Resolving lazily avoids calling ``_resolve_llm_model`` (which
-    # touches the runtime agent cache) on a cost-only broadcast. Computed once
-    # out of the pricing-only branch so attribution works even on an unpriced
-    # turn. The raw harness model id wins; falls back to the agent spec's model.
+    # Resolve the model for per-model attribution on any broadcast that carries
+    # tokens OR a priced cost — both the token-pricing branch and the per-model
+    # attribution below need it. A cost-only broadcast must resolve it too:
+    # claude-native forwards Claude Code's statusLine total (S) with NO token
+    # counts, so gating model resolution on tokens alone dropped that cost from
+    # ``by_model`` entirely — the per-model TOKEN USAGE view undercounted the
+    # session total by every native (sub-)agent's spend, while the flat
+    # ``total_cost_usd`` (and the Session-cost badge) still included it.
+    # Priority mirrors the relay path's ``_accumulate_session_usage``: the
+    # event's ``model`` (the statusLine's active model, forwarded alongside the
+    # cost) wins, then the session's ``model_override`` (the forwarder mirrors
+    # in-pane /model switches there), then the agent spec's static model.
+    # Computed once out of the pricing-only branch so attribution works even on
+    # an unpriced turn. (The agent-cache lookup in ``_resolve_llm_model`` is
+    # memoized, so resolving on cost-only polls is cheap.)
     has_tokens = cin is not None or cout is not None
-    model_name = (data.get("model") or _resolve_llm_model(conv)) if has_tokens else None
+    needs_model = has_tokens or cost is not None
+    model_name = (
+        (
+            data.get("model")
+            or (conv.model_override if conv and conv.model_override else None)
+            or _resolve_llm_model(conv)
+        )
+        if needs_model
+        else None
+    )
     if cost is not None:
         current["total_cost_usd"] = float(cost)
     elif has_tokens:
@@ -2861,8 +2885,9 @@ def _persist_native_cumulative_usage(
     # switch the current model absorbs the cumulative (splitting deferred —
     # keyed on the raw harness model id). Cost mirrors the flat
     # ``total_cost_usd`` so the per-model cost key is present iff priced.
-    # ``model_name`` is only set when tokens are present, so this is skipped
-    # for cost-only broadcasts (nothing to attribute per-model).
+    # ``model_name`` is set on token-bearing AND cost-bearing broadcasts, so a
+    # claude-native cost-only broadcast attributes its cumulative cost here too
+    # (token buckets stay absent — claude-native reports no token counts).
     if isinstance(model_name, str) and model_name:
         bucket = _model_usage_bucket(current, model_name)
         for key in _MODEL_TOKEN_KEYS:
@@ -9346,6 +9371,43 @@ def _publish_policy_deny(session_id: str, reason: str) -> None:
             "message_id": f"deny_{secrets.token_hex(8)}",
             "index": 0,
         },
+    )
+
+
+def _publish_input_deny_terminal(session_id: str, conv: Conversation, reason: str) -> None:
+    """
+    Publish a terminal ``response.completed`` for an INPUT-phase DENY.
+
+    The short-circuit never forwards to a runner, so no runner-relayed
+    terminal ``response.*`` event is emitted. SSE consumers that drive a
+    turn off the live-tail (the headless ``-p`` client,
+    :class:`omnigent_client.SessionsChat.send`) iterate until a
+    turn-terminal event arrives and would otherwise block forever. The
+    output carries the same sentinel text so the terminal-snapshot fallback
+    also surfaces the deny.
+
+    :param session_id: Session/conversation identifier.
+    :param conv: Conversation whose agent/model name tags the response.
+    :param reason: Human-readable deny reason from the policy verdict.
+    """
+    sentinel = f"{_DENY_SENTINEL_PREFIX}{reason}]"
+    response = ResponseObject(
+        id=f"deny_{secrets.token_hex(8)}",
+        status="completed",
+        model=conv.agent_id or "policy",
+        created_at=int(time.time()),
+        completed_at=int(time.time()),
+        output=[
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": sentinel}],
+            }
+        ],
+    )
+    session_stream.publish(
+        session_id,
+        CompletedEvent(type="response.completed", response=response).model_dump(exclude_none=True),
     )
 
 
@@ -16084,6 +16146,9 @@ def create_sessions_router(
                     conversation_store,
                     agent_store,
                 )
+                # Terminal response.completed before idle so live-tail
+                # consumers (the headless ``-p`` client) unblock.
+                _publish_input_deny_terminal(session_id, conv, reason)
                 _publish_status(session_id, "idle")
                 # Return the same shape the client expects from POST
                 # /events so postEvent doesn't throw on an unexpected
@@ -16111,6 +16176,8 @@ def create_sessions_router(
                     conversation_store,
                     agent_store,
                 )
+                # Terminal response.completed before idle (see message branch).
+                _publish_input_deny_terminal(session_id, conv, reason)
                 _publish_status(session_id, "idle")
                 return {"queued": False, "denied": True, "reason": reason}
         elif (

@@ -311,6 +311,33 @@ HARNESS_DESCRIPTORS: dict[str, HarnessDescriptor] = {
         supports_model_override=True,
         description="In-process Cursor SDK harness.",
     ),
+    "cursor-native": HarnessDescriptor(
+        id="cursor-native",
+        display_name="Cursor",
+        module="omnigent.inner.cursor_native_harness",
+        family="native-terminal",
+        native_aliases=("native-cursor",),
+        handles_tools_internally=True,
+        supports_enqueue=True,
+        supports_terminal_takeover=True,
+        # Native CLI override reaches the TUI at launch (is_native_harness →
+        # harness_supports_model_override is True for any native harness).
+        supports_model_override=True,
+        # Intentionally NO install_family_key / cli_binary: cursor-native is
+        # absent from ``_HARNESS_NAME_TO_KEY`` (cursor-agent ships via a curl
+        # installer and its auth lives under the ``cursor`` SDK family, not a
+        # native install-map entry), so it is not a cli-backed descriptor.
+        # cursor-agent gates its own tools inside its TUI — Omnigent does not
+        # intercept them, hence no permission API. See
+        # omnigent/inner/cursor_native_harness.py.
+        wrapper_agent_name="cursor-native-ui",
+        wrapper_label="cursor-native-ui",
+        terminal_name="cursor",
+        web_icon_kind="cursor",
+        web_sort_rank=40,
+        terminal_first=True,
+        description="Native Cursor TUI bridge (tmux).",
+    ),
     "antigravity": HarnessDescriptor(
         id="antigravity",
         display_name="Antigravity",

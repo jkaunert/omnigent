@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from omnigent._wrapper_labels import (
     CLAUDE_NATIVE_WRAPPER_VALUE,
     CODEX_NATIVE_WRAPPER_VALUE,
+    CURSOR_NATIVE_WRAPPER_VALUE,
     OPENCODE_NATIVE_WRAPPER_VALUE,
     PI_NATIVE_WRAPPER_VALUE,
     UI_MODE_LABEL_KEY,
@@ -76,11 +77,21 @@ OPENCODE_NATIVE_CODING_AGENT = NativeCodingAgent(
     subagent_wrapper_label="opencode-native-ui-subagent",
 )
 
+CURSOR_NATIVE_CODING_AGENT = NativeCodingAgent(
+    key="cursor",
+    display_name="Cursor",
+    agent_name="cursor-native-ui",
+    harness="cursor-native",
+    wrapper_label=CURSOR_NATIVE_WRAPPER_VALUE,
+    terminal_name="cursor",
+)
+
 NATIVE_CODING_AGENTS: tuple[NativeCodingAgent, ...] = (
     CLAUDE_NATIVE_CODING_AGENT,
     CODEX_NATIVE_CODING_AGENT,
     PI_NATIVE_CODING_AGENT,
     OPENCODE_NATIVE_CODING_AGENT,
+    CURSOR_NATIVE_CODING_AGENT,
 )
 
 _BY_AGENT_NAME = {agent.agent_name: agent for agent in NATIVE_CODING_AGENTS}

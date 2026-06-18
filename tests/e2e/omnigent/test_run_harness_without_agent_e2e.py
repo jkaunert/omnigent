@@ -193,6 +193,14 @@ def test_run_harness_live_matrix_covers_registered_coding_harnesses() -> None:
     not the Databricks gateway/profile this matrix uses — and its SDK
     launches a native binary needing a modern glibc, so it cannot round-trip
     through this gateway-backed matrix.
+
+    ``cursor-native`` is excluded for the union of both reasons above: like
+    the ``*-native`` harnesses it injects keys into a runner-managed tmux
+    pane backed by a bridge dir (set up by ``omnigent cursor``, not by
+    ``omnigent run --harness cursor-native``), and like ``cursor`` it drives
+    ``cursor-agent``, which talks only to Cursor's own backend and rejects
+    gateway model ids. Its live coverage is the gated row in
+    ``tests/e2e/omnigent/test_per_harness_cursor.py``.
     """
     expected_live_harnesses = set(OMNIGENT_HARNESSES).intersection(_HARNESS_MODULES) - {
         "claude-native",
@@ -200,6 +208,7 @@ def test_run_harness_live_matrix_covers_registered_coding_harnesses() -> None:
         "pi-native",
         "opencode-native",
         "cursor",
+        "cursor-native",
         "antigravity",
     }
     # The intersection above keeps this expectation tied to the actual

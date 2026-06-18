@@ -18,10 +18,12 @@ from omnigent.runtime.harness_descriptors import harness_alias_map, native_harne
 HARNESS_ALIASES: dict[str, str] = harness_alias_map()
 
 # Canonical native-CLI harness spellings (plus reversed ``native-<x>``
-# aliases). These harnesses type messages into a resident terminal process
-# and mirror their transcript back to Omnigent, so the runner must not
-# replay Omnigent history or treat a completed queue call as a full
-# in-process model turn. Derived from the descriptor registry.
+# aliases, e.g. ``native-claude`` / ``native-codex`` / ``native-cursor``).
+# These harnesses type messages into a resident terminal process and mirror
+# their transcript back to Omnigent, so the runner must not replay Omnigent
+# history or treat a completed queue call as a full in-process model turn.
+# Derived from the descriptor registry (claude/codex/pi/cursor-native plus
+# opencode-native).
 NATIVE_HARNESSES: frozenset[str] = native_harness_ids()
 
 
