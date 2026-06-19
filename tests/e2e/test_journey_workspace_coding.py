@@ -209,19 +209,23 @@ def test_terminal_coding_session_journey(
         f"error, sys_terminal_* tools may not be registered."
     )
 
-    # ── Step 3: Verify sys_terminal_read was called ──────────────────────
-    # The read captures what tmux rendered at that instant; ls output may
-    # not have flushed before the read call (a known tmux timing property).
-    # Assert the tool pipeline ran (launch → send → read) rather than
-    # asserting specific ls output content.
+    # ── Step 3: Verify sys_terminal_read output ──────────────────────────
     reads_step2 = _get_function_call_outputs(http_client, session_id, "sys_terminal_read")
-    assert len(reads_step2) >= 1, (
+    assert reads_step2, (
         f"sys_terminal_read was never called in the listing step; "
         f"session_id={session_id}. The agent may have ignored the prompt "
         f"or the tool wasn't on the schema."
     )
+    # Stronger: the ls -la output must be non-empty (at least a shell
+    # prompt or directory listing was captured by tmux).
+    combined_reads_step2 = " ".join(reads_step2)
+    assert combined_reads_step2.strip(), (
+        f"sys_terminal_read returned only empty strings after ls -la; "
+        f"session_id={session_id}. tmux may not have initialised properly."
+    )
 
     # ── Step 4: Ask agent to create a Python file ────────────────────────
+    reset_mock_llm(mock_llm_server_url)
     configure_mock_llm(
         mock_llm_server_url,
         [
@@ -275,6 +279,7 @@ def test_terminal_coding_session_journey(
     )
 
     # ── Step 5: Ask agent to read the file back with cat ─────────────────
+    reset_mock_llm(mock_llm_server_url)
     configure_mock_llm(
         mock_llm_server_url,
         [
@@ -351,6 +356,7 @@ def test_terminal_coding_session_journey(
 
     # ── Cleanup: remove the temp file ────────────────────────────────────
     # Best-effort cleanup; configure a mock reply and don't fail the test.
+    reset_mock_llm(mock_llm_server_url)
     configure_mock_llm(
         mock_llm_server_url,
         [

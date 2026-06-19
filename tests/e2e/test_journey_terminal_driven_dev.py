@@ -131,6 +131,7 @@ def test_terminal_multi_command_workflow(
 
     # ── Turn 1: launch terminal and echo hello_world ──────────
     # Mock: launch -> send echo hello_world -> read -> text reply.
+    reset_mock_llm(mock_llm_server_url)
     configure_mock_llm(
         mock_llm_server_url,
         [
@@ -192,15 +193,24 @@ def test_terminal_multi_command_workflow(
     )
 
     # Verify send and read were called (tool pipeline ran end-to-end).
-    # Content assertions on transient echo output are skipped here
-    # because tmux may not have flushed the output before the read call.
     sends_1 = _get_function_call_outputs(http_client, session_id, "sys_terminal_send")
     reads_1 = _get_function_call_outputs(http_client, session_id, "sys_terminal_read")
     assert sends_1, f"sys_terminal_send was never called in turn 1; session_id={session_id}."
     assert reads_1, f"sys_terminal_read was never called in turn 1; session_id={session_id}."
 
+    # Stronger output assertions: the read output must be non-empty and
+    # contain "hello_world" — proving the echo actually ran and tmux
+    # captured it before the read call completed.
+    combined_reads_1 = " ".join(reads_1)
+    assert "hello_world" in combined_reads_1, (
+        f"Expected 'hello_world' in sys_terminal_read output from turn 1, "
+        f"got reads_1={reads_1!r}. The echo may not have flushed before the "
+        f"read, or the terminal send did not execute the command."
+    )
+
     # ── Turn 2: echo goodbye_world ────────────────────────────
     # Mock: reuse existing terminal, send goodbye_world, read, reply.
+    reset_mock_llm(mock_llm_server_url)
     configure_mock_llm(
         mock_llm_server_url,
         [
@@ -245,8 +255,6 @@ def test_terminal_multi_command_workflow(
     )
 
     # Verify a second send and read were issued in turn 2.
-    # Content assertions on transient echo output are skipped
-    # because tmux may not have flushed output before the read.
     sends_2 = _get_function_call_outputs(http_client, session_id, "sys_terminal_send")
     reads_2 = _get_function_call_outputs(http_client, session_id, "sys_terminal_read")
     assert len(sends_2) >= 2, (
@@ -256,6 +264,15 @@ def test_terminal_multi_command_workflow(
     assert len(reads_2) >= 2, (
         f"Expected at least 2 sys_terminal_read calls across both turns; "
         f"got {len(reads_2)}. Turn 2 read may not have executed."
+    )
+
+    # Stronger output assertion: the combined reads across both turns must
+    # contain "goodbye_world" — proving the second echo ran and was captured.
+    combined_reads_2 = " ".join(reads_2)
+    assert "goodbye_world" in combined_reads_2, (
+        f"Expected 'goodbye_world' in sys_terminal_read outputs after turn 2, "
+        f"got reads_2={reads_2!r}. The echo may not have flushed before the "
+        f"read, or the terminal send did not execute the command."
     )
 
     # Soft check: the agent should have reused the terminal (only
@@ -327,6 +344,7 @@ def test_terminal_persists_across_turns(
 
     # ── Turn 1: create the file ───────────────────────────────
     # Mock: launch -> send echo "test content" > file -> read -> reply.
+    reset_mock_llm(mock_llm_server_url)
     configure_mock_llm(
         mock_llm_server_url,
         [
@@ -386,6 +404,7 @@ def test_terminal_persists_across_turns(
 
     # ── Turn 2: read the file ─────────────────────────────────
     # Mock: reuse terminal, send cat file, read, reply.
+    reset_mock_llm(mock_llm_server_url)
     configure_mock_llm(
         mock_llm_server_url,
         [
