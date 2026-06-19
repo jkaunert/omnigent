@@ -587,10 +587,11 @@ def test_host_death_kills_runners(
 # is covered by tests/server/integration/test_session_host_launch.py.
 
 
-@pytest.mark.skip(
+@pytest.mark.skipif(
+    not os.environ.get("OMNIGENT_E2E_CLAUDE_NATIVE"),
     reason=(
         "claude-native host-restart e2e requires real `claude` + `tmux` CLIs "
-        "with interactive OAuth login; cannot run against mock LLM"
+        "with interactive OAuth login; set OMNIGENT_E2E_CLAUDE_NATIVE=1 to enable"
     ),
 )
 def test_host_native_session_round_trips_after_runner_death(
