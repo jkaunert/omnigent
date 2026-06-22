@@ -451,7 +451,9 @@ def test_repl_single_approval_allows_llm_response(
     multiple ``⚠ approval required`` banners. Counting on
     the ANSI-stripped buffer is the regression guard.
     """
-    _configure_mock_text(mock_llm_server_url, ["Hi there! How can I help you today?"], match="approve-llm-resp")
+    _configure_mock_text(
+        mock_llm_server_url, ["Hi there! How can I help you today?"], match="approve-llm-resp"
+    )
     child = pexpect.spawn(
         ap_cli,
         ["run", str(_ASK_DEMO_DIR)],

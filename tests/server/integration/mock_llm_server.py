@@ -713,7 +713,6 @@ async def create_response(
     async with _state._lock:
         _state.request_count += 1
         _state.captured_requests.append(parsed)
-        model = parsed.get("model") if isinstance(parsed, dict) else None
         queue = _state.resolve_queue_for_request(parsed)
         qr = queue.next()
 
@@ -781,7 +780,6 @@ async def create_message(
     async with _state._lock:
         _state.request_count += 1
         _state.captured_requests.append(parsed)
-        model = parsed.get("model") if isinstance(parsed, dict) else None
         queue = _state.resolve_queue_for_request(parsed)
         qr = queue.next()
 
