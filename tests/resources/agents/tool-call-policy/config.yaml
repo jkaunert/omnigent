@@ -19,22 +19,25 @@ prompt: |
   Use calculate to answer. If the tool output starts with '[Denied by policy'
   or mentions a denial, reply that the calculation was denied. Do not retry.
 
-# tool_call:calculate DENY. The reason sentinel must stay in sync with
-# _DENY_REASON in tests/e2e/test_tool_call_policy_e2e.py.
-policies:
-  deny_calculate_tool:
-    type: function
-    on:
-      - tool_call:calculate
-    function:
-      path: omnigent.policies.function.make_fixed_action_callable
-      arguments:
-        action: deny
-        reason: TOOL_BAN_TEST_SENTINEL_XYZQ
-        on_phases:
-          - tool_call
-        on_tools:
-          - calculate
+# tool_call:calculate DENY. In the config.yaml dir-bundle form, policies live
+# under guardrails: — omnigent.spec.parser reads guardrails.policies and ignores
+# a top-level policies: block (unlike the single-YAML form). The reason sentinel
+# must stay in sync with _DENY_REASON in tests/e2e/test_tool_call_policy_e2e.py.
+guardrails:
+  policies:
+    deny_calculate_tool:
+      type: function
+      on:
+        - tool_call:calculate
+      function:
+        path: omnigent.policies.function.make_fixed_action_callable
+        arguments:
+          action: deny
+          reason: TOOL_BAN_TEST_SENTINEL_XYZQ
+          on_phases:
+            - tool_call
+          on_tools:
+            - calculate
 
 os_env:
   type: caller_process
