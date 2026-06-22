@@ -345,7 +345,6 @@ class PolicyEngine:
             reason=None,
             set_labels=dict(accumulated) if accumulated else None,
             state_updates=list(accumulated_state) if accumulated_state else None,
-            deciding_policy=None,
             data=composed_data,
         )
 
