@@ -256,11 +256,25 @@
 
       // True when the entered URL is unencrypted http:// to a non-local
       // host. Mirrors the scheme-defaulting of the main process's
-      // normalizeUrl; invalid URLs return false so the real error comes
-      // from normalizeUrl on Connect.
+      // normalizeUrl (https:// by default, http:// for loopback), so a
+      // bare remote host — now https — does not trip the warning; only an
+      // explicit http:// to a remote host does. Invalid URLs return false
+      // so the real error comes from normalizeUrl on Connect.
       function isPlainHttpRemote(raw) {
         const trimmed = (raw || "").trim();
-        const withScheme = trimmed.includes("://") ? trimmed : "http://" + trimmed;
+        if (trimmed === "") return false;
+        let withScheme;
+        if (trimmed.includes("://")) {
+          withScheme = trimmed;
+        } else {
+          let host;
+          try {
+            host = new URL("https://" + trimmed).hostname;
+          } catch {
+            return false;
+          }
+          withScheme = (LOCAL_HOSTS.has(host) ? "http://" : "https://") + trimmed;
+        }
         let url;
         try {
           url = new URL(withScheme);

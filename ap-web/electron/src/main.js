@@ -597,9 +597,19 @@ function rememberRecentServer(settings, url) {
 }
 
 /**
- * Normalize a user-entered server URL into something navigable. Accepts bare
- * `host:port` (assumes http), trims whitespace, and rejects anything that
- * isn't an http(s) URL — fail loud rather than navigate to garbage.
+ * Hostnames that resolve to the local machine. A schemeless URL defaults to
+ * https:// (the workspace / remote case the internal user guide documents),
+ * but these default to http:// — local dev servers are virtually always plain
+ * http, and the setup placeholder shows http://localhost. Mirrors the same set
+ * in setup/index.html.
+ */
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+
+/**
+ * Normalize a user-entered server URL into something navigable. Accepts a bare
+ * `host[:port][/path]` and defaults the scheme to https:// (http:// for
+ * loopback hosts), trims whitespace, and rejects anything that isn't an
+ * http(s) URL — fail loud rather than navigate to garbage.
  *
  * @param {string} raw
  * @returns {string} A normalized absolute http(s) URL.
@@ -607,7 +617,21 @@ function rememberRecentServer(settings, url) {
 function normalizeUrl(raw) {
   const trimmed = (raw ?? "").trim();
   if (trimmed === "") throw new Error("server URL is empty");
-  const withScheme = trimmed.includes("://") ? trimmed : `http://${trimmed}`;
+  let withScheme;
+  if (trimmed.includes("://")) {
+    withScheme = trimmed;
+  } else {
+    // No scheme: default to https so a pasted workspace URL (e.g.
+    // `<ws>/omnigent` from the internal user guide) connects without the
+    // user typing the scheme. Loopback hosts stay http for local dev.
+    let host;
+    try {
+      host = new URL(`https://${trimmed}`).hostname;
+    } catch {
+      host = "";
+    }
+    withScheme = `${LOCAL_HOSTS.has(host) ? "http" : "https"}://${trimmed}`;
+  }
   let url;
   try {
     url = new URL(withScheme);
