@@ -370,6 +370,44 @@ HARNESS_DESCRIPTORS: dict[str, HarnessDescriptor] = {
         install_family_key="qwen",
         description="Qwen Code CLI harness (ACP mode).",
     ),
+    "goose": HarnessDescriptor(
+        id="goose",
+        display_name="Goose",
+        module="omnigent.inner.goose_harness",
+        family="sdk",
+        supports_model_override=True,
+        # Block's Goose CLI in headless ACP mode (``goose acp``). CLI-backed —
+        # gated on the ``goose`` binary; Goose owns its own auth/provider config
+        # (``goose configure``) and ships via brew, not npm.
+        cli_binary="goose",
+        install_hint="brew install block-goose-cli",
+        install_family_key="goose",
+        description="Headless Goose ACP harness (drives `goose acp`).",
+    ),
+    "goose-native": HarnessDescriptor(
+        id="goose-native",
+        display_name="Goose",
+        module="omnigent.inner.goose_native_harness",
+        family="native-terminal",
+        aliases=("native-goose",),
+        native_aliases=("native-goose",),
+        handles_tools_internally=True,
+        supports_enqueue=True,
+        supports_terminal_takeover=True,
+        supports_model_override=True,
+        # Native ``goose session`` TUI bridge — wraps the same ``goose`` binary
+        # as the headless harness, gated on it (brew install, no npm package).
+        cli_binary="goose",
+        install_hint="brew install block-goose-cli",
+        install_family_key="goose",
+        wrapper_agent_name="goose-native-ui",
+        wrapper_label="goose-native-ui",
+        terminal_name="goose",
+        web_icon_kind="goose",
+        web_sort_rank=50,
+        terminal_first=True,
+        description="Native Goose TUI bridge (goose session).",
+    ),
 }
 
 

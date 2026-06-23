@@ -61,6 +61,12 @@ CURSOR_KEY = "cursor"
 # is wired yet — readiness is binary-only until an auth check exists.
 OPENCODE_KEY = "opencode"
 
+# Goose authenticates against its own config (``goose configure`` → keyring /
+# ``~/.config/goose/config.yaml``) with no Omnigent-managed credential, and ships
+# via Homebrew / a curl installer rather than npm — so it carries an
+# ``install_hint``, not a ``package``.
+GOOSE_KEY = "goose"
+
 
 @dataclass(frozen=True)
 class HarnessInstallSpec:
@@ -151,6 +157,12 @@ _HARNESS_INSTALL: dict[str, HarnessInstallSpec] = {
         install_hint="curl https://cursor.com/install -fsS | bash",
         login_status_key="isAuthenticated",
     ),
+    GOOSE_KEY: HarnessInstallSpec(
+        "Goose",
+        "goose",
+        package=None,
+        install_hint="brew install block-goose-cli",
+    ),
 }
 
 
@@ -175,6 +187,12 @@ _HARNESS_NAME_TO_KEY: dict[str, str] = {
     "pi-native": PI_KEY,
     "opencode-native": OPENCODE_KEY,
     "cursor-native": CURSOR_KEY,
+    # Goose: native TUI (``goose-native``) + headless ACP (``goose``, drives
+    # ``goose acp``) both wrap the ``goose`` CLI. Canonical ids only — the
+    # reversed ``native-goose`` alias folds to ``goose-native`` via
+    # canonicalize_harness before any lookup here.
+    "goose-native": GOOSE_KEY,
+    GOOSE_KEY: GOOSE_KEY,
     QWEN_KEY: QWEN_KEY,
     # NB: only CANONICAL harness ids appear as keys (the descriptor-parity
     # contract asserts ``_HARNESS_NAME_TO_KEY`` keys are cli-backed descriptor

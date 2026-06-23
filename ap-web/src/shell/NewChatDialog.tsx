@@ -83,6 +83,7 @@ const BUILTIN_AGENTS = new Set([
   "opencode-native-ui", // OpenCode
   "pi-native-ui", // Pi
   "cursor-native-ui", // Cursor
+  "goose-native-ui", // Goose
   "polly",
   "debby",
 ]);
