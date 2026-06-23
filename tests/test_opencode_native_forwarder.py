@@ -96,6 +96,28 @@ async def test_assistant_text_part_finalized_on_idle_and_dedupes() -> None:
     assert items[0]["data"]["item_type"] == "message"
     assert items[0]["data"]["item_data"]["role"] == "assistant"
     assert items[0]["data"]["item_data"]["content"][0]["text"] == "full answer"
+    # The item groups under its assistant messageID (per-turn response), NOT a
+    # constant session id — that constant id was what clustered every turn's
+    # assistant items together and broke chat ordering.
+    assert items[0]["data"]["response_id"] == "msg_1"
+
+
+async def test_each_assistant_message_gets_its_own_response_id() -> None:
+    """Distinct assistant messages map to distinct per-turn response groups."""
+    server, opencode = _RecordingServerClient(), _FakeOpenCodeClient()
+    fwd = _forwarder(server, opencode)
+    for msg in ("msg_a", "msg_b"):
+        await fwd.handle_event(_event("message.updated", info={"id": msg, "role": "assistant"}))
+        await fwd.handle_event(
+            _event(
+                "message.part.updated",
+                part={"id": f"prt_{msg}", "messageID": msg, "type": "text", "text": f"t-{msg}"},
+            )
+        )
+        await fwd.handle_event(_event("session.idle"))
+    items = [b for _u, b in server.posts if b["type"] == "external_conversation_item"]
+    response_ids = [it["data"]["response_id"] for it in items]
+    assert response_ids == ["msg_a", "msg_b"], "each turn must get its own response_id"
 
 
 async def test_user_text_part_is_not_posted_as_assistant() -> None:
@@ -138,9 +160,11 @@ async def test_tool_part_posts_function_call_and_output() -> None:
     assert call["data"]["item_data"]["name"] == "bash"
     assert call["data"]["item_data"]["call_id"] == "call_1"
     assert '"command": "ls"' in call["data"]["item_data"]["arguments"]
+    assert call["data"]["response_id"] == "msg_1"
     out = next(b for _u, b in server.posts if b["data"].get("item_type") == "function_call_output")
     assert out["data"]["item_data"]["call_id"] == "call_1"
     assert out["data"]["item_data"]["output"] == "file1\nfile2"
+    assert out["data"]["response_id"] == "msg_1"
 
 
 async def test_tool_part_dedupes_call_and_output_across_snapshots() -> None:

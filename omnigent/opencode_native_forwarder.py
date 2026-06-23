@@ -138,9 +138,11 @@ class OpenCodeNativeForwarder:
         # ``message.updated``. Only assistant text parts become durable chat
         # items (a user part is already echoed by the client).
         self._msg_role: dict[str, str] = {}
-        # partID -> latest full-text snapshot for in-flight assistant text
-        # parts, finalized (posted once) on ``step-finish`` / ``session.idle``.
-        self._pending_text: dict[str, str] = {}
+        # partID -> (assistant messageID, latest full-text snapshot) for
+        # in-flight assistant text parts, finalized (posted once) on
+        # ``step-finish`` / ``session.idle``. The messageID becomes the item's
+        # per-turn ``response_id``.
+        self._pending_text: dict[str, tuple[str | None, str]] = {}
 
     async def seed_dedupe_from_history(self) -> None:
         """
@@ -294,8 +296,19 @@ class OpenCodeNativeForwarder:
         """Publish a coarse session status edge."""
         await self._post_event(_EXTERNAL_STATUS, {"status": status})
 
-    async def _post_assistant_text(self, text: str) -> None:
-        """Persist a finalized assistant message."""
+    def _response_id(self, message_id: str | None) -> str:
+        """Map an opencode assistant messageID to a per-turn ``response_id``.
+
+        Items are grouped into a chat "response" by ``response_id``; a constant
+        value clusters every turn's assistant items into one block (breaking
+        ordering against the user messages). opencode's per-assistant-message id
+        is the natural per-turn key — fall back to the session id only when the
+        message id is unknown.
+        """
+        return message_id or self._opencode_session_id
+
+    async def _post_assistant_text(self, text: str, *, message_id: str | None) -> None:
+        """Persist a finalized assistant message under its per-turn response."""
         await self._post_event(
             _EXTERNAL_ITEM,
             {
@@ -305,11 +318,13 @@ class OpenCodeNativeForwarder:
                     "agent": _AGENT_NAME,
                     "content": [{"type": "output_text", "text": text}],
                 },
-                "response_id": self._opencode_session_id,
+                "response_id": self._response_id(message_id),
             },
         )
 
-    async def _post_tool_call(self, call_id: str, tool: str, arguments: dict[str, Any]) -> None:
+    async def _post_tool_call(
+        self, call_id: str, tool: str, arguments: dict[str, Any], *, message_id: str | None
+    ) -> None:
         """Mirror a tool invocation as a function_call item."""
         await self._post_event(
             _EXTERNAL_ITEM,
@@ -321,18 +336,20 @@ class OpenCodeNativeForwarder:
                     "arguments": json.dumps(arguments, ensure_ascii=True),
                     "call_id": call_id,
                 },
-                "response_id": self._opencode_session_id,
+                "response_id": self._response_id(message_id),
             },
         )
 
-    async def _post_tool_output(self, call_id: str, output: str) -> None:
+    async def _post_tool_output(
+        self, call_id: str, output: str, *, message_id: str | None
+    ) -> None:
         """Mirror a tool result as a function_call_output item."""
         await self._post_event(
             _EXTERNAL_ITEM,
             {
                 "item_type": "function_call_output",
                 "item_data": {"call_id": call_id, "output": output},
-                "response_id": self._opencode_session_id,
+                "response_id": self._response_id(message_id),
             },
         )
 
@@ -395,23 +412,29 @@ class OpenCodeNativeForwarder:
         """
         part_id = part.get("id")
         text = part.get("text")
+        message_id = part.get("messageID")
         if not isinstance(part_id, str) or not isinstance(text, str):
             return
         # User-message text is echoed by the client; only assistant text
         # becomes a durable chat item.
-        if self._msg_role.get(str(part.get("messageID"))) != "assistant":
+        if self._msg_role.get(str(message_id)) != "assistant":
             return
-        self._pending_text[part_id] = text
+        # Keep the owning messageID so the finalized item lands under the right
+        # per-turn response group (ordering vs the user messages).
+        self._pending_text[part_id] = (
+            message_id if isinstance(message_id, str) else None,
+            text,
+        )
 
     async def _flush_pending_text(self) -> None:
         """Finalize accumulated assistant text parts as durable chat items."""
-        for part_id, text in list(self._pending_text.items()):
+        for part_id, (message_id, text) in list(self._pending_text.items()):
             self._pending_text.pop(part_id, None)
             if not text:
                 continue
             if not self.state.mark(self._key("text-final", part_id)):
                 continue
-            await self._post_assistant_text(text)
+            await self._post_assistant_text(text, message_id=message_id)
 
     async def _handle_tool_part(self, part: Mapping[str, Any]) -> None:
         """Mirror an opencode tool part (call + result) as chat items.
@@ -428,17 +451,23 @@ class OpenCodeNativeForwarder:
             return
         if not isinstance(state, Mapping):
             return
+        message_id = part.get("messageID")
+        response_message_id = message_id if isinstance(message_id, str) else None
         raw_input = state.get("input")
         arguments = raw_input if isinstance(raw_input, dict) else {}
         if arguments and self.state.mark(self._key("tool-call", call_id)):
             await self._begin_turn_if_needed()
-            await self._post_tool_call(call_id, tool, arguments)
+            await self._post_tool_call(call_id, tool, arguments, message_id=response_message_id)
         status = state.get("status")
         if status == "completed" and self.state.mark(self._key("tool-out", call_id)):
-            await self._post_tool_output(call_id, _tool_output_text(state))
+            await self._post_tool_output(
+                call_id, _tool_output_text(state), message_id=response_message_id
+            )
         elif status == "error" and self.state.mark(self._key("tool-out", call_id)):
             error = state.get("error")
-            await self._post_tool_output(call_id, f"[error] {error}" if error else "[error]")
+            await self._post_tool_output(
+                call_id, f"[error] {error}" if error else "[error]", message_id=response_message_id
+            )
 
     async def _on_session_status(self, event: OpenCodeEvent) -> None:
         """Handle ``session.status`` — surface the running edge."""
