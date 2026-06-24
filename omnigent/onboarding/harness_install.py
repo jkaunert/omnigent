@@ -179,9 +179,7 @@ _HARNESS_INSTALL: dict[str, HarnessInstallSpec] = {
         "Hermes",
         "hermes",
         package=None,
-        install_hint=(
-            "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"
-        ),
+        install_hint="curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
     ),
 }
 

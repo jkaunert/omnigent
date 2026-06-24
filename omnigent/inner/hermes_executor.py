@@ -175,12 +175,14 @@ def _get_conversation_id() -> str | None:
 # Everything else (secrets, security, agent tuning, terminal, etc.) is
 # either irrelevant to a headless Omnigent turn or actively harmful
 # (e.g. ``secrets.bitwarden`` referencing an unset ``BWS_ACCESS_TOKEN``).
-_USER_CONFIG_KEYS = frozenset({
-    "model",
-    "providers",
-    "fallback_providers",
-    "credential_pool_strategies",
-})
+_USER_CONFIG_KEYS = frozenset(
+    {
+        "model",
+        "providers",
+        "fallback_providers",
+        "credential_pool_strategies",
+    }
+)
 
 
 def _load_user_hermes_config() -> dict:
@@ -194,11 +196,11 @@ def _load_user_hermes_config() -> dict:
     if not user_config.is_file():
         return {}
     try:
-        import yaml  # noqa: PLC0415 — yaml is a Hermes dep, always available
+        import yaml
 
         full = yaml.safe_load(user_config.read_text()) or {}
         return {k: v for k, v in full.items() if k in _USER_CONFIG_KEYS}
-    except Exception:
+    except Exception:  # noqa: BLE001 — catch YAML parse errors, permission errors, etc.
         _logger.debug("Failed to load user Hermes config at %s", user_config, exc_info=True)
         return {}
 
