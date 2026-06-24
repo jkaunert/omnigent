@@ -1070,7 +1070,8 @@ def _ensure_runner_online(
         return None
 
     binding_token = str(_server_state["binding_token"])
-    mock_url = str(_server_state.get("mock_llm_url", ""))
+    mock_url = str(_server_state.get("mock_llm_url") or "")
+    assert mock_url, "mock_llm_url missing from _server_state — live_server did not set it"
     runner_tmp = tmp_path_factory.mktemp("e2e_ui_respawn_runner")
     log_path = runner_tmp / "runner.log"
     log_handle = open(log_path, "w")  # noqa: SIM115 — fd dup'd into child; closed below
