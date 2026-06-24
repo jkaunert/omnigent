@@ -84,7 +84,7 @@ def open_right_rail(page: Page) -> None:
 # Populated by ``live_server`` so test-scoped fixtures can access the
 # server PID and runner id without changing ``live_server``'s return
 # type (which other tests depend on).
-_server_state: dict[str, Any] = {}
+_server_state: dict[str, int | str] = {}
 _AP_WEB_DIR = _REPO_ROOT / "ap-web"
 _BUILD_OUTPUT = _REPO_ROOT / "omnigent" / "server" / "static" / "web-ui"
 
@@ -902,7 +902,6 @@ def live_server(
     _server_state["binding_token"] = binding_token
     _server_state["server_url"] = base_url
     _server_state["mock_llm_url"] = mock_url
-    _server_state["_runner_proc"] = runner_proc
 
     # Set a non-resettable fallback for the policy-classifier LLM queue so
     # every per-test reset leaves the server's guardrails path functional.
@@ -911,10 +910,49 @@ def live_server(
     # match a content-based queue gets a generic reply (sufficient for tests
     # that only assert an assistant bubble appears, not its exact content).
     set_fallback_mock_llm(mock_url, "gpt-4o-mini", "Mock LLM response.")
+    # Fallbacks for native CLI models so forks into claude-native / codex-native
+    # get a benign response without per-test configuration.
+    set_fallback_mock_llm(mock_url, _CLAUDE_MOCK_MODEL, "Mock LLM response.")
+    set_fallback_mock_llm(mock_url, "gpt-5.5", "Mock LLM response.")
+
+    # Write a session-scoped mock provider config so ANY native session
+    # (including forks into claude-native / codex-native) routes through
+    # the mock LLM. Per-test fixtures (native_*_mock_session) may
+    # overwrite this with per-harness settings, but this baseline ensures
+    # unexpected native boots (fork targets, clone targets) don't fail.
+    config_home = os.environ.get("OMNIGENT_CONFIG_HOME")
+    config_dir = Path(config_home) if config_home else Path.home() / ".omnigent"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    mock_config_path = config_dir / "config.yaml"
+    _original_config = mock_config_path.read_text() if mock_config_path.exists() else None
+    mock_config_path.write_text(
+        textwrap.dedent(f"""\
+        providers:
+          mock-llm:
+            kind: key
+            default: [anthropic, openai]
+            anthropic:
+              base_url: "{mock_url}"
+              api_key: "mock-key"
+              models:
+                default: {_CLAUDE_MOCK_MODEL}
+            openai:
+              base_url: "{mock_url}/v1"
+              api_key: "mock-key"
+              wire_api: responses
+              models:
+                default: {_CODEX_MOCK_MODEL}
+        """)
+    )
 
     try:
         yield base_url
     finally:
+        # Restore the original provider config (or remove our mock config).
+        if _original_config is not None:
+            mock_config_path.write_text(_original_config)
+        else:
+            mock_config_path.unlink(missing_ok=True)
         _server_state.clear()
         if runner_proc.poll() is None:
             runner_proc.send_signal(signal.SIGTERM)
@@ -1067,17 +1105,7 @@ def _ensure_runner_online(
             return False
         return resp.status_code == 200 and resp.json().get("online") is True
 
-    def _runner_process_alive() -> bool:
-        respawned = _server_state.get("_respawned_runner")
-        if isinstance(respawned, subprocess.Popen):
-            return respawned.poll() is None
-        # Check the original runner process (stored by live_server).
-        original = _server_state.get("_runner_proc")
-        if isinstance(original, subprocess.Popen):
-            return original.poll() is None
-        return True  # no process info — trust _online()
-
-    if _online() and _runner_process_alive():
+    if _online():
         return None
 
     binding_token = str(_server_state["binding_token"])
@@ -1114,7 +1142,6 @@ def _ensure_runner_online(
                 f"log:\n{log_path.read_text()[-3000:]}"
             )
         if _online():
-            _server_state["_respawned_runner"] = proc
             return proc
         time.sleep(_HEALTH_POLL_INTERVAL_S)
 
