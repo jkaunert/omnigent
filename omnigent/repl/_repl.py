@@ -4430,8 +4430,7 @@ async def _cmd_help(
         for name, desc in rows:
             padded = name.ljust(name_width)
             lines.append(
-                f"    [{fmt.accent}]{padded}[/{fmt.accent}]  "
-                f"[{fmt.muted}]{desc}[/{fmt.muted}]"
+                f"    [{fmt.accent}]{padded}[/{fmt.accent}]  [{fmt.muted}]{desc}[/{fmt.muted}]"
             )
     host.output(Text.from_markup("\n".join(lines)))
 
