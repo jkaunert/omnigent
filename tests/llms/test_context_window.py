@@ -383,8 +383,14 @@ def test_registry_resolves_anthropic_1m_beta_suffix() -> None:
     assert _registry_context_window("anthropic/claude-opus-4-8[1m]") == 1_000_000
     assert _registry_context_window("claude-sonnet-4-6[1m]") == 1_000_000
     assert _registry_context_window("CLAUDE-OPUS-4-8[1M]") == 1_000_000  # case-insensitive
+    # Databricks-hosted Claude (contains "claude") also resolves.
+    assert _registry_context_window("databricks-claude-opus-4-8[1m]") == 1_000_000
     # Without the suffix the registry defers (None → caller uses litellm/catalog).
     assert _registry_context_window("claude-opus-4-8") is None
+    # The rule is Claude-scoped: a non-Claude id ending in [1m] is NOT forced to
+    # 1M (it defers to litellm/catalog), so custom/self-hosted ids are safe.
+    assert _registry_context_window("my-local-model[1m]") is None
+    assert _registry_context_window("gpt-5.4[1m]") is None
 
 
 def test_get_model_context_window_uses_registry_first(monkeypatch: pytest.MonkeyPatch) -> None:

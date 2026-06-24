@@ -1547,6 +1547,36 @@ def test_reduce_messages_to_budget_is_noop_when_under_budget() -> None:
     assert reduced is messages
 
 
+def test_reduce_messages_to_budget_reserves_system_token_budget() -> None:
+    """`system_token_budget` shrinks the effective budget for the history.
+
+    Regression for the OMNI-143 resume net (Polly review on #1169): budgeting
+    only the history (system budget 0) could still overflow once the request
+    prepends the system prompt + tool schemas. A history that fits with no
+    overhead reserved must be reduced once a large system+tools budget is
+    reserved.
+    """
+    messages: list[dict[str, Any]] = []
+    for _ in range(30):
+        messages.append(_user_msg_dict("alpha beta gamma delta " * 20))
+        messages.append(_assistant_msg_dict("epsilon zeta eta theta " * 20))
+
+    window, model = 10_000, "claude-opus-4-8"
+    base = count_tokens(messages, model)
+    # Precondition: the history fits on its own (budget = 0.8 * window).
+    assert base <= int(window * 0.8)
+    assert reduce_messages_to_budget(messages, context_window=window, model=model) is messages
+
+    # Reserve enough system+tools budget that the effective budget drops below
+    # the history size → it must now be reduced.
+    overhead = int(window * 0.8) - base + 500
+    reduced = reduce_messages_to_budget(
+        messages, context_window=window, model=model, system_token_budget=overhead
+    )
+    assert reduced is not messages
+    assert len(reduced) < len(messages)
+
+
 # ---------------------------------------------------------------------------
 # Layer-2 auth-failure detection (issue #1121: don't bury a 401)
 # ---------------------------------------------------------------------------

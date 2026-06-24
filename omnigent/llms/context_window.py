@@ -99,7 +99,9 @@ def _registry_context_window(model: str) -> int | None:
     beta marker preserved.
 
     Resolution: an exact :data:`_CONTEXT_WINDOW_REGISTRY` entry, then the
-    Anthropic 1M-context beta rule (a trailing ``[1m]`` → 1,000,000).
+    Anthropic 1M-context beta rule (a trailing ``[1m]`` on a Claude id →
+    1,000,000). The rule is scoped to Claude ids so a custom/self-hosted model
+    that merely happens to end in ``[1m]`` isn't force-sized to 1M.
 
     :param model: The model identifier (any namespacing).
     :returns: The context window in tokens, or ``None`` when the model isn't in
@@ -108,7 +110,10 @@ def _registry_context_window(model: str) -> int | None:
     bare = model.rsplit("/", 1)[-1].split(":", 1)[0].strip().lower()
     if bare in _CONTEXT_WINDOW_REGISTRY:
         return _CONTEXT_WINDOW_REGISTRY[bare]
-    if bare.endswith(_ANTHROPIC_1M_BETA_SUFFIX):
+    # ``[1m]`` is an Anthropic-only beta convention, so gate on Claude ids
+    # (covers ``claude-*`` and ``databricks-claude-*``); other providers fall
+    # through to litellm/catalog rather than being forced to 1M.
+    if "claude" in bare and bare.endswith(_ANTHROPIC_1M_BETA_SUFFIX):
         return _ANTHROPIC_1M_BETA_WINDOW
     return None
 

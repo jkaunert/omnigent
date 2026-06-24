@@ -801,6 +801,11 @@ def _is_summary_auth_error(exc: BaseException) -> bool:
     status = getattr(getattr(exc, "response", None), "status_code", None)
     if status in (401, 403):
         return True
+    # Fuzzy message fallback for exceptions that don't carry a structured
+    # ``response`` (e.g. wrapped/stringified errors). It can match "401"/"403"
+    # inside an unrelated number, but the only consequence is which log line
+    # fires — both branches fall back to Layer 3 identically — so a false match
+    # is harmless. The structured status check above is the precise path.
     text = str(exc)
     return any(token in text for token in ("401", "403", "Unauthorized", "Forbidden"))
 

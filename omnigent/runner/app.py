@@ -8114,6 +8114,9 @@ def create_runner_app(
         history: list[dict[str, Any]],
         msg_body: dict[str, Any],
         spec: Any,
+        *,
+        instructions: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """
         Shrink a cold-loaded (resumed / fresh-runner) history to fit the model's
@@ -8127,6 +8130,13 @@ def create_runner_app(
         live-turn compaction #1082 removed. Runs only on the cold-load path (once
         per conversation per runner), never on subsequent live turns.
 
+        The request also prepends a system prompt and tool schemas, so the
+        history must be reduced to fit the WHOLE request, not just itself:
+        ``instructions`` and ``tools`` are token-counted and reserved as the
+        reduction's ``system_token_budget``. Without this a high-tool agent on a
+        smaller window could still overflow despite the reduction (Polly AI
+        review on #1169).
+
         Returns the history unchanged when it already fits or the window is
         unknown (defer to the harness).
 
@@ -8134,12 +8144,14 @@ def create_runner_app(
         :param history: Reconstructed harness-input history (may be empty).
         :param msg_body: This turn's request body (model / model_override).
         :param spec: The cached agent spec (declared window / model), or None.
+        :param instructions: The system prompt the request prepends, if any.
+        :param tools: The tool schemas the request carries, if any.
         :returns: The (possibly reduced) history list.
         """
         if not history:
             return history
         from omnigent.llms.context_window import resolve_effective_context_window
-        from omnigent.runtime.compaction import reduce_messages_to_budget
+        from omnigent.runtime.compaction import count_tokens, reduce_messages_to_budget
 
         model = msg_body.get("model") or (spec.executor.model if spec else None) or ""
         declared = spec.executor.context_window if spec else None
@@ -8148,15 +8160,38 @@ def create_runner_app(
         )
         if not window:
             return history  # unknown window — defer to the harness
-        reduced = reduce_messages_to_budget(history, context_window=window, model=model)
+        # Reserve budget for what the request prepends beyond the history — the
+        # system prompt and tool schemas — so the WHOLE request fits the window,
+        # not just the history (Polly AI review on #1169).
+        overhead_probe: list[dict[str, Any]] = []
+        if instructions:
+            overhead_probe.append(
+                {"role": "system", "content": [{"type": "input_text", "text": str(instructions)}]}
+            )
+        if tools:
+            overhead_probe.append(
+                {
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": json.dumps(tools, default=str)}],
+                }
+            )
+        system_token_budget = count_tokens(overhead_probe, model) if overhead_probe else 0
+        reduced = reduce_messages_to_budget(
+            history,
+            context_window=window,
+            model=model,
+            system_token_budget=system_token_budget,
+        )
         if reduced is not history:
             _logger.warning(
                 "OMNI-143: reduced oversized resume history for conv=%s "
-                "(%d → %d msgs, window=%d) before handing to the harness",
+                "(%d → %d msgs, window=%d, reserved %d tok for system+tools) "
+                "before handing to the harness",
                 conv,
                 len(history),
                 len(reduced),
                 window,
+                system_token_budget,
             )
         return reduced
 
@@ -11102,15 +11137,13 @@ def create_runner_app(
             instructions=instructions,
         )
 
-        if conv not in _session_histories:
+        # OMNI-143: a cold-loaded history (resume / fresh runner) can exceed the
+        # model's window. Note the cold load here; the auth-free reduction runs
+        # below, once instructions + tools are known, so it can reserve budget
+        # for the whole request (see _guard_resume_history_budget).
+        _history_cold_loaded = conv not in _session_histories
+        if _history_cold_loaded:
             _session_histories[conv] = await _load_history_as_input(conv)
-            # OMNI-143: a cold-loaded history (resume / fresh runner) can exceed
-            # the model's window; shrink it auth-free before the harness sees it,
-            # since the harness can't self-compact one oversized prompt and a
-            # runner overflow is now fatal.
-            _session_histories[conv] = _guard_resume_history_budget(
-                conv, _session_histories[conv], msg_body, cached_spec
-            )
 
         harness_body: dict[str, Any] = {
             "type": "message",
@@ -11226,6 +11259,24 @@ def create_runner_app(
             and (name := _schema_tool_name(t)) is not None
             and name not in _spec_names
         )
+
+        # OMNI-143: now that the system prompt + tools are assembled, reduce a
+        # cold-loaded history to fit the WHOLE request (history + system + tools)
+        # auth-free, before the harness sees it — it can't self-compact a single
+        # oversized prompt and a runner overflow is now fatal. No-op on live
+        # turns and when the history already fits.
+        if _history_cold_loaded:
+            _reduced_history = _guard_resume_history_budget(
+                conv,
+                _session_histories[conv],
+                msg_body,
+                cached_spec,
+                instructions=harness_body.get("instructions"),
+                tools=harness_body.get("tools"),
+            )
+            if _reduced_history is not _session_histories[conv]:
+                _session_histories[conv] = _reduced_history
+                harness_body["content"] = _reduced_history
 
         # Fallback for native sessions whose terminal was launched
         # outside the runner terminal route (e.g. tests, UI-launched
