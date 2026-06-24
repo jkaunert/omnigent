@@ -30,6 +30,8 @@ describe("classifyAttachment", () => {
     expect(classifyAttachment(makeFile("a.ts", "video/mp2t"))).toBe("text");
     expect(classifyAttachment(makeFile("main.rs", ""))).toBe("text");
     expect(classifyAttachment(makeFile("notebook.ipynb", ""))).toBe("text");
+    // Windows/Excel tags .csv as application/vnd.ms-excel — extension wins.
+    expect(classifyAttachment(makeFile("data.csv", "application/vnd.ms-excel"))).toBe("text");
   });
 
   it("rejects office/binary types", () => {

@@ -148,6 +148,114 @@ def attachment_upload_limit(content_type: str) -> int | None:
     return None
 
 
+# Extensions accepted as text/code attachments even when the upload's
+# declared MIME mislabels them as binary — e.g. a ``.csv`` tagged
+# ``application/vnd.ms-excel`` on Windows, or a ``.ts`` tagged
+# ``video/mp2t``. Mirrors TEXT_CODE_EXTENSIONS in
+# ap-web/src/lib/attachments.ts — keep in sync.
+_TEXT_CODE_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".txt",
+        ".log",
+        ".md",
+        ".markdown",
+        ".csv",
+        ".tsv",
+        ".json",
+        ".jsonl",
+        ".ndjson",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".ini",
+        ".cfg",
+        ".env",
+        ".lock",
+        ".proto",
+        ".graphql",
+        ".gql",
+        ".html",
+        ".htm",
+        ".xml",
+        ".css",
+        ".js",
+        ".jsx",
+        ".mjs",
+        ".cjs",
+        ".ts",
+        ".tsx",
+        ".py",
+        ".rb",
+        ".go",
+        ".rs",
+        ".java",
+        ".kt",
+        ".scala",
+        ".swift",
+        ".c",
+        ".h",
+        ".cc",
+        ".cpp",
+        ".hpp",
+        ".cs",
+        ".php",
+        ".pl",
+        ".r",
+        ".jl",
+        ".lua",
+        ".ex",
+        ".exs",
+        ".erl",
+        ".hs",
+        ".clj",
+        ".dart",
+        ".vue",
+        ".svelte",
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".fish",
+        ".sql",
+        ".tf",
+        ".hcl",
+        ".gradle",
+        ".dockerfile",
+        ".ipynb",
+    }
+)
+
+
+def attachment_text_type_for_extension(filename: str | None) -> str | None:
+    """
+    Resolve a text-like MIME for *filename* by extension, or ``None``.
+
+    Used as a fallback when the upload's declared MIME mislabels a text/code
+    file as binary (e.g. a ``.csv`` reported as ``application/vnd.ms-excel``):
+    only extensions in :data:`_TEXT_CODE_EXTENSIONS` are honored, so a real
+    binary (``.xls``, ``.pptx``) is never re-admitted. Mirrors the web
+    client's extension allowlist so the two agree on what's attachable.
+
+    :param filename: The original filename, e.g. ``"data.csv"``.
+    :returns: A concrete text-like MIME (e.g. ``"text/csv"``), or ``None``
+        when the extension is not a recognised text/code type.
+    """
+    import mimetypes as _mt
+    from pathlib import PurePath
+
+    if not filename:
+        return None
+    suffix = PurePath(filename).suffix.lower()
+    if suffix not in _TEXT_CODE_EXTENSIONS:
+        return None
+    mapped = _EXTRA_MIME_TYPES.get(suffix)
+    if mapped:
+        return mapped
+    guessed = _mt.guess_type(filename)[0]
+    if guessed and (guessed.startswith("text/") or guessed in _TEXT_LIKE_APPLICATION_MIMES):
+        return guessed
+    return "text/plain"
+
+
 def resolve_content_references(
     items: list[ConversationItem],
     file_store: FileStore,

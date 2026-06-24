@@ -97,6 +97,20 @@ def test_upload_rejects_oversized_image(upload_client: tuple[TestClient, str]) -
     assert "limit" in resp.text.lower()
 
 
+def test_upload_csv_mislabeled_as_excel_is_accepted(
+    upload_client: tuple[TestClient, str],
+) -> None:
+    """A .csv the browser tags application/vnd.ms-excel is accepted via the
+    extension fallback and stored as a text type (parity with the web client)."""
+    client, session_id = upload_client
+    resp = client.post(
+        f"/v1/sessions/{session_id}/resources/files",
+        files={"file": ("data.csv", b"a,b,c\n1,2,3\n", "application/vnd.ms-excel")},
+    )
+    assert resp.status_code in (200, 201), resp.text
+    assert resp.json()["name"] == "data.csv"
+
+
 def test_upload_text_just_under_limit_succeeds(upload_client: tuple[TestClient, str]) -> None:
     """A text file just under the text cap is accepted."""
     client, session_id = upload_client

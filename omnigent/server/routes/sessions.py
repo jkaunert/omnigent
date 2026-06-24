@@ -15741,6 +15741,7 @@ def create_sessions_router(
         from omnigent.runtime.content_resolver import (
             MAX_ATTACHMENT_UPLOAD_BYTES,
             _resolve_content_type,
+            attachment_text_type_for_extension,
             attachment_upload_limit,
         )
 
@@ -15755,6 +15756,15 @@ def create_sessions_router(
             file.filename,
         )
         type_limit = attachment_upload_limit(content_type)
+        if type_limit is None:
+            # The browser/OS can mislabel a text/code file as binary (e.g. a
+            # .csv reported as application/vnd.ms-excel on Windows). Fall back
+            # to the extension — matching the web client's allowlist — and
+            # normalize the type so the resolver inlines it as text.
+            ext_type = attachment_text_type_for_extension(file.filename)
+            if ext_type is not None:
+                content_type = ext_type
+                type_limit = attachment_upload_limit(content_type)
         if type_limit is None:
             raise HTTPException(
                 status_code=415,

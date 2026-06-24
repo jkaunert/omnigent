@@ -976,3 +976,34 @@ def test_attachment_upload_limits_are_under_global_ceiling() -> None:
     assert MAX_IMAGE_UPLOAD_BYTES <= MAX_ATTACHMENT_UPLOAD_BYTES
     assert MAX_PDF_UPLOAD_BYTES <= MAX_ATTACHMENT_UPLOAD_BYTES
     assert MAX_TEXT_UPLOAD_BYTES <= MAX_ATTACHMENT_UPLOAD_BYTES
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [
+        ("data.csv", "text/csv"),
+        ("notes.txt", "text/plain"),
+        ("main.py", "text/x-python"),
+        ("app.ts", "text/typescript"),
+        ("readme.md", "text/markdown"),
+        ("nb.ipynb", "application/x-ipynb+json"),
+    ],
+)
+def test_attachment_text_type_for_extension_recognised(filename: str, expected: str) -> None:
+    """Known text/code extensions resolve to a text-like MIME (the fallback
+    used when the declared MIME mislabels them as binary)."""
+    from omnigent.runtime.content_resolver import attachment_text_type_for_extension
+
+    assert attachment_text_type_for_extension(filename) == expected
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["sheet.xls", "sheet.xlsx", "deck.pptx", "doc.docx", "archive.zip", "blob", None],
+)
+def test_attachment_text_type_for_extension_rejects_binary(filename: str | None) -> None:
+    """Real binaries (and missing/unknown extensions) get no text fallback,
+    so they stay rejected even if the declared MIME is wrong."""
+    from omnigent.runtime.content_resolver import attachment_text_type_for_extension
+
+    assert attachment_text_type_for_extension(filename) is None
