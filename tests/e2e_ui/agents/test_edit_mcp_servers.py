@@ -115,9 +115,7 @@ def test_add_and_remove_mcp_server_round_trip(
 
     # Verify via REST that the server was added.
     updated_servers = _session_agent_mcp_names(base_url, session_id)
-    assert server_name in updated_servers, (
-        f"Expected '{server_name}' in {updated_servers}"
-    )
+    assert server_name in updated_servers, f"Expected '{server_name}' in {updated_servers}"
 
     # The pill should appear in the UI (popover may need reopening after
     # the query invalidation).
