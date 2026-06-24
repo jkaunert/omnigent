@@ -511,6 +511,7 @@ describe("computeShowsWorking", () => {
   ): Parameters<typeof computeShowsWorking>[1] => ({
     hasPendingElicitation: false,
     runnerOnline: true,
+    localStreaming: false,
     ...overrides,
   });
 
