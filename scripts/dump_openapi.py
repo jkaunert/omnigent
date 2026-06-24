@@ -86,6 +86,175 @@ _SSE_ROUTES: list[tuple[str, str]] = [
     ("/v1/sessions/{session_id}/stream", "get"),
 ]
 
+# ── Document-level enrichment ─────────────────────────────────────
+#
+# FastAPI emits accurate per-operation schemas but none of the
+# document-level metadata an integrator needs: no ``servers``, no auth
+# description, no ``info.description``, and only bare snake_case tags.
+# We inject that connective tissue here so the published reference
+# (rendered by Scalar on the omnigent website) is usable for building
+# an integration. Keeping it in this script — rather than scattering it
+# across the route decorators — confines presentation concerns to the
+# spec-generation layer, and the drift test
+# (``tests/server/test_openapi_drift.py``) guards the result.
+
+# Self-hosted base URL. ``omnigent server`` binds 127.0.0.1:6767 by
+# default (see ``_DEFAULT_LOCAL_PORT`` in
+# ``omnigent/host/local_server.py``).
+_SERVERS: list[dict[str, str]] = [
+    {
+        "url": "http://127.0.0.1:6767",
+        "description": "Self-hosted Omnigent server (default local port).",
+    },
+]
+
+# Markdown prose shown at the top of the rendered reference. Covers
+# what the API is, the self-hosted base URL, and the deployment-driven
+# auth model (there is no bearer/API-key scheme — see
+# ``omnigent/server/auth.py``).
+_INFO_DESCRIPTION: str = """\
+Omnigent is an open-source meta-harness for building and running AI \
+agents. This is the REST API exposed by the Omnigent server: use it to \
+create and drive **sessions**, manage **agents**, **hosts**, and \
+**runners**, attach **contextual policies**, post **comments**, and work \
+with session **resources** — files, terminals, and sandboxed \
+environments.
+
+## Base URL
+
+Omnigent is self-hosted. The server binds `http://127.0.0.1:6767` by \
+default (`omnigent server`); point the base URL at your own deployment.
+
+## Authentication
+
+There is no API-key or bearer-token scheme. Identity is supplied by the \
+deployment's configured auth provider (`OMNIGENT_AUTH_PROVIDER`):
+
+- **Trusted proxy header** (default) — an upstream proxy injects an \
+identity header (`X-Forwarded-Email`, configurable). Single-user local \
+runtimes fall back to a reserved `local` user.
+- **Session cookie** — a signed `__Host-ap_session` cookie minted after \
+an interactive OIDC or accounts login.
+
+Auth is configured server-side; clients send the cookie or proxy header \
+according to your deployment.
+
+## Streaming
+
+`GET /v1/sessions/{session_id}/stream` streams Server-Sent Events \
+(`text/event-stream`). Each event conforms to the `ServerStreamEvent` \
+schema documented below.
+"""
+
+# Auth representations. Omnigent has no bearer/API-key scheme — identity
+# arrives via a trusted-proxy header or a signed session cookie,
+# selected by ``OMNIGENT_AUTH_PROVIDER``. We model both as OpenAPI
+# ``apiKey`` schemes so SDK generators and the reference can surface
+# them. We deliberately do NOT assert a top-level ``security``
+# requirement: the active scheme is deployment-specific, and public
+# endpoints (``/health``, ``/api/version``) require none — the prose in
+# :data:`_INFO_DESCRIPTION` carries the human-facing explanation.
+_SECURITY_SCHEMES: dict[str, dict[str, str]] = {
+    "proxyHeaderAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Forwarded-Email",
+        "description": (
+            "Trusted-proxy identity header (header-auth mode, the "
+            "default). The header name is configurable via "
+            "``OMNIGENT_AUTH_HEADER``."
+        ),
+    },
+    "sessionCookieAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-ap_session",
+        "description": (
+            "Signed session cookie minted after an interactive OIDC or "
+            "accounts login (oidc / accounts auth modes)."
+        ),
+    },
+}
+
+# Tag display metadata: human descriptions + sidebar order. Each
+# ``name`` MUST match the tag FastAPI puts on operations (the route
+# decorators use these snake_case values). ``x-displayName`` gives docs
+# tooling a readable label in place of the raw tag. Order here is the
+# order tags render in the reference sidebar.
+_TAGS: list[dict[str, str]] = [
+    {
+        "name": "sessions",
+        "x-displayName": "Sessions",
+        "description": (
+            "Create, inspect, fork, and drive agent sessions — the core "
+            "unit of work. Covers session items and events, agent "
+            "binding, permissions, labels, child sessions, and "
+            "per-session resources (files, terminals, and sandboxed "
+            "environments)."
+        ),
+    },
+    {
+        "name": "agents",
+        "x-displayName": "Agents",
+        "description": "Discover the built-in agents available to bind to a session.",
+    },
+    {
+        "name": "hosts",
+        "x-displayName": "Hosts",
+        "description": (
+            "Hosts that can launch runners. Browse the host filesystem "
+            "and create directories."
+        ),
+    },
+    {
+        "name": "runners",
+        "x-displayName": "Runners",
+        "description": "Launch runners on a host and check their status.",
+    },
+    {
+        "name": "session_policies",
+        "x-displayName": "Session Policies",
+        "description": (
+            "Contextual policies scoped to a single session — list, "
+            "create, update, and remove."
+        ),
+    },
+    {
+        "name": "default_policies",
+        "x-displayName": "Default Policies",
+        "description": "Server-level default policies applied to new sessions.",
+    },
+    {
+        "name": "policy_registry",
+        "x-displayName": "Policy Registry",
+        "description": "The catalog of policy types available to instantiate.",
+    },
+    {
+        "name": "comments",
+        "x-displayName": "Comments",
+        "description": (
+            "Threaded comments on a session, including sending a comment "
+            "to the agent."
+        ),
+    },
+    {
+        "name": "system",
+        "x-displayName": "System",
+        "description": "Health, version, and identity endpoints for the running server.",
+    },
+]
+
+# Utility endpoints FastAPI leaves untagged. We assign them a synthetic
+# ``system`` tag so they group cleanly in the reference instead of
+# floating in an unlabeled "default" bucket. Keyed ``(path, method)``
+# like :data:`_SSE_ROUTES`; keep accurate if the route inventory grows.
+_SYSTEM_ROUTES: list[tuple[str, str]] = [
+    ("/health", "get"),
+    ("/api/version", "get"),
+    ("/v1/info", "get"),
+    ("/v1/me", "get"),
+]
+
 
 def _build_app_with_stub_stores() -> Any:
     """
@@ -199,6 +368,52 @@ def _rewrite_sse_route(
         sse_entry["itemSchema"] = sse_entry.pop("schema")
 
 
+def _tag_system_routes(paths: dict[str, Any]) -> None:
+    """
+    Assign the synthetic ``system`` tag to untagged utility routes.
+
+    FastAPI leaves ``/health``, ``/api/version``, ``/v1/info``, and
+    ``/v1/me`` untagged. Without a tag they render in an unlabeled
+    "default" bucket in the reference; tagging them groups the lot
+    under "System". Only fills in a tag where none exists — never
+    overrides one FastAPI already set.
+
+    No-op for any ``(path, method)`` not present, so
+    :data:`_SYSTEM_ROUTES` stays resilient to inventory changes.
+
+    :param paths: The OpenAPI ``paths`` map; mutated in place.
+    """
+    for path, method in _SYSTEM_ROUTES:
+        op = paths.get(path, {}).get(method)
+        if op is None:
+            continue
+        if not op.get("tags"):
+            op["tags"] = ["system"]
+
+
+def _enrich_spec(spec: dict[str, Any]) -> None:
+    """
+    Inject document-level metadata for docs / SDK tooling.
+
+    Adds ``info.description``, ``servers``, top-level ``tags`` with
+    human-readable descriptions, and ``components.securitySchemes`` —
+    none of which FastAPI emits — and tags the untagged utility routes.
+    Mutates ``spec`` in place. See the module-level enrichment
+    constants for the rationale behind each value.
+
+    :param spec: The generated OpenAPI dict; mutated in place.
+    """
+    info = spec.setdefault("info", {})
+    info["description"] = _INFO_DESCRIPTION
+    spec["servers"] = _SERVERS
+    spec["tags"] = _TAGS
+
+    components = spec.setdefault("components", {})
+    components["securitySchemes"] = _SECURITY_SCHEMES
+
+    _tag_system_routes(spec.setdefault("paths", {}))
+
+
 def generate_spec() -> dict[str, Any]:
     """
     Build, generate, and post-process the OpenAPI 3.2 spec.
@@ -235,6 +450,10 @@ def generate_spec() -> dict[str, Any]:
     paths = spec.get("paths", {})
     for path, method in _SSE_ROUTES:
         _rewrite_sse_route(paths, path, method)
+
+    # Inject document-level metadata (servers, auth, tags, prose) that
+    # FastAPI doesn't emit but docs / SDK tooling needs.
+    _enrich_spec(spec)
 
     return spec  # type: ignore[no-any-return]
 

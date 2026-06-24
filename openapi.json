@@ -3739,9 +3739,24 @@
         "title": "ValidationError",
         "type": "object"
       }
+    },
+    "securitySchemes": {
+      "proxyHeaderAuth": {
+        "description": "Trusted-proxy identity header (header-auth mode, the default). The header name is configurable via ``OMNIGENT_AUTH_HEADER``.",
+        "in": "header",
+        "name": "X-Forwarded-Email",
+        "type": "apiKey"
+      },
+      "sessionCookieAuth": {
+        "description": "Signed session cookie minted after an interactive OIDC or accounts login (oidc / accounts auth modes).",
+        "in": "cookie",
+        "name": "__Host-ap_session",
+        "type": "apiKey"
+      }
     }
   },
   "info": {
+    "description": "Omnigent is an open-source meta-harness for building and running AI agents. This is the REST API exposed by the Omnigent server: use it to create and drive **sessions**, manage **agents**, **hosts**, and **runners**, attach **contextual policies**, post **comments**, and work with session **resources** \u2014 files, terminals, and sandboxed environments.\n\n## Base URL\n\nOmnigent is self-hosted. The server binds `http://127.0.0.1:6767` by default (`omnigent server`); point the base URL at your own deployment.\n\n## Authentication\n\nThere is no API-key or bearer-token scheme. Identity is supplied by the deployment's configured auth provider (`OMNIGENT_AUTH_PROVIDER`):\n\n- **Trusted proxy header** (default) \u2014 an upstream proxy injects an identity header (`X-Forwarded-Email`, configurable). Single-user local runtimes fall back to a reserved `local` user.\n- **Session cookie** \u2014 a signed `__Host-ap_session` cookie minted after an interactive OIDC or accounts login.\n\nAuth is configured server-side; clients send the cookie or proxy header according to your deployment.\n\n## Streaming\n\n`GET /v1/sessions/{session_id}/stream` streams Server-Sent Events (`text/event-stream`). Each event conforms to the `ServerStreamEvent` schema documented below.\n",
     "title": "Omnigent Server",
     "version": "0.1.0"
   },
@@ -3767,7 +3782,10 @@
             "description": "Successful Response"
           }
         },
-        "summary": "Version"
+        "summary": "Version",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/health": {
@@ -3832,7 +3850,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Health"
+        "summary": "Health",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/v1/agents": {
@@ -4326,7 +4347,10 @@
             "description": "Successful Response"
           }
         },
-        "summary": "Info"
+        "summary": "Info",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/v1/me": {
@@ -4343,7 +4367,10 @@
             "description": "Successful Response"
           }
         },
-        "summary": "Me"
+        "summary": "Me",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/v1/policies": {
@@ -8015,5 +8042,58 @@
         ]
       }
     }
-  }
+  },
+  "servers": [
+    {
+      "description": "Self-hosted Omnigent server (default local port).",
+      "url": "http://127.0.0.1:6767"
+    }
+  ],
+  "tags": [
+    {
+      "description": "Create, inspect, fork, and drive agent sessions \u2014 the core unit of work. Covers session items and events, agent binding, permissions, labels, child sessions, and per-session resources (files, terminals, and sandboxed environments).",
+      "name": "sessions",
+      "x-displayName": "Sessions"
+    },
+    {
+      "description": "Discover the built-in agents available to bind to a session.",
+      "name": "agents",
+      "x-displayName": "Agents"
+    },
+    {
+      "description": "Hosts that can launch runners. Browse the host filesystem and create directories.",
+      "name": "hosts",
+      "x-displayName": "Hosts"
+    },
+    {
+      "description": "Launch runners on a host and check their status.",
+      "name": "runners",
+      "x-displayName": "Runners"
+    },
+    {
+      "description": "Contextual policies scoped to a single session \u2014 list, create, update, and remove.",
+      "name": "session_policies",
+      "x-displayName": "Session Policies"
+    },
+    {
+      "description": "Server-level default policies applied to new sessions.",
+      "name": "default_policies",
+      "x-displayName": "Default Policies"
+    },
+    {
+      "description": "The catalog of policy types available to instantiate.",
+      "name": "policy_registry",
+      "x-displayName": "Policy Registry"
+    },
+    {
+      "description": "Threaded comments on a session, including sending a comment to the agent.",
+      "name": "comments",
+      "x-displayName": "Comments"
+    },
+    {
+      "description": "Health, version, and identity endpoints for the running server.",
+      "name": "system",
+      "x-displayName": "System"
+    }
+  ]
 }
