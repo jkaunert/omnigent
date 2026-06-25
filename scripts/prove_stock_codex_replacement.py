@@ -16,13 +16,15 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from omnigent_client import OmnigentClient
 
@@ -75,6 +77,8 @@ APPLE_MCP_XCODEBUILD_SENTINELS = (
 RELATIVE_MARKDOWN_PATH_RE = re.compile(r"`((?:\.\.?/)[^`]+)`")
 PLUGIN_SKILL_REF_RE = re.compile(rf"\b{re.escape(PLUGIN_NAME)}:([A-Za-z0-9_.-]+)\b")
 EXPECTED_APPLE_MCP_SERVERS = frozenset({"sosumi", "memory", "XcodeBuildMCP"})
+DEFAULT_LIVE_PROOF_TIMEOUT_SECONDS = 180.0
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -111,6 +115,10 @@ class SessionRun:
     session_id: str
     text: str
     items: list[dict[str, Any]]
+
+
+class LiveProofTimeoutError(Exception):
+    """A single live proof step exceeded its configured wall-clock budget."""
 
 
 def _candidate_bundles() -> list[Path]:
@@ -178,6 +186,84 @@ def codex_version(path: Path) -> str:
         return f"unknown ({exc})"
     text = (completed.stdout or completed.stderr).strip()
     return text or f"unknown (exit {completed.returncode})"
+
+
+def run_live_proof_step(
+    name: str,
+    *,
+    timeout_seconds: float,
+    action: Callable[[], T],
+) -> T:
+    """Run one live proof step with explicit progress and timeout evidence."""
+    timeout_label = _format_seconds(timeout_seconds)
+    print(f"live_proof_start={name} timeout={timeout_label}", flush=True)
+    started = time.monotonic()
+    try:
+        with _live_proof_timeout(name, timeout_seconds):
+            result = action()
+    except LiveProofTimeoutError as exc:
+        elapsed = time.monotonic() - started
+        print(
+            f"live_proof_timeout={name} elapsed={_format_seconds(elapsed)} "
+            f"timeout={timeout_label}",
+            flush=True,
+        )
+        raise SystemExit(
+            f"Live proof step {name!r} exceeded {timeout_label}. "
+            "The proof run stopped at this isolated surface."
+        ) from exc
+    except SystemExit as exc:
+        elapsed = time.monotonic() - started
+        print(
+            f"live_proof_failed={name} elapsed={_format_seconds(elapsed)} "
+            f"exit={exc.code!r}",
+            flush=True,
+        )
+        raise
+    except Exception as exc:
+        elapsed = time.monotonic() - started
+        print(
+            f"live_proof_failed={name} elapsed={_format_seconds(elapsed)} "
+            f"error={type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        raise
+    elapsed = time.monotonic() - started
+    print(f"live_proof_ok={name} elapsed={_format_seconds(elapsed)}", flush=True)
+    return result
+
+
+@contextlib.contextmanager
+def _live_proof_timeout(name: str, timeout_seconds: float) -> Iterator[None]:
+    """Install a temporary SIGALRM deadline for one live proof step."""
+    if timeout_seconds <= 0:
+        yield
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+
+    def _raise_timeout(_signum: int, _frame: Any) -> None:
+        raise LiveProofTimeoutError(
+            f"live proof step {name!r} exceeded {_format_seconds(timeout_seconds)}"
+        )
+
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+
+
+def _format_seconds(seconds: float) -> str:
+    """Format elapsed seconds compactly for proof logs."""
+    if seconds == int(seconds):
+        return f"{int(seconds)}s"
+    return f"{seconds:.1f}s"
 
 
 def copy_bundle(source: Path, destination: Path) -> None:
@@ -924,6 +1010,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep the generated temp agent directory for debugging.",
     )
+    parser.add_argument(
+        "--live-proof-timeout",
+        type=float,
+        default=DEFAULT_LIVE_PROOF_TIMEOUT_SECONDS,
+        help=(
+            "Wall-clock seconds allowed for each live proof step. "
+            "Use 0 or a negative value to disable. Defaults to "
+            f"{DEFAULT_LIVE_PROOF_TIMEOUT_SECONDS:.0f}."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1044,7 +1140,11 @@ def main() -> int:
 
         assert codex_path is not None
         if proof in {"graph", "all"}:
-            transcript = run_live_runner_proof(agent_dir, codex_path)
+            transcript = run_live_proof_step(
+                "graph",
+                timeout_seconds=args.live_proof_timeout,
+                action=lambda: run_live_runner_proof(agent_dir, codex_path),
+            )
             print(f"graph_transcript_preview={transcript[:500]!r}")
             print(
                 "ASSERTION: normal Omnigent run_prompt session/runner path "
@@ -1052,7 +1152,11 @@ def main() -> int:
             )
             print("ASSERTION: stock Codex read a bundled Apple reference through Omnigent")
         if proof in {"tool-plane", "all"}:
-            tool_proof = run_live_tool_proof(agent_dir, codex_path)
+            tool_proof = run_live_proof_step(
+                "tool-plane",
+                timeout_seconds=args.live_proof_timeout,
+                action=lambda: run_live_tool_proof(agent_dir, codex_path),
+            )
             print(f"tool_session_id={tool_proof.session_id}")
             print(f"tool_call_id={tool_proof.call_id}")
             print(f"tool_transcript_preview={tool_proof.transcript[:500]!r}")
@@ -1062,21 +1166,28 @@ def main() -> int:
             )
             print("ASSERTION: persisted session items include sys_os_read call and result")
         if needs_memory_mcp:
-            if proof == "all":
-                write_agent_config(
-                    agent_dir,
-                    apple_mcp_servers={
-                        APPLE_MCP_MEMORY_SERVER: apple_mcp_servers[
-                            APPLE_MCP_MEMORY_SERVER
-                        ]
-                    },
-                    mcp_env_overrides={
-                        APPLE_MCP_MEMORY_SERVER: mcp_env_overrides[
-                            APPLE_MCP_MEMORY_SERVER
-                        ]
-                    },
-                )
-            mcp_proof = run_live_apple_memory_mcp_proof(agent_dir, codex_path)
+            def run_memory_step() -> AppleMcpProof:
+                if proof == "all":
+                    write_agent_config(
+                        agent_dir,
+                        apple_mcp_servers={
+                            APPLE_MCP_MEMORY_SERVER: apple_mcp_servers[
+                                APPLE_MCP_MEMORY_SERVER
+                            ]
+                        },
+                        mcp_env_overrides={
+                            APPLE_MCP_MEMORY_SERVER: mcp_env_overrides[
+                                APPLE_MCP_MEMORY_SERVER
+                            ]
+                        },
+                    )
+                return run_live_apple_memory_mcp_proof(agent_dir, codex_path)
+
+            mcp_proof = run_live_proof_step(
+                "apple-mcp-memory",
+                timeout_seconds=args.live_proof_timeout,
+                action=run_memory_step,
+            )
             print(f"apple_mcp_session_id={mcp_proof.session_id}")
             print(f"apple_mcp_call_id={mcp_proof.call_id}")
             print(f"apple_mcp_output_preview={mcp_proof.output_preview!r}")
@@ -1087,17 +1198,24 @@ def main() -> int:
             )
             print(f"ASSERTION: persisted session items include {APPLE_MCP_MEMORY_TOOL} result")
         if needs_sosumi_mcp:
-            if proof == "all":
-                write_agent_config(
-                    agent_dir,
-                    apple_mcp_servers={
-                        APPLE_MCP_SOSUMI_SERVER: apple_mcp_servers[
-                            APPLE_MCP_SOSUMI_SERVER
-                        ]
-                    },
-                    mcp_env_overrides={},
-                )
-            sosumi_proof = run_live_apple_sosumi_mcp_proof(agent_dir, codex_path)
+            def run_sosumi_step() -> AppleMcpProof:
+                if proof == "all":
+                    write_agent_config(
+                        agent_dir,
+                        apple_mcp_servers={
+                            APPLE_MCP_SOSUMI_SERVER: apple_mcp_servers[
+                                APPLE_MCP_SOSUMI_SERVER
+                            ]
+                        },
+                        mcp_env_overrides={},
+                    )
+                return run_live_apple_sosumi_mcp_proof(agent_dir, codex_path)
+
+            sosumi_proof = run_live_proof_step(
+                "apple-mcp-sosumi",
+                timeout_seconds=args.live_proof_timeout,
+                action=run_sosumi_step,
+            )
             print(f"sosumi_mcp_session_id={sosumi_proof.session_id}")
             print(f"sosumi_mcp_call_id={sosumi_proof.call_id}")
             print(f"sosumi_mcp_output_preview={sosumi_proof.output_preview!r}")
@@ -1109,20 +1227,27 @@ def main() -> int:
             print(f"ASSERTION: persisted session items include {APPLE_MCP_SOSUMI_TOOL} result")
         if needs_xcodebuild_mcp:
             assert xcodebuild_workspace_root is not None
-            if proof == "all":
-                write_agent_config(
+            def run_xcodebuild_step() -> AppleMcpProof:
+                if proof == "all":
+                    write_agent_config(
+                        agent_dir,
+                        apple_mcp_servers={
+                            APPLE_MCP_XCODEBUILD_SERVER: apple_mcp_servers[
+                                APPLE_MCP_XCODEBUILD_SERVER
+                            ]
+                        },
+                        mcp_env_overrides={},
+                    )
+                return run_live_apple_xcodebuild_mcp_proof(
                     agent_dir,
-                    apple_mcp_servers={
-                        APPLE_MCP_XCODEBUILD_SERVER: apple_mcp_servers[
-                            APPLE_MCP_XCODEBUILD_SERVER
-                        ]
-                    },
-                    mcp_env_overrides={},
+                    codex_path,
+                    workspace_root=xcodebuild_workspace_root,
                 )
-            xcodebuild_proof = run_live_apple_xcodebuild_mcp_proof(
-                agent_dir,
-                codex_path,
-                workspace_root=xcodebuild_workspace_root,
+
+            xcodebuild_proof = run_live_proof_step(
+                "apple-mcp-xcodebuild",
+                timeout_seconds=args.live_proof_timeout,
+                action=run_xcodebuild_step,
             )
             print(f"xcodebuild_mcp_session_id={xcodebuild_proof.session_id}")
             print(f"xcodebuild_mcp_call_id={xcodebuild_proof.call_id}")
