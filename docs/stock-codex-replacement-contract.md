@@ -79,7 +79,8 @@ The current spike proves the first narrow adapter behavior:
 | Deterministic `routerSelection` route evidence before Codex model output | `replacement-ready` for the narrow Apple top-level route case | Omnigent branch `spike/codex-router-selection-adapter`, commit `51dc45ea`; direct Codex executor proof and normal Omnigent `run_prompt()` session/runner proof both emitted `Routing: orchestrator-led` before model continuation. |
 | Full Apple top-level skill graph from an Omnigent bundle | `replacement-ready` for the selected `apple-app-orchestrator` graph | `scripts/prove_stock_codex_replacement.py` resolved 19 relative reference files and 13 referenced Apple skills inside the generated Omnigent bundle, then stock Codex read `references/brigade-output-contract.md` through normal `run_prompt()` and returned `GRAPH_OK`; initially proven on `0.137.0` and revalidated on `0.142.2`. |
 | Omnigent dynamic tool exposure to stock Codex | `replacement-ready` for the `dynamicTools` channel | `scripts/prove_stock_codex_replacement.py --proof tool-plane` verified the Apple bundle's `.mcp.json` declares `XcodeBuildMCP`, `memory`, and `sosumi`, then stock Codex `0.142.2` invoked Omnigent-exposed `sys_os_read` through normal `run_prompt()`; persisted session items included a `function_call` and matching `function_call_output` containing the sentinel. |
-| Apple `.mcp.json` server execution through Omnigent | `unproven` | The bounded MCP/tools proof verifies the manifest is bundled and the stock-Codex dynamic tool channel works. It does not yet convert or execute the Apple plugin `.mcp.json` servers as Omnigent `tools/mcp` declarations. |
+| Apple `.mcp.json` `memory` server execution through Omnigent | `replacement-ready` for the local stdio `memory` server | `scripts/prove_stock_codex_replacement.py --proof apple-mcp` converted the Apple plugin `.mcp.json` `memory` server into an Omnigent `tools: memory: type: mcp` declaration with an isolated temp `MEMORY_FILE_PATH`, then stock Codex `0.142.2` invoked `memory__create_entities`; persisted session items included a `function_call` and matching `function_call_output` containing `APPLE_MCP_SENTINEL_73`. |
+| Apple `.mcp.json` `XcodeBuildMCP` and `sosumi` execution through Omnigent | `unproven` | The `memory` server proves the conversion and stdio MCP execution path. It does not yet prove host-specific Xcode simulator/device tooling or network/documentation MCP behavior. |
 
 This does not yet prove full Codex-fork replacement.
 
@@ -107,6 +108,14 @@ uvx --from . python scripts/prove_stock_codex_replacement.py \
   --codex-path /opt/homebrew/bin/codex
 ```
 
+Apple memory MCP execution proof:
+
+```bash
+uvx --from . python scripts/prove_stock_codex_replacement.py \
+  --proof apple-mcp \
+  --codex-path /opt/homebrew/bin/codex
+```
+
 The proof script copies the installed Apple workflow bundle into a temporary
 Omnigent agent, writes an Omnigent `harness: codex` config, refuses
 `.codex-fork` binaries by default, and removes the temp fixture unless
@@ -116,11 +125,12 @@ Omnigent agent, writes an Omnigent `harness: codex` config, refuses
 
 Run these in order unless a later gate becomes cheaper due to new evidence.
 
-1. Apple MCP server conversion and execution
-   - Convert the Apple plugin `.mcp.json` server declarations into Omnigent MCP
-     tool declarations, then prove stock Codex can list and call at least one
-     Apple MCP-backed tool through the Omnigent path. Keep this separate from
-     the already-proven `dynamicTools` channel.
+1. Host-specific Apple MCP execution
+   - Extend the proven `.mcp.json` conversion path from the local stdio
+     `memory` server to `XcodeBuildMCP` and `sosumi`. Keep Xcode simulator or
+     device checks and network-backed documentation checks as separate bounded
+     gates so host setup failures do not blur the already-proven MCP adapter
+     path.
 
 2. Session and terminal behavior
    - Prove the Omnigent path supports the required live terminal/session shape,
