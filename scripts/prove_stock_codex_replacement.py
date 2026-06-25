@@ -54,9 +54,16 @@ EXPECTED_ROUTE = (
 )
 REFERENCE_SENTINEL = "Use this shared contract for broad brigade-orchestrator lanes"
 TOOL_SENTINEL = "OMNIGENT_TOOL_SENTINEL_42"
-APPLE_MCP_PROOF_SERVER = "memory"
-APPLE_MCP_PROOF_TOOL = "memory__create_entities"
-APPLE_MCP_SENTINEL = "APPLE_MCP_SENTINEL_73"
+APPLE_MCP_MEMORY_SERVER = "memory"
+APPLE_MCP_MEMORY_TOOL = "memory__create_entities"
+APPLE_MCP_MEMORY_SENTINEL = "APPLE_MCP_SENTINEL_73"
+APPLE_MCP_SOSUMI_SERVER = "sosumi"
+APPLE_MCP_SOSUMI_TOOL = "sosumi__fetchAppleDocumentation"
+APPLE_MCP_SOSUMI_DOC_PATH = "/documentation/swift/string"
+APPLE_MCP_SOSUMI_SENTINELS = (
+    "title: String",
+    "source: https://developer.apple.com/documentation/swift/string",
+)
 RELATIVE_MARKDOWN_PATH_RE = re.compile(r"`((?:\.\.?/)[^`]+)`")
 PLUGIN_SKILL_REF_RE = re.compile(rf"\b{re.escape(PLUGIN_NAME)}:([A-Za-z0-9_.-]+)\b")
 EXPECTED_APPLE_MCP_SERVERS = frozenset({"sosumi", "memory", "XcodeBuildMCP"})
@@ -177,15 +184,16 @@ def copy_bundle(source: Path, destination: Path) -> None:
 def write_agent_config(
     agent_dir: Path,
     *,
-    apple_mcp_memory: dict[str, Any] | None = None,
-    memory_file: Path | None = None,
+    apple_mcp_servers: dict[str, dict[str, Any]] | None = None,
+    mcp_env_overrides: dict[str, dict[str, str]] | None = None,
 ) -> None:
     """Write the Omnigent harness config into the copied bundle root."""
     mcp_tools_block = ""
-    if apple_mcp_memory is not None:
-        if memory_file is None:
-            raise ValueError("memory_file is required when apple_mcp_memory is set")
-        mcp_tools_block = _memory_mcp_tools_yaml(apple_mcp_memory, memory_file)
+    if apple_mcp_servers:
+        mcp_tools_block = _mcp_tools_yaml(
+            apple_mcp_servers,
+            env_overrides=mcp_env_overrides or {},
+        )
     (agent_dir / "config.yaml").write_text(
         f"""
 spec_version: 1
@@ -208,28 +216,38 @@ os_env:
     )
 
 
-def _memory_mcp_tools_yaml(memory_config: dict[str, Any], memory_file: Path) -> str:
-    """Translate the Apple ``memory`` MCP config into Omnigent YAML."""
-    command = memory_config.get("command")
-    args = memory_config.get("args", [])
-    if not isinstance(command, str) or not command:
-        raise SystemExit("Apple memory MCP config does not declare a command")
-    if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
-        raise SystemExit("Apple memory MCP config args must be a list of strings")
-    lines = [
-        "tools:",
-        f"  {APPLE_MCP_PROOF_SERVER}:",
-        "    type: mcp",
-        f"    command: {_yaml_string(command)}",
-        "    args:",
-    ]
-    lines.extend(f"      - {_yaml_string(arg)}" for arg in args)
-    lines.extend(
-        [
-            "    env:",
-            f"      MEMORY_FILE_PATH: {_yaml_string(str(memory_file))}",
-        ]
-    )
+def _mcp_tools_yaml(
+    server_configs: dict[str, dict[str, Any]],
+    *,
+    env_overrides: dict[str, dict[str, str]],
+) -> str:
+    """Translate Apple ``.mcp.json`` server configs into Omnigent YAML."""
+    lines = ["tools:"]
+    for server_name, config in server_configs.items():
+        command = config.get("command")
+        args = config.get("args", [])
+        if not isinstance(command, str) or not command:
+            raise SystemExit(f"Apple MCP server {server_name!r} does not declare a command")
+        if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+            raise SystemExit(f"Apple MCP server {server_name!r} args must be a list of strings")
+        raw_env = config.get("env", {})
+        if raw_env and not isinstance(raw_env, dict):
+            raise SystemExit(f"Apple MCP server {server_name!r} env must be an object")
+        env = {str(key): str(value) for key, value in (raw_env or {}).items()}
+        env.update(env_overrides.get(server_name, {}))
+
+        lines.extend(
+            [
+                f"  {server_name}:",
+                "    type: mcp",
+                f"    command: {_yaml_string(command)}",
+                "    args:",
+            ]
+        )
+        lines.extend(f"      - {_yaml_string(arg)}" for arg in args)
+        if env:
+            lines.append("    env:")
+            lines.extend(f"      {key}: {_yaml_string(value)}" for key, value in env.items())
     return "\n".join(lines) + "\n"
 
 
@@ -311,12 +329,12 @@ def prove_apple_mcp_manifest(bundle_dir: Path) -> dict[str, Any]:
     return mcp_manifest
 
 
-def memory_mcp_config_from_manifest(mcp_manifest: dict[str, Any]) -> dict[str, Any]:
-    """Return the Apple memory MCP server config from a parsed manifest."""
-    memory_config = mcp_manifest.get(APPLE_MCP_PROOF_SERVER)
-    if not isinstance(memory_config, dict):
-        raise SystemExit("Apple MCP manifest does not contain a memory server object")
-    return memory_config
+def mcp_config_from_manifest(mcp_manifest: dict[str, Any], server_name: str) -> dict[str, Any]:
+    """Return one Apple MCP server config from a parsed manifest."""
+    server_config = mcp_manifest.get(server_name)
+    if not isinstance(server_config, dict):
+        raise SystemExit(f"Apple MCP manifest does not contain a {server_name!r} server object")
+    return server_config
 
 
 def run_live_runner_proof(agent_dir: Path, codex_path: Path) -> str:
@@ -466,13 +484,13 @@ def run_live_tool_proof(agent_dir: Path, codex_path: Path) -> ToolProof:
     return ToolProof(session_id=run.session_id, call_id=call_id, transcript=transcript)
 
 
-def run_live_apple_mcp_proof(agent_dir: Path, codex_path: Path) -> AppleMcpProof:
-    """Prove stock Codex can call an Apple MCP-backed tool through Omnigent."""
+def run_live_apple_memory_mcp_proof(agent_dir: Path, codex_path: Path) -> AppleMcpProof:
+    """Prove stock Codex can call the Apple memory MCP through Omnigent."""
     prompt = (
         "SwiftUI Apple MCP execution proof. Call the available tool named "
-        f"{APPLE_MCP_PROOF_TOOL} exactly once before answering. Pass exactly one "
+        f"{APPLE_MCP_MEMORY_TOOL} exactly once before answering. Pass exactly one "
         "entity with name "
-        f"{APPLE_MCP_SENTINEL!r}, entityType 'proof', and one observation "
+        f"{APPLE_MCP_MEMORY_SENTINEL!r}, entityType 'proof', and one observation "
         "'created by Omnigent stock Codex proof'. Do not use any other tool "
         "for this proof. After the tool call succeeds, reply exactly APPLE_MCP_OK."
     )
@@ -489,14 +507,14 @@ def run_live_apple_mcp_proof(agent_dir: Path, codex_path: Path) -> AppleMcpProof
     calls = [
         item
         for item in run.items
-        if item.get("type") == "function_call" and item.get("name") == APPLE_MCP_PROOF_TOOL
+        if item.get("type") == "function_call" and item.get("name") == APPLE_MCP_MEMORY_TOOL
     ]
     if not calls:
-        raise SystemExit(f"No persisted {APPLE_MCP_PROOF_TOOL} function_call found")
+        raise SystemExit(_missing_tool_call_message(APPLE_MCP_MEMORY_TOOL, run))
     call = calls[-1]
     call_id = call.get("call_id")
     if not isinstance(call_id, str) or not call_id:
-        raise SystemExit(f"Persisted {APPLE_MCP_PROOF_TOOL} call has invalid call_id: {call!r}")
+        raise SystemExit(f"Persisted {APPLE_MCP_MEMORY_TOOL} call has invalid call_id: {call!r}")
     outputs = [
         item
         for item in run.items
@@ -505,7 +523,7 @@ def run_live_apple_mcp_proof(agent_dir: Path, codex_path: Path) -> AppleMcpProof
     if not outputs:
         raise SystemExit(f"No persisted function_call_output found for call_id={call_id}")
     output_text = str(outputs[-1].get("output", ""))
-    if APPLE_MCP_SENTINEL not in output_text or "error" in output_text.lower():
+    if APPLE_MCP_MEMORY_SENTINEL not in output_text or "error" in output_text.lower():
         raise SystemExit(
             "Apple MCP tool output did not contain the sentinel or looked erroneous: "
             f"{output_text}"
@@ -516,6 +534,148 @@ def run_live_apple_mcp_proof(agent_dir: Path, codex_path: Path) -> AppleMcpProof
         transcript=transcript,
         output_preview=output_text[:500],
     )
+
+
+def run_live_apple_sosumi_mcp_proof(agent_dir: Path, codex_path: Path) -> AppleMcpProof:
+    """Prove stock Codex can call the Apple sosumi MCP through Omnigent."""
+    prompts = (
+        (
+            "Tool invocation drill. After the required route block, your next "
+            f"action must be a function call to {APPLE_MCP_SOSUMI_TOOL}, not "
+            "prose. Use JSON arguments "
+            f'{{"path": "{APPLE_MCP_SOSUMI_DOC_PATH}"}}. After the tool result '
+            "is available, reply exactly SOSUMI_MCP_OK."
+        ),
+        (
+            "SwiftUI Apple documentation MCP proof. Call the available tool "
+            f"named {APPLE_MCP_SOSUMI_TOOL} exactly once before answering. "
+            f"Pass the path {APPLE_MCP_SOSUMI_DOC_PATH!r}. Do not use any "
+            "other tool for this proof. After the tool call succeeds, reply "
+            "exactly SOSUMI_MCP_OK."
+        ),
+        (
+            f"Use {APPLE_MCP_SOSUMI_TOOL} now to fetch "
+            f"{APPLE_MCP_SOSUMI_DOC_PATH}. This is a tool-call proof; a text "
+            "answer without the function call is invalid. After the function "
+            "call output is available, reply exactly SOSUMI_MCP_OK."
+        ),
+    )
+    errors: list[str] = []
+    for attempt, prompt in enumerate(prompts, start=1):
+        run = asyncio_run_session_query(
+            agent_dir=agent_dir,
+            codex_path=codex_path,
+            prompt=prompt,
+        )
+        try:
+            return _validate_sosumi_mcp_run(run, attempt=attempt)
+        except SosumiProofAttemptError as exc:
+            errors.append(str(exc))
+    joined_errors = "\n\n".join(errors)
+    raise SystemExit(f"Sosumi MCP proof failed after {len(prompts)} attempts:\n{joined_errors}")
+
+
+class SosumiProofAttemptError(Exception):
+    """One failed sosumi proof attempt that can be retried."""
+
+
+def _validate_sosumi_mcp_run(run: SessionRun, *, attempt: int) -> AppleMcpProof:
+    """Validate one sosumi proof attempt."""
+    transcript = run.text.strip()
+    if not transcript.startswith(EXPECTED_ROUTE):
+        raise SosumiProofAttemptError(
+            f"attempt={attempt}: transcript did not start with expected route block.\n"
+            f"Expected prefix:\n{EXPECTED_ROUTE}\n\nActual:\n{transcript[:1000]}"
+        )
+
+    calls = [
+        item
+        for item in run.items
+        if item.get("type") == "function_call" and item.get("name") == APPLE_MCP_SOSUMI_TOOL
+    ]
+    if not calls:
+        raise SosumiProofAttemptError(
+            f"attempt={attempt}: "
+            + _missing_tool_call_message(APPLE_MCP_SOSUMI_TOOL, run)
+        )
+    call = calls[-1]
+    call_id = call.get("call_id")
+    if not isinstance(call_id, str) or not call_id:
+        raise SosumiProofAttemptError(
+            f"attempt={attempt}: persisted {APPLE_MCP_SOSUMI_TOOL} call "
+            f"has invalid call_id: {call!r}"
+        )
+    outputs = [
+        item
+        for item in run.items
+        if item.get("type") == "function_call_output" and item.get("call_id") == call_id
+    ]
+    if not outputs:
+        raise SosumiProofAttemptError(
+            f"attempt={attempt}: no persisted function_call_output found for call_id={call_id}"
+        )
+    output_text = str(outputs[-1].get("output", ""))
+    missing = [sentinel for sentinel in APPLE_MCP_SOSUMI_SENTINELS if sentinel not in output_text]
+    if missing or "error" in output_text.lower():
+        raise SosumiProofAttemptError(
+            f"attempt={attempt}: sosumi MCP tool output missed expected "
+            "documentation sentinels or looked erroneous. "
+            f"missing={missing!r} output={output_text[:1000]}"
+        )
+    if "SOSUMI_MCP_OK" not in transcript:
+        raise SosumiProofAttemptError(
+            f"attempt={attempt}: sosumi MCP proof did not return "
+            f"SOSUMI_MCP_OK. Transcript:\n{transcript}"
+        )
+    return AppleMcpProof(
+        session_id=run.session_id,
+        call_id=call_id,
+        transcript=transcript,
+        output_preview=output_text[:500],
+    )
+
+
+def _missing_tool_call_message(expected_tool: str, run: SessionRun) -> str:
+    """Return a compact diagnostic for proof runs that skip a required tool."""
+    return (
+        f"No persisted {expected_tool} function_call found.\n"
+        f"session_id={run.session_id}\n"
+        f"observed_function_calls={_function_call_names(run.items)!r}\n"
+        f"session_items={_session_item_summary(run.items)}\n"
+        f"transcript:\n{run.text.strip()}"
+    )
+
+
+def _function_call_names(items: list[dict[str, Any]]) -> list[str]:
+    """Extract persisted function-call names from Omnigent session items."""
+    return [
+        str(item.get("name"))
+        for item in items
+        if item.get("type") == "function_call" and item.get("name") is not None
+    ]
+
+
+def _session_item_summary(items: list[dict[str, Any]]) -> str:
+    """Summarize persisted session items without dumping full tool payloads."""
+    summary: list[str] = []
+    for index, item in enumerate(items):
+        item_type = item.get("type")
+        if item_type == "function_call":
+            summary.append(
+                f"{index}:function_call:{item.get('name')}:{item.get('call_id')}"
+            )
+        elif item_type == "function_call_output":
+            output = str(item.get("output", ""))
+            summary.append(
+                f"{index}:function_call_output:{item.get('call_id')}:len={len(output)}"
+            )
+        elif item_type == "message":
+            role = item.get("role", "?")
+            content = str(item.get("content", ""))
+            summary.append(f"{index}:message:{role}:len={len(content)}")
+        else:
+            summary.append(f"{index}:{item_type}")
+    return "[" + ", ".join(summary[:40]) + "]"
 
 
 def asyncio_run_session_query(*, agent_dir: Path, codex_path: Path, prompt: str) -> SessionRun:
@@ -554,11 +714,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--proof",
-        choices=("graph", "tool-plane", "mcp-tools", "apple-mcp", "all"),
+        choices=("graph", "tool-plane", "mcp-tools", "apple-mcp", "apple-mcp-sosumi", "all"),
         default="graph",
         help=(
             "Proof gate to run. Defaults to the existing graph proof. "
-            "'mcp-tools' is accepted as an alias for 'tool-plane'."
+            "'mcp-tools' is accepted as an alias for 'tool-plane'; "
+            "'apple-mcp' proves memory and 'apple-mcp-sosumi' proves sosumi."
         ),
     )
     parser.add_argument(
@@ -607,19 +768,42 @@ def main() -> int:
 
     with temporary_agent_dir(args.keep_fixture) as agent_dir:
         copy_bundle(source_bundle, agent_dir)
-        needs_apple_mcp = proof in {"apple-mcp", "all"}
+        needs_memory_mcp = proof in {"apple-mcp", "all"}
+        needs_sosumi_mcp = proof in {"apple-mcp-sosumi", "all"}
+        needs_apple_mcp = needs_memory_mcp or needs_sosumi_mcp
         mcp_manifest = None
         memory_file = None
-        if proof in {"tool-plane", "apple-mcp", "all"}:
+        apple_mcp_servers: dict[str, dict[str, Any]] = {}
+        mcp_env_overrides: dict[str, dict[str, str]] = {}
+        if proof in {"tool-plane", "apple-mcp", "apple-mcp-sosumi", "all"}:
             mcp_manifest = prove_apple_mcp_manifest(agent_dir)
         if needs_apple_mcp:
             assert mcp_manifest is not None
-            memory_file = agent_dir / "memory-proof.json"
-            memory_file.write_text("{}", encoding="utf-8")
+            if needs_memory_mcp:
+                memory_file = agent_dir / "memory-proof.json"
+                memory_file.write_text("{}", encoding="utf-8")
+                apple_mcp_servers[APPLE_MCP_MEMORY_SERVER] = mcp_config_from_manifest(
+                    mcp_manifest,
+                    APPLE_MCP_MEMORY_SERVER,
+                )
+                mcp_env_overrides[APPLE_MCP_MEMORY_SERVER] = {
+                    "MEMORY_FILE_PATH": str(memory_file)
+                }
+            if needs_sosumi_mcp:
+                apple_mcp_servers[APPLE_MCP_SOSUMI_SERVER] = mcp_config_from_manifest(
+                    mcp_manifest,
+                    APPLE_MCP_SOSUMI_SERVER,
+                )
+        if proof == "all" and not args.skip_live:
+            # Keep each live proof surface minimal. With every MCP exposed at once,
+            # stock Codex can choose to narrate instead of calling the one proof
+            # tool, which tests model selection noise rather than the adapter path.
+            write_agent_config(agent_dir)
+        elif needs_apple_mcp:
             write_agent_config(
                 agent_dir,
-                apple_mcp_memory=memory_mcp_config_from_manifest(mcp_manifest),
-                memory_file=memory_file,
+                apple_mcp_servers=apple_mcp_servers,
+                mcp_env_overrides=mcp_env_overrides,
             )
         else:
             write_agent_config(agent_dir)
@@ -641,12 +825,18 @@ def main() -> int:
             assert mcp_manifest is not None
             print(f"static_apple_mcp_servers={','.join(sorted(mcp_manifest))}")
             print("ASSERTION: Apple plugin MCP manifest is bundled and well-formed")
-        if proof in {"apple-mcp", "all"}:
+        if needs_memory_mcp:
             assert mcp_manifest is not None
             print(f"static_apple_mcp_servers={','.join(sorted(mcp_manifest))}")
-            print(f"converted_apple_mcp_server={APPLE_MCP_PROOF_SERVER}")
+            print(f"converted_apple_mcp_server={APPLE_MCP_MEMORY_SERVER}")
             print(f"converted_apple_mcp_memory_file={memory_file}")
             print("ASSERTION: Apple memory MCP config converted into Omnigent tools config")
+        if needs_sosumi_mcp:
+            assert mcp_manifest is not None
+            print(f"static_apple_mcp_servers={','.join(sorted(mcp_manifest))}")
+            print(f"converted_apple_mcp_server={APPLE_MCP_SOSUMI_SERVER}")
+            print(f"converted_apple_mcp_sosumi_path={APPLE_MCP_SOSUMI_DOC_PATH}")
+            print("ASSERTION: Apple sosumi MCP config converted into Omnigent tools config")
 
         if args.skip_live:
             print("live_runner_proof=skipped")
@@ -671,8 +861,22 @@ def main() -> int:
                 "through dynamicTools"
             )
             print("ASSERTION: persisted session items include sys_os_read call and result")
-        if proof in {"apple-mcp", "all"}:
-            mcp_proof = run_live_apple_mcp_proof(agent_dir, codex_path)
+        if needs_memory_mcp:
+            if proof == "all":
+                write_agent_config(
+                    agent_dir,
+                    apple_mcp_servers={
+                        APPLE_MCP_MEMORY_SERVER: apple_mcp_servers[
+                            APPLE_MCP_MEMORY_SERVER
+                        ]
+                    },
+                    mcp_env_overrides={
+                        APPLE_MCP_MEMORY_SERVER: mcp_env_overrides[
+                            APPLE_MCP_MEMORY_SERVER
+                        ]
+                    },
+                )
+            mcp_proof = run_live_apple_memory_mcp_proof(agent_dir, codex_path)
             print(f"apple_mcp_session_id={mcp_proof.session_id}")
             print(f"apple_mcp_call_id={mcp_proof.call_id}")
             print(f"apple_mcp_output_preview={mcp_proof.output_preview!r}")
@@ -681,7 +885,28 @@ def main() -> int:
                 "ASSERTION: stock Codex invoked Apple memory MCP through "
                 "Omnigent-converted MCP config"
             )
-            print(f"ASSERTION: persisted session items include {APPLE_MCP_PROOF_TOOL} result")
+            print(f"ASSERTION: persisted session items include {APPLE_MCP_MEMORY_TOOL} result")
+        if needs_sosumi_mcp:
+            if proof == "all":
+                write_agent_config(
+                    agent_dir,
+                    apple_mcp_servers={
+                        APPLE_MCP_SOSUMI_SERVER: apple_mcp_servers[
+                            APPLE_MCP_SOSUMI_SERVER
+                        ]
+                    },
+                    mcp_env_overrides={},
+                )
+            sosumi_proof = run_live_apple_sosumi_mcp_proof(agent_dir, codex_path)
+            print(f"sosumi_mcp_session_id={sosumi_proof.session_id}")
+            print(f"sosumi_mcp_call_id={sosumi_proof.call_id}")
+            print(f"sosumi_mcp_output_preview={sosumi_proof.output_preview!r}")
+            print(f"sosumi_mcp_transcript_preview={sosumi_proof.transcript[:500]!r}")
+            print(
+                "ASSERTION: stock Codex invoked Apple sosumi MCP through "
+                "Omnigent-converted MCP config"
+            )
+            print(f"ASSERTION: persisted session items include {APPLE_MCP_SOSUMI_TOOL} result")
     return 0
 
 
