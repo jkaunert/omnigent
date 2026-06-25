@@ -108,6 +108,8 @@ def resolve_router_selection(
     prompt_addendum = _prompt_addendum(
         selected_owner=selected_owner,
         skill_name=skill_name,
+        skill_path=skill_path,
+        bundle_dir=bundle_dir,
         skill_text=skill_text,
     )
     return RouterSelection(
@@ -249,12 +251,22 @@ def _route_block(selected_owner: str) -> str:
     )
 
 
-def _prompt_addendum(*, selected_owner: str, skill_name: str, skill_text: str) -> str:
+def _prompt_addendum(
+    *,
+    selected_owner: str,
+    skill_name: str,
+    skill_path: Path,
+    bundle_dir: Path,
+    skill_text: str,
+) -> str:
     return (
         "[Omnigent routerSelection]\n"
         f"The bundle manifest selected `{selected_owner}` for this turn.\n"
         "Omnigent already emitted the route-evidence block before your response. "
         "Continue after that block; do not repeat or alter it.\n"
-        f"Use the bundled `{skill_name}` skill instructions below as active policy.\n\n"
+        f"Use the bundled `{skill_name}` skill instructions below as active policy.\n"
+        f"Selected skill path: `{skill_path}`.\n"
+        f"Bundle root: `{bundle_dir}`.\n"
+        f"Resolve relative paths in that SKILL.md from `{skill_path.parent}`.\n\n"
         f"{skill_text}"
     )

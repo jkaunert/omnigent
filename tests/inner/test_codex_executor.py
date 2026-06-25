@@ -496,6 +496,14 @@ class TestCodexExecutor(unittest.TestCase):
                 self.assertIn("[Omnigent routerSelection]", prompt)
                 self.assertIn("Use the Apple orchestrator policy.", prompt)
                 self.assertIn("already emitted the route-evidence block", prompt)
+                selected_skill = bundle / "skills/apple-app-orchestrator/SKILL.md"
+                selected_skill_dir = bundle / "skills/apple-app-orchestrator"
+                self.assertIn(f"Selected skill path: `{selected_skill}`", prompt)
+                self.assertIn(f"Bundle root: `{bundle}`", prompt)
+                self.assertIn(
+                    f"Resolve relative paths in that SKILL.md from `{selected_skill_dir}`",
+                    prompt,
+                )
 
         _run(_t())
 
