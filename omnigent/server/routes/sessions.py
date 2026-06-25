@@ -3723,7 +3723,7 @@ async def _forward_approval_to_runner(
             json={"type": _APPROVAL_TYPE, "data": data},
             timeout=10.0,
         )
-    except httpx.HTTPError:
+    except (httpx.HTTPError, ConnectionError):
         _logger.exception(
             "Approval forward failed for %r",
             session_id,
@@ -6494,7 +6494,7 @@ async def _proxy_get_session_resources_to_runner(
         )
     except HTTPException:
         raise
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, ConnectionError) as exc:
         _logger.warning(
             "session resources: runner call failed for session=%s (%s)",
             session_id,
@@ -7357,7 +7357,7 @@ async def _forward_session_change_to_runner(
             json=event,
             timeout=5.0,
         )
-    except httpx.HTTPError:
+    except (httpx.HTTPError, ConnectionError):
         _logger.exception(
             "Session-change forward failed for session=%r type=%r",
             session_id,
@@ -7683,7 +7683,7 @@ async def _resolve_skill_meta_text_via_runner(
             json={"name": skill_name, "arguments": arguments},
             timeout=10.0,
         )
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, ConnectionError) as exc:
         raise OmnigentError(
             f"Runner unreachable while resolving skill {skill_name!r}: {exc}",
             code=ErrorCode.INTERNAL_ERROR,
@@ -7850,7 +7850,7 @@ async def _dispatch_skill_slash_command_to_runner(
         )
         event = OutputItemDoneEvent(type="response.output_item.done", item=visible.to_api_dict())
         session_stream.publish(session_id, event.model_dump())
-    except httpx.HTTPError:
+    except (httpx.HTTPError, ConnectionError):
         _logger.exception(
             "Forward of skill slash command failed for session=%s; "
             "items persisted, runner picks up on reconnect.",
@@ -8136,7 +8136,7 @@ async def _forward_event_to_runner(
         # Publish input.consumed AFTER the forward succeeds —
         # the runner has the message and will start the turn.
         _publish_input_consumed(session_id, persisted_items[0])
-    except httpx.HTTPError:
+    except (httpx.HTTPError, ConnectionError):
         _logger.exception(
             "Forward to runner failed for session=%s; "
             "event persisted, runner picks up on reconnect.",
@@ -9122,9 +9122,19 @@ async def _relay_runner_stream(
         # close; treat the same as HTTPError so the task exits
         # gracefully instead of leaving an unretrieved exception.
         _logger.warning(
-            "Relay: ended for session=%s",
+            "Relay: runner transport lost for session=%s",
             session_id,
             exc_info=True,
+        )
+        # Publish a failed status so the client's SSE stream sees a
+        # clean error event instead of silent truncation (#1114).
+        _publish_status(
+            session_id,
+            "failed",
+            ErrorDetail(
+                code="runner_disconnected",
+                message="Runner disconnected unexpectedly.",
+            ),
         )
     except asyncio.CancelledError:
         raise
@@ -11685,7 +11695,7 @@ async def _notify_runner_of_bundled_child(
             },
             timeout=10.0,
         )
-    except httpx.HTTPError:
+    except (httpx.HTTPError, ConnectionError):
         _logger.warning(
             "Failed to notify runner about bundled session %s",
             session_id,
@@ -12789,7 +12799,7 @@ def create_sessions_router(
                     },
                     timeout=10.0,
                 )
-            except httpx.HTTPError:
+            except (httpx.HTTPError, ConnectionError):
                 _logger.warning(
                     "Failed to notify runner about session %s",
                     resp.id,
@@ -15680,7 +15690,7 @@ def create_sessions_router(
             )
         try:
             resp = await runner_client.get(path, params=params, timeout=10.0)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, ConnectionError) as exc:
             raise HTTPException(
                 status_code=502,
                 detail="runner resource endpoint unavailable",
@@ -15727,7 +15737,7 @@ def create_sessions_router(
                 json=body,
                 timeout=10.0,
             )
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, ConnectionError) as exc:
             raise HTTPException(
                 status_code=502,
                 detail="runner resource endpoint unavailable",
@@ -15755,7 +15765,7 @@ def create_sessions_router(
             )
         try:
             resp = await runner_client.delete(path, timeout=10.0)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, ConnectionError) as exc:
             raise HTTPException(
                 status_code=502,
                 detail="runner resource endpoint unavailable",
@@ -15789,7 +15799,7 @@ def create_sessions_router(
                 json=body,
                 timeout=10.0,
             )
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, ConnectionError) as exc:
             raise HTTPException(
                 status_code=502,
                 detail="runner resource endpoint unavailable",
@@ -15823,7 +15833,7 @@ def create_sessions_router(
                 json=body,
                 timeout=10.0,
             )
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, ConnectionError) as exc:
             raise HTTPException(
                 status_code=502,
                 detail="runner resource endpoint unavailable",
@@ -17593,7 +17603,7 @@ def create_sessions_router(
                     },
                     timeout=10.0,
                 )
-            except httpx.HTTPError as exc:
+            except (httpx.HTTPError, ConnectionError) as exc:
                 # Fail loud (503), not best-effort: unlike the advisory
                 # interrupt-forward, a dropped tool_result leaves the parked
                 # turn hanging until it times out. Surfacing the failure lets
@@ -18146,7 +18156,7 @@ def create_sessions_router(
                     f"/v1/sessions/{session_id}/resources",
                     timeout=10.0,
                 )
-            except httpx.HTTPError:
+            except (httpx.HTTPError, ConnectionError):
                 _logger.warning(
                     "Runner cleanup failed for %s, falling back",
                     session_id,
@@ -18905,7 +18915,7 @@ async def _load_runner_skills(
             f"/v1/sessions/{session_id}/skills",
             timeout=5.0,
         )
-    except httpx.HTTPError:
+    except (httpx.HTTPError, ConnectionError):
         _logger.debug("Runner skills query failed for %s", session_id)
         return
     if resp.status_code != 200:
@@ -18991,7 +19001,7 @@ async def _load_model_options(
     for attempt in range(len(_CODEX_MODEL_OPTIONS_RETRY_DELAYS_S) + 1):
         try:
             resp = await runner_client.get(path, timeout=5.0)
-        except httpx.HTTPError:
+        except (httpx.HTTPError, ConnectionError):
             _logger.debug("Runner Codex model-options query failed for %s", session_id)
             return
         if resp.status_code != 200:
@@ -19143,7 +19153,7 @@ async def _get_session_snapshot(
                     raw = resp.json().get("status", "idle")
                     _session_status_cache[session_id] = raw
                     status = _session_status_from_cache(session_id)
-            except httpx.HTTPError:
+            except (httpx.HTTPError, ConnectionError):
                 _logger.debug(
                     "Runner status query failed for %s",
                     session_id,
