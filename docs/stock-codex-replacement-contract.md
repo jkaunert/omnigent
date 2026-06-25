@@ -81,7 +81,7 @@ The current spike proves the first narrow adapter behavior:
 | Omnigent dynamic tool exposure to stock Codex | `replacement-ready` for the `dynamicTools` channel | `scripts/prove_stock_codex_replacement.py --proof tool-plane` verified the Apple bundle's `.mcp.json` declares `XcodeBuildMCP`, `memory`, and `sosumi`, then stock Codex `0.142.2` invoked Omnigent-exposed `sys_os_read` through normal `run_prompt()`; persisted session items included a `function_call` and matching `function_call_output` containing the sentinel. |
 | Apple `.mcp.json` `memory` server execution through Omnigent | `replacement-ready` for the local stdio `memory` server | `scripts/prove_stock_codex_replacement.py --proof apple-mcp` converted the Apple plugin `.mcp.json` `memory` server into an Omnigent `tools: memory: type: mcp` declaration with an isolated temp `MEMORY_FILE_PATH`, then stock Codex `0.142.2` invoked `memory__create_entities`; persisted session items included a `function_call` and matching `function_call_output` containing `APPLE_MCP_SENTINEL_73`. |
 | Apple `.mcp.json` `sosumi` server execution through Omnigent | `replacement-ready` for the network-backed Apple documentation MCP server | `scripts/prove_stock_codex_replacement.py --proof apple-mcp-sosumi` converted the Apple plugin `.mcp.json` `sosumi` server into an Omnigent `tools: sosumi: type: mcp` declaration, then stock Codex `0.142.2` invoked `sosumi__fetchAppleDocumentation` with `/documentation/swift/string`; persisted session items included a `function_call` and matching `function_call_output` containing `title: String` and the Apple documentation source URL. |
-| Apple `.mcp.json` `XcodeBuildMCP` execution through Omnigent | `unproven` | The `memory` and `sosumi` proofs cover local stdio MCP execution and network-backed documentation MCP execution. They do not yet prove host-specific Xcode simulator/device tooling. |
+| Apple `.mcp.json` `XcodeBuildMCP` project discovery through Omnigent | `replacement-ready` for read-only project discovery | `scripts/prove_stock_codex_replacement.py --proof apple-mcp-xcodebuild` converted the Apple plugin `.mcp.json` `XcodeBuildMCP` server into an Omnigent `tools: XcodeBuildMCP: type: mcp` declaration, then stock Codex `0.142.2` invoked `XcodeBuildMCP__discover_projs` against the local Omnigent checkout; persisted session items included a `function_call` and matching `function_call_output` that found `ap-web/ios/Omnigent.xcodeproj`. This does not prove build, test, launch, simulator, or device execution. |
 
 This does not yet prove full Codex-fork replacement.
 
@@ -125,6 +125,14 @@ uvx --from . python scripts/prove_stock_codex_replacement.py \
   --codex-path /opt/homebrew/bin/codex
 ```
 
+Apple XcodeBuildMCP read-only discovery proof:
+
+```bash
+uvx --from . python scripts/prove_stock_codex_replacement.py \
+  --proof apple-mcp-xcodebuild \
+  --codex-path /opt/homebrew/bin/codex
+```
+
 The proof script copies the installed Apple workflow bundle into a temporary
 Omnigent agent, writes an Omnigent `harness: codex` config, refuses
 `.codex-fork` binaries by default, and removes the temp fixture unless
@@ -134,11 +142,11 @@ Omnigent agent, writes an Omnigent `harness: codex` config, refuses
 
 Run these in order unless a later gate becomes cheaper due to new evidence.
 
-1. Host-specific Apple MCP execution
-   - Extend the proven `.mcp.json` conversion path from `memory` and `sosumi`
-     to `XcodeBuildMCP`. Keep simulator, device, and Xcode-project checks as
-     separate bounded gates so host setup failures do not blur the
-     already-proven MCP adapter path.
+1. XcodeBuildMCP build/run boundaries
+   - Extend the proven `XcodeBuildMCP` discovery path to bounded build/run
+     checks only after selecting a safe local fixture. Keep build, test,
+     simulator, and device checks separate so host setup failures do not blur
+     the already-proven MCP adapter path.
 
 2. Session and terminal behavior
    - Prove the Omnigent path supports the required live terminal/session shape,

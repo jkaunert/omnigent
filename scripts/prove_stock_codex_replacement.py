@@ -64,6 +64,14 @@ APPLE_MCP_SOSUMI_SENTINELS = (
     "title: String",
     "source: https://developer.apple.com/documentation/swift/string",
 )
+APPLE_MCP_XCODEBUILD_SERVER = "XcodeBuildMCP"
+APPLE_MCP_XCODEBUILD_TOOL = "XcodeBuildMCP__discover_projs"
+APPLE_MCP_XCODEBUILD_PROJECT_RELATIVE_PATH = "ap-web/ios/Omnigent.xcodeproj"
+APPLE_MCP_XCODEBUILD_SENTINELS = (
+    "Discovery finished. Found",
+    "Projects found:",
+    "Omnigent.xcodeproj",
+)
 RELATIVE_MARKDOWN_PATH_RE = re.compile(r"`((?:\.\.?/)[^`]+)`")
 PLUGIN_SKILL_REF_RE = re.compile(rf"\b{re.escape(PLUGIN_NAME)}:([A-Za-z0-9_.-]+)\b")
 EXPECTED_APPLE_MCP_SERVERS = frozenset({"sosumi", "memory", "XcodeBuildMCP"})
@@ -635,6 +643,137 @@ def _validate_sosumi_mcp_run(run: SessionRun, *, attempt: int) -> AppleMcpProof:
     )
 
 
+def run_live_apple_xcodebuild_mcp_proof(
+    agent_dir: Path,
+    codex_path: Path,
+    *,
+    workspace_root: Path,
+) -> AppleMcpProof:
+    """Prove stock Codex can call a read-only XcodeBuildMCP discovery tool."""
+    workspace = str(workspace_root)
+    prompts = (
+        (
+            "Tool invocation drill. After the required route block, your next "
+            f"action must be a function call to {APPLE_MCP_XCODEBUILD_TOOL}, "
+            "not prose. Use JSON arguments "
+            f'{{"workspaceRoot": "{workspace}", "maxDepth": 5}}. Do not call '
+            "any build, run, test, simulator, device, scaffold, launch, or "
+            "session mutation tool. After the tool result is available, reply "
+            "exactly XCODEBUILDMCP_OK."
+        ),
+        (
+            "Read-only XcodeBuildMCP project-discovery proof. Call the "
+            f"available tool named {APPLE_MCP_XCODEBUILD_TOOL} exactly once "
+            "with JSON arguments "
+            f'{{"workspaceRoot": "{workspace}", "maxDepth": 5}}. Do not use '
+            "any other tool. After the tool call succeeds, reply exactly "
+            "XCODEBUILDMCP_OK."
+        ),
+        (
+            f"Use {APPLE_MCP_XCODEBUILD_TOOL} now to scan {workspace}. This "
+            "is a tool-call proof; a text answer without the function call is "
+            "invalid. Do not build, run, test, launch, or mutate defaults. "
+            "After the function call output is available, reply exactly "
+            "XCODEBUILDMCP_OK."
+        ),
+    )
+    errors: list[str] = []
+    for attempt, prompt in enumerate(prompts, start=1):
+        run = asyncio_run_session_query(
+            agent_dir=agent_dir,
+            codex_path=codex_path,
+            prompt=prompt,
+        )
+        try:
+            return _validate_xcodebuild_mcp_run(
+                run,
+                attempt=attempt,
+                workspace_root=workspace_root,
+            )
+        except XcodeBuildMcpProofAttemptError as exc:
+            errors.append(str(exc))
+    joined_errors = "\n\n".join(errors)
+    raise SystemExit(
+        f"XcodeBuildMCP proof failed after {len(prompts)} attempts:\n{joined_errors}"
+    )
+
+
+class XcodeBuildMcpProofAttemptError(Exception):
+    """One failed XcodeBuildMCP proof attempt that can be retried."""
+
+
+def _validate_xcodebuild_mcp_run(
+    run: SessionRun,
+    *,
+    attempt: int,
+    workspace_root: Path,
+) -> AppleMcpProof:
+    """Validate one XcodeBuildMCP discovery proof attempt."""
+    transcript = run.text.strip()
+    if not transcript.startswith(EXPECTED_ROUTE):
+        raise XcodeBuildMcpProofAttemptError(
+            f"attempt={attempt}: transcript did not start with expected route block.\n"
+            f"Expected prefix:\n{EXPECTED_ROUTE}\n\nActual:\n{transcript[:1000]}"
+        )
+
+    calls = [
+        item
+        for item in run.items
+        if item.get("type") == "function_call"
+        and item.get("name") == APPLE_MCP_XCODEBUILD_TOOL
+    ]
+    if not calls:
+        raise XcodeBuildMcpProofAttemptError(
+            f"attempt={attempt}: "
+            + _missing_tool_call_message(APPLE_MCP_XCODEBUILD_TOOL, run)
+        )
+    call = calls[-1]
+    call_id = call.get("call_id")
+    if not isinstance(call_id, str) or not call_id:
+        raise XcodeBuildMcpProofAttemptError(
+            f"attempt={attempt}: persisted {APPLE_MCP_XCODEBUILD_TOOL} call "
+            f"has invalid call_id: {call!r}"
+        )
+    arguments = _function_call_arguments(call)
+    expected_workspace = str(workspace_root)
+    if arguments.get("workspaceRoot") != expected_workspace:
+        raise XcodeBuildMcpProofAttemptError(
+            f"attempt={attempt}: {APPLE_MCP_XCODEBUILD_TOOL} used unexpected "
+            f"workspaceRoot. expected={expected_workspace!r} arguments={arguments!r}"
+        )
+    outputs = [
+        item
+        for item in run.items
+        if item.get("type") == "function_call_output" and item.get("call_id") == call_id
+    ]
+    if not outputs:
+        raise XcodeBuildMcpProofAttemptError(
+            f"attempt={attempt}: no persisted function_call_output found for call_id={call_id}"
+        )
+    output_text = str(outputs[-1].get("output", ""))
+    missing = [
+        sentinel
+        for sentinel in APPLE_MCP_XCODEBUILD_SENTINELS
+        if sentinel not in output_text
+    ]
+    if missing:
+        raise XcodeBuildMcpProofAttemptError(
+            f"attempt={attempt}: XcodeBuildMCP output missed expected discovery "
+            f"sentinels. missing={missing!r} output={output_text[:1000]}"
+        )
+    if "XCODEBUILDMCP_OK" not in transcript:
+        raise XcodeBuildMcpProofAttemptError(
+            f"attempt={attempt}: XcodeBuildMCP proof did not return "
+            f"XCODEBUILDMCP_OK. Transcript:\n{transcript}"
+        )
+    return AppleMcpProof(
+        session_id=run.session_id,
+        call_id=call_id,
+        transcript=transcript,
+        output_preview=output_text[:500],
+    )
+
+
 def _missing_tool_call_message(expected_tool: str, run: SessionRun) -> str:
     """Return a compact diagnostic for proof runs that skip a required tool."""
     return (
@@ -653,6 +792,21 @@ def _function_call_names(items: list[dict[str, Any]]) -> list[str]:
         for item in items
         if item.get("type") == "function_call" and item.get("name") is not None
     ]
+
+
+def _function_call_arguments(call: dict[str, Any]) -> dict[str, Any]:
+    """Decode persisted function-call arguments from a session item."""
+    raw_arguments = call.get("arguments")
+    if isinstance(raw_arguments, dict):
+        return raw_arguments
+    if isinstance(raw_arguments, str):
+        try:
+            parsed = json.loads(raw_arguments)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
 
 
 def _session_item_summary(items: list[dict[str, Any]]) -> str:
@@ -708,18 +862,39 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     return True
 
 
+def resolve_xcodebuild_mcp_workspace_root() -> Path:
+    """Return the local repo root used for the read-only XcodeBuildMCP proof."""
+    repo_root = Path(__file__).resolve().parents[1]
+    expected_project = repo_root / APPLE_MCP_XCODEBUILD_PROJECT_RELATIVE_PATH
+    if not expected_project.is_dir():
+        raise SystemExit(
+            "XcodeBuildMCP proof expected an Xcode project at "
+            f"{expected_project}, but it was not found"
+        )
+    return repo_root
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Prove Omnigent can wrap stock Codex for the Apple routerSelection path."
     )
     parser.add_argument(
         "--proof",
-        choices=("graph", "tool-plane", "mcp-tools", "apple-mcp", "apple-mcp-sosumi", "all"),
+        choices=(
+            "graph",
+            "tool-plane",
+            "mcp-tools",
+            "apple-mcp",
+            "apple-mcp-sosumi",
+            "apple-mcp-xcodebuild",
+            "all",
+        ),
         default="graph",
         help=(
             "Proof gate to run. Defaults to the existing graph proof. "
             "'mcp-tools' is accepted as an alias for 'tool-plane'; "
-            "'apple-mcp' proves memory and 'apple-mcp-sosumi' proves sosumi."
+            "'apple-mcp' proves memory, 'apple-mcp-sosumi' proves sosumi, "
+            "and 'apple-mcp-xcodebuild' proves read-only XcodeBuildMCP discovery."
         ),
     )
     parser.add_argument(
@@ -770,12 +945,22 @@ def main() -> int:
         copy_bundle(source_bundle, agent_dir)
         needs_memory_mcp = proof in {"apple-mcp", "all"}
         needs_sosumi_mcp = proof in {"apple-mcp-sosumi", "all"}
-        needs_apple_mcp = needs_memory_mcp or needs_sosumi_mcp
+        needs_xcodebuild_mcp = proof in {"apple-mcp-xcodebuild", "all"}
+        needs_apple_mcp = needs_memory_mcp or needs_sosumi_mcp or needs_xcodebuild_mcp
         mcp_manifest = None
         memory_file = None
+        xcodebuild_workspace_root = (
+            resolve_xcodebuild_mcp_workspace_root() if needs_xcodebuild_mcp else None
+        )
         apple_mcp_servers: dict[str, dict[str, Any]] = {}
         mcp_env_overrides: dict[str, dict[str, str]] = {}
-        if proof in {"tool-plane", "apple-mcp", "apple-mcp-sosumi", "all"}:
+        if proof in {
+            "tool-plane",
+            "apple-mcp",
+            "apple-mcp-sosumi",
+            "apple-mcp-xcodebuild",
+            "all",
+        }:
             mcp_manifest = prove_apple_mcp_manifest(agent_dir)
         if needs_apple_mcp:
             assert mcp_manifest is not None
@@ -793,6 +978,11 @@ def main() -> int:
                 apple_mcp_servers[APPLE_MCP_SOSUMI_SERVER] = mcp_config_from_manifest(
                     mcp_manifest,
                     APPLE_MCP_SOSUMI_SERVER,
+                )
+            if needs_xcodebuild_mcp:
+                apple_mcp_servers[APPLE_MCP_XCODEBUILD_SERVER] = mcp_config_from_manifest(
+                    mcp_manifest,
+                    APPLE_MCP_XCODEBUILD_SERVER,
                 )
         if proof == "all" and not args.skip_live:
             # Keep each live proof surface minimal. With every MCP exposed at once,
@@ -837,6 +1027,16 @@ def main() -> int:
             print(f"converted_apple_mcp_server={APPLE_MCP_SOSUMI_SERVER}")
             print(f"converted_apple_mcp_sosumi_path={APPLE_MCP_SOSUMI_DOC_PATH}")
             print("ASSERTION: Apple sosumi MCP config converted into Omnigent tools config")
+        if needs_xcodebuild_mcp:
+            assert mcp_manifest is not None
+            assert xcodebuild_workspace_root is not None
+            print(f"static_apple_mcp_servers={','.join(sorted(mcp_manifest))}")
+            print(f"converted_apple_mcp_server={APPLE_MCP_XCODEBUILD_SERVER}")
+            print(f"converted_apple_mcp_xcodebuild_tool={APPLE_MCP_XCODEBUILD_TOOL}")
+            print(f"converted_apple_mcp_xcodebuild_root={xcodebuild_workspace_root}")
+            print(
+                "ASSERTION: Apple XcodeBuildMCP config converted into Omnigent tools config"
+            )
 
         if args.skip_live:
             print("live_runner_proof=skipped")
@@ -907,6 +1107,34 @@ def main() -> int:
                 "Omnigent-converted MCP config"
             )
             print(f"ASSERTION: persisted session items include {APPLE_MCP_SOSUMI_TOOL} result")
+        if needs_xcodebuild_mcp:
+            assert xcodebuild_workspace_root is not None
+            if proof == "all":
+                write_agent_config(
+                    agent_dir,
+                    apple_mcp_servers={
+                        APPLE_MCP_XCODEBUILD_SERVER: apple_mcp_servers[
+                            APPLE_MCP_XCODEBUILD_SERVER
+                        ]
+                    },
+                    mcp_env_overrides={},
+                )
+            xcodebuild_proof = run_live_apple_xcodebuild_mcp_proof(
+                agent_dir,
+                codex_path,
+                workspace_root=xcodebuild_workspace_root,
+            )
+            print(f"xcodebuild_mcp_session_id={xcodebuild_proof.session_id}")
+            print(f"xcodebuild_mcp_call_id={xcodebuild_proof.call_id}")
+            print(f"xcodebuild_mcp_output_preview={xcodebuild_proof.output_preview!r}")
+            print(
+                f"xcodebuild_mcp_transcript_preview={xcodebuild_proof.transcript[:500]!r}"
+            )
+            print(
+                "ASSERTION: stock Codex invoked Apple XcodeBuildMCP discovery through "
+                "Omnigent-converted MCP config"
+            )
+            print(f"ASSERTION: persisted session items include {APPLE_MCP_XCODEBUILD_TOOL} result")
     return 0
 
 
