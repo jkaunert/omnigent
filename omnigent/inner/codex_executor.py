@@ -50,6 +50,7 @@ from .executor import (
     TurnComplete,
     classify_tool_result,
 )
+from .router_selection import apply_router_prompt_addendum, resolve_router_selection
 
 logger = logging.getLogger(__name__)
 
@@ -2023,6 +2024,7 @@ class CodexExecutor(Executor):
         bundle_dir: Path | None = None,
         agent_name: str | None = None,
         skills_filter: str | list[str] = "all",
+        router_selection_host_scope: str | None = "desktop",
     ) -> None:
         """Create a CodexExecutor.
 
@@ -2095,6 +2097,9 @@ class CodexExecutor(Executor):
             empty so Codex sees no skills; a list exposes only the
             named skills (looked up across all sources, bundle wins
             on name conflict).
+        :param router_selection_host_scope: Host surface used when matching a
+            bundle manifest's optional ``routerSelection.hostScopes``. ``None``
+            disables host-scoped manifest auto-routing.
         """
         self._cwd = cwd
         self._os_env_spec = os_env
@@ -2112,6 +2117,7 @@ class CodexExecutor(Executor):
         self._bundle_dir = bundle_dir
         self._agent_name = agent_name
         self._skills_filter = skills_filter
+        self._router_selection_host_scope = router_selection_host_scope
         resolved_codex = codex_path or _find_codex_cli()
         if not resolved_codex:
             raise ImportError("CodexExecutor requires the 'codex' CLI on PATH.")
@@ -2343,9 +2349,17 @@ class CodexExecutor(Executor):
         effective_cwd = (
             self._cwd or (self._os_env_spec.cwd if self._os_env_spec else None) or os.getcwd()
         )
+        route_selection = resolve_router_selection(
+            bundle_dir=self._bundle_dir,
+            messages=messages,
+            cwd=effective_cwd,
+            host_scope=self._router_selection_host_scope,
+            skills_filter=self._skills_filter,
+        )
+        effective_system_prompt = apply_router_prompt_addendum(system_prompt, route_selection)
         signature = (
             model,
-            system_prompt,
+            effective_system_prompt,
             effective_cwd,
             _tool_signature(tools),
         )
@@ -2367,15 +2381,39 @@ class CodexExecutor(Executor):
             sandbox_mode = "workspace-write"
 
         try:
+            route_prefix = None
+            if route_selection is not None:
+                route_prefix = f"{route_selection.route_block.rstrip()}\n\n"
+                yield TextChunk(text=route_prefix)
+            inner_text_streamed = False
             async for event in app_session.run_turn(
                 messages=messages,
                 tools=tools,
-                system_prompt=system_prompt,
+                system_prompt=effective_system_prompt,
                 model=model,
                 cwd=effective_cwd,
                 sandbox=sandbox_mode,
                 reasoning_effort=reasoning_effort,
             ):
+                if isinstance(event, TextChunk):
+                    inner_text_streamed = True
+                    yield event
+                    continue
+                if isinstance(event, TurnComplete) and route_prefix is not None:
+                    response = event.response
+                    if response and not inner_text_streamed:
+                        yield TextChunk(text=response)
+                    if response is not None:
+                        response = f"{route_prefix}{response}"
+                    else:
+                        response = route_prefix.rstrip()
+                    yield TurnComplete(
+                        response=response,
+                        modified_by_policy=event.modified_by_policy,
+                        continue_turn=event.continue_turn,
+                        usage=event.usage,
+                    )
+                    continue
                 yield event
         except Exception as exc:  # noqa: BLE001 — executor boundary converts any error into an ExecutorError event
             yield ExecutorError(message=f"Codex executor error: {exc}")
