@@ -29,6 +29,11 @@ from typing import Any, TypeVar
 
 from omnigent_client import OmnigentClient
 
+from omnigent.adapters.apple_docs_cli import (
+    APPLE_DOCS_CLI_URL,
+    DEFAULT_APPLE_DOCS_CLI_POLICY,
+    write_fetch_apple_docs_cli_tool,
+)
 from omnigent.chat import (
     ChatOverrides,
     _bundle_agent,
@@ -60,11 +65,11 @@ TOOL_SENTINEL = "OMNIGENT_TOOL_SENTINEL_42"
 APPLE_MCP_MEMORY_SERVER = "memory"
 APPLE_MCP_MEMORY_TOOL = "memory__create_entities"
 APPLE_MCP_MEMORY_SENTINEL = "APPLE_MCP_SENTINEL_73"
-APPLE_MCP_SOSUMI_SERVER = "sosumi"
+APPLE_DOCS_CLI_POLICY = DEFAULT_APPLE_DOCS_CLI_POLICY
+APPLE_MCP_SOSUMI_SERVER = APPLE_DOCS_CLI_POLICY.mcp_server_name
 APPLE_MCP_SOSUMI_TOOL = "sosumi__fetchAppleDocumentation"
 APPLE_MCP_SOSUMI_DOC_PATH = "/documentation/swift/string"
-APPLE_DOCS_CLI_TOOL = "fetch_apple_docs"
-APPLE_DOCS_CLI_URL = "https://developer.apple.com/documentation/swift/string"
+APPLE_DOCS_CLI_TOOL = APPLE_DOCS_CLI_POLICY.tool_name
 APPLE_MCP_SOSUMI_SENTINELS = (
     "title: String",
     "source: https://developer.apple.com/documentation/swift/string",
@@ -315,45 +320,6 @@ os_env:
   sandbox:
     type: none
 {mcp_tools_block}""".lstrip(),
-        encoding="utf-8",
-    )
-
-
-def write_fetch_apple_docs_cli_tool(agent_dir: Path) -> None:
-    """Add a narrow Sosumi CLI-backed Apple docs adapter to the generated fixture."""
-    tools_dir = agent_dir / "tools" / "python"
-    tools_dir.mkdir(parents=True, exist_ok=True)
-    (tools_dir / f"{APPLE_DOCS_CLI_TOOL}.py").write_text(
-        '''"""Apple documentation CLI adapter used by stock-Codex replacement proofs."""
-
-from __future__ import annotations
-
-import subprocess
-from urllib.parse import urlparse
-
-from omnigent_client import tool
-
-
-@tool
-def fetch_apple_docs(url: str) -> str:
-    """Fetch Apple documentation Markdown through the Sosumi CLI."""
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.netloc != "developer.apple.com":
-        return "Error: url must be an https://developer.apple.com documentation URL."
-    if not parsed.path.startswith(("/documentation/", "/design/", "/videos/")):
-        return "Error: url path must target Apple docs, HIG, or video content."
-    completed = subprocess.run(
-        ["npx", "-y", "@nshipster/sosumi", "fetch", url],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout).strip()
-        return f"Error: sosumi CLI exited {completed.returncode}: {detail[:2000]}"
-    return completed.stdout
-''',
         encoding="utf-8",
     )
 
@@ -1286,7 +1252,10 @@ def main() -> int:
         needs_apple_docs_cli = proof == "apple-docs-cli"
         needs_xcodebuild_mcp = proof in {"apple-mcp-xcodebuild", "all"}
         needs_apple_mcp = needs_memory_mcp or needs_sosumi_mcp or needs_xcodebuild_mcp
+        needs_apple_mcp_manifest = needs_apple_mcp or needs_apple_docs_cli
         mcp_manifest = None
+        apple_docs_cli_decision = None
+        apple_docs_cli_tool_path = None
         memory_file = None
         xcodebuild_workspace_root = (
             resolve_xcodebuild_mcp_workspace_root() if needs_xcodebuild_mcp else None
@@ -1297,12 +1266,14 @@ def main() -> int:
             "tool-plane",
             "apple-mcp",
             "apple-mcp-sosumi",
+            "apple-docs-cli",
             "apple-mcp-xcodebuild",
             "all",
         }:
             mcp_manifest = prove_apple_mcp_manifest(agent_dir)
-        if needs_apple_mcp:
+        if needs_apple_mcp_manifest:
             assert mcp_manifest is not None
+        if needs_apple_mcp:
             if needs_memory_mcp:
                 memory_file = agent_dir / "memory-proof.json"
                 memory_file.write_text("{}", encoding="utf-8")
@@ -1324,7 +1295,16 @@ def main() -> int:
                     APPLE_MCP_XCODEBUILD_SERVER,
                 )
         if needs_apple_docs_cli:
-            write_fetch_apple_docs_cli_tool(agent_dir)
+            assert mcp_manifest is not None
+            apple_docs_cli_decision = APPLE_DOCS_CLI_POLICY.decide_for_mcp_servers(
+                mcp_manifest
+            )
+            if not apple_docs_cli_decision.install:
+                raise SystemExit(apple_docs_cli_decision.reason)
+            apple_docs_cli_tool_path = write_fetch_apple_docs_cli_tool(
+                agent_dir,
+                policy=APPLE_DOCS_CLI_POLICY,
+            )
         if proof == "all" and not args.skip_live:
             # Keep each live proof surface minimal. With every MCP exposed at once,
             # stock Codex can choose to narrate instead of calling the one proof
@@ -1369,9 +1349,18 @@ def main() -> int:
             print(f"converted_apple_mcp_sosumi_path={APPLE_MCP_SOSUMI_DOC_PATH}")
             print("ASSERTION: Apple sosumi MCP config converted into Omnigent tools config")
         if needs_apple_docs_cli:
+            assert mcp_manifest is not None
+            assert apple_docs_cli_decision is not None
+            assert apple_docs_cli_tool_path is not None
+            print(f"static_apple_mcp_servers={','.join(sorted(mcp_manifest))}")
+            print(f"apple_docs_cli_policy_reason={apple_docs_cli_decision.reason}")
             print(f"apple_docs_cli_tool={APPLE_DOCS_CLI_TOOL}")
             print(f"apple_docs_cli_url={APPLE_DOCS_CLI_URL}")
-            print("ASSERTION: Apple docs CLI adapter tool added to generated agent")
+            print(f"apple_docs_cli_tool_path={apple_docs_cli_tool_path}")
+            print(
+                "ASSERTION: Apple docs CLI adapter policy installed the generated "
+                "tool without mutating the Apple MCP manifest"
+            )
         if needs_xcodebuild_mcp:
             assert mcp_manifest is not None
             assert xcodebuild_workspace_root is not None
