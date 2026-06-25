@@ -10,6 +10,7 @@ stock-Codex proof through Omnigent's normal ``run_prompt()`` session/runner path
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import io
 import json
@@ -62,11 +63,14 @@ APPLE_MCP_MEMORY_SENTINEL = "APPLE_MCP_SENTINEL_73"
 APPLE_MCP_SOSUMI_SERVER = "sosumi"
 APPLE_MCP_SOSUMI_TOOL = "sosumi__fetchAppleDocumentation"
 APPLE_MCP_SOSUMI_DOC_PATH = "/documentation/swift/string"
+APPLE_DOCS_CLI_TOOL = "fetch_apple_docs"
+APPLE_DOCS_CLI_URL = "https://developer.apple.com/documentation/swift/string"
 APPLE_MCP_SOSUMI_SENTINELS = (
     "title: String",
     "source: https://developer.apple.com/documentation/swift/string",
 )
 APPLE_MCP_SOSUMI_TIMESTAMP_RE = re.compile(r"^timestamp: (?P<timestamp>\S+)$", re.MULTILINE)
+APPLE_MCP_SOSUMI_SESSION_QUERY_TIMEOUT_SECONDS = 75.0
 APPLE_MCP_XCODEBUILD_SERVER = "XcodeBuildMCP"
 APPLE_MCP_XCODEBUILD_TOOL = "XcodeBuildMCP__discover_projs"
 APPLE_MCP_XCODEBUILD_PROJECT_RELATIVE_PATH = "ap-web/ios/Omnigent.xcodeproj"
@@ -120,6 +124,10 @@ class SessionRun:
 
 class LiveProofTimeoutError(Exception):
     """A single live proof step exceeded its configured wall-clock budget."""
+
+
+class SessionQueryTimeoutError(Exception):
+    """A sessions-API query timed out after capturing best-effort diagnostics."""
 
 
 def _candidate_bundles() -> list[Path]:
@@ -311,6 +319,45 @@ os_env:
     )
 
 
+def write_fetch_apple_docs_cli_tool(agent_dir: Path) -> None:
+    """Add a narrow Sosumi CLI-backed Apple docs adapter to the generated fixture."""
+    tools_dir = agent_dir / "tools" / "python"
+    tools_dir.mkdir(parents=True, exist_ok=True)
+    (tools_dir / f"{APPLE_DOCS_CLI_TOOL}.py").write_text(
+        '''"""Apple documentation CLI adapter used by stock-Codex replacement proofs."""
+
+from __future__ import annotations
+
+import subprocess
+from urllib.parse import urlparse
+
+from omnigent_client import tool
+
+
+@tool
+def fetch_apple_docs(url: str) -> str:
+    """Fetch Apple documentation Markdown through the Sosumi CLI."""
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.netloc != "developer.apple.com":
+        return "Error: url must be an https://developer.apple.com documentation URL."
+    if not parsed.path.startswith(("/documentation/", "/design/", "/videos/")):
+        return "Error: url path must target Apple docs, HIG, or video content."
+    completed = subprocess.run(
+        ["npx", "-y", "@nshipster/sosumi", "fetch", url],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        return f"Error: sosumi CLI exited {completed.returncode}: {detail[:2000]}"
+    return completed.stdout
+''',
+        encoding="utf-8",
+    )
+
+
 def _mcp_tools_yaml(
     server_configs: dict[str, dict[str, Any]],
     *,
@@ -481,6 +528,7 @@ async def _run_session_query(
     agent_dir: Path,
     codex_path: Path,
     prompt: str,
+    query_timeout_seconds: float | None = None,
 ) -> SessionRun:
     old_cwd = Path.cwd()
     old_codex_path = os.environ.get("HARNESS_CODEX_PATH")
@@ -503,7 +551,7 @@ async def _run_session_query(
                     headers=_server_headers(runner_id=server.runner_id),
                     auth=_server_auth(server_url=base_url),
                 ) as client:
-                    text = await _query_sessions_once(
+                    query = _query_sessions_once(
                         client=client,
                         agent_name=agent_name,
                         tool_handler=None,
@@ -513,6 +561,21 @@ async def _run_session_query(
                         runner_id=server.runner_id,
                         on_session_ready=lambda sid: session_holder.setdefault("id", sid),
                     )
+                    try:
+                        if query_timeout_seconds is not None and query_timeout_seconds > 0:
+                            text = await asyncio.wait_for(
+                                query,
+                                timeout=query_timeout_seconds,
+                            )
+                        else:
+                            text = await query
+                    except TimeoutError as exc:
+                        diagnostic_error = await _build_session_query_timeout_error(
+                            client=client,
+                            session_id=session_holder.get("id"),
+                            timeout_seconds=query_timeout_seconds,
+                        )
+                        raise diagnostic_error from exc
                     session_id = session_holder.get("id")
                     if session_id is None:
                         raise SystemExit("Session id was not captured during proof run")
@@ -532,6 +595,50 @@ async def _run_session_query(
             os.environ.pop("HARNESS_CODEX_PATH", None)
         else:
             os.environ["HARNESS_CODEX_PATH"] = old_codex_path
+
+
+async def _build_session_query_timeout_error(
+    *,
+    client: OmnigentClient,
+    session_id: str | None,
+    timeout_seconds: float | None,
+) -> SessionQueryTimeoutError:
+    """Collect best-effort session diagnostics for a timed-out proof query."""
+    timeout_label = _format_seconds(timeout_seconds or 0)
+    if session_id is None:
+        return SessionQueryTimeoutError(
+            f"sessions query timed out after {timeout_label}; session_id was not captured"
+        )
+    await asyncio.sleep(1.0)
+    status = "unavailable"
+    last_task_error: Any = None
+    items: list[dict[str, Any]] = []
+    snapshot_error: str | None = None
+    items_error: str | None = None
+    try:
+        snapshot = await client.sessions.get(session_id)
+        status = getattr(snapshot, "status", "unknown")
+        last_task_error = getattr(snapshot, "last_task_error", None)
+    except Exception as exc:  # noqa: BLE001 - diagnostic best effort only
+        snapshot_error = f"{type(exc).__name__}: {exc}"
+    try:
+        items = await client.sessions.list_items(
+            session_id,
+            limit=100,
+            order="asc",
+        )
+    except Exception as exc:  # noqa: BLE001 - diagnostic best effort only
+        items_error = f"{type(exc).__name__}: {exc}"
+    return SessionQueryTimeoutError(
+        "sessions query timed out before transcript completion.\n"
+        f"timeout={timeout_label}\n"
+        f"session_id={session_id}\n"
+        f"session_status={status}\n"
+        f"last_task_error={last_task_error!r}\n"
+        f"items={_session_item_summary(items)}\n"
+        f"snapshot_error={snapshot_error!r}\n"
+        f"items_error={items_error!r}"
+    )
 
 
 def run_live_tool_proof(agent_dir: Path, codex_path: Path) -> ToolProof:
@@ -661,21 +768,65 @@ def run_live_apple_sosumi_mcp_proof(agent_dir: Path, codex_path: Path) -> AppleM
     )
     errors: list[str] = []
     for attempt, prompt in enumerate(prompts, start=1):
-        run = asyncio_run_session_query(
-            agent_dir=agent_dir,
-            codex_path=codex_path,
-            prompt=prompt,
-        )
         try:
+            run = asyncio_run_session_query(
+                agent_dir=agent_dir,
+                codex_path=codex_path,
+                prompt=prompt,
+                query_timeout_seconds=APPLE_MCP_SOSUMI_SESSION_QUERY_TIMEOUT_SECONDS,
+            )
             return _validate_sosumi_mcp_run(run, attempt=attempt)
+        except SessionQueryTimeoutError as exc:
+            raise SystemExit(f"Sosumi MCP proof attempt {attempt} timed out:\n{exc}") from exc
         except SosumiProofAttemptError as exc:
             errors.append(str(exc))
     joined_errors = "\n\n".join(errors)
     raise SystemExit(f"Sosumi MCP proof failed after {len(prompts)} attempts:\n{joined_errors}")
 
 
+def run_live_apple_docs_cli_proof(agent_dir: Path, codex_path: Path) -> AppleMcpProof:
+    """Prove stock Codex can fetch Apple docs through the Sosumi CLI adapter."""
+    prompts = (
+        (
+            "Tool invocation drill. After the required route block, your next "
+            f"action must be a function call to {APPLE_DOCS_CLI_TOOL}, not prose. "
+            f"Use JSON arguments {{\"url\": \"{APPLE_DOCS_CLI_URL}\"}}. The "
+            "function result will contain a line beginning 'timestamp:'. After "
+            "the tool result is available, reply exactly "
+            "APPLE_DOCS_CLI_TIMESTAMP=<timestamp value>. Do not guess the "
+            "timestamp; it is not present in this prompt."
+        ),
+        (
+            "Apple documentation CLI proof. Call the available tool named "
+            f"{APPLE_DOCS_CLI_TOOL} exactly once before answering. Pass the url "
+            f"{APPLE_DOCS_CLI_URL!r}. After the tool call succeeds, extract the "
+            "timestamp value from the function result and reply exactly "
+            "APPLE_DOCS_CLI_TIMESTAMP=<timestamp value>."
+        ),
+    )
+    errors: list[str] = []
+    for attempt, prompt in enumerate(prompts, start=1):
+        run = asyncio_run_session_query(
+            agent_dir=agent_dir,
+            codex_path=codex_path,
+            prompt=prompt,
+        )
+        try:
+            return _validate_apple_docs_cli_run(run, attempt=attempt)
+        except AppleDocsCliProofAttemptError as exc:
+            errors.append(str(exc))
+    joined_errors = "\n\n".join(errors)
+    raise SystemExit(
+        f"Apple docs CLI proof failed after {len(prompts)} attempts:\n{joined_errors}"
+    )
+
+
 class SosumiProofAttemptError(Exception):
     """One failed sosumi proof attempt that can be retried."""
+
+
+class AppleDocsCliProofAttemptError(Exception):
+    """One failed Apple docs CLI proof attempt that can be retried."""
 
 
 def _validate_sosumi_mcp_run(run: SessionRun, *, attempt: int) -> AppleMcpProof:
@@ -731,6 +882,74 @@ def _validate_sosumi_mcp_run(run: SessionRun, *, attempt: int) -> AppleMcpProof:
     if expected_timestamp_reply not in transcript:
         raise SosumiProofAttemptError(
             f"attempt={attempt}: sosumi MCP proof did not return "
+            f"{expected_timestamp_reply}. Transcript:\n{transcript}"
+        )
+    return AppleMcpProof(
+        session_id=run.session_id,
+        call_id=call_id,
+        transcript=transcript,
+        output_preview=output_text[:500],
+    )
+
+
+def _validate_apple_docs_cli_run(run: SessionRun, *, attempt: int) -> AppleMcpProof:
+    """Validate one Apple docs CLI adapter proof attempt."""
+    transcript = run.text.strip()
+    if not transcript.startswith(EXPECTED_ROUTE):
+        raise AppleDocsCliProofAttemptError(
+            f"attempt={attempt}: transcript did not start with expected route block.\n"
+            f"Expected prefix:\n{EXPECTED_ROUTE}\n\nActual:\n{transcript[:1000]}"
+        )
+
+    calls = [
+        item
+        for item in run.items
+        if item.get("type") == "function_call" and item.get("name") == APPLE_DOCS_CLI_TOOL
+    ]
+    if not calls:
+        raise AppleDocsCliProofAttemptError(
+            f"attempt={attempt}: " + _missing_tool_call_message(APPLE_DOCS_CLI_TOOL, run)
+        )
+    call = calls[-1]
+    call_id = call.get("call_id")
+    if not isinstance(call_id, str) or not call_id:
+        raise AppleDocsCliProofAttemptError(
+            f"attempt={attempt}: persisted {APPLE_DOCS_CLI_TOOL} call "
+            f"has invalid call_id: {call!r}"
+        )
+    arguments = _function_call_arguments(call)
+    if arguments.get("url") != APPLE_DOCS_CLI_URL:
+        raise AppleDocsCliProofAttemptError(
+            f"attempt={attempt}: {APPLE_DOCS_CLI_TOOL} used unexpected url. "
+            f"expected={APPLE_DOCS_CLI_URL!r} arguments={arguments!r}"
+        )
+    outputs = [
+        item
+        for item in run.items
+        if item.get("type") == "function_call_output" and item.get("call_id") == call_id
+    ]
+    if not outputs:
+        raise AppleDocsCliProofAttemptError(
+            f"attempt={attempt}: no persisted function_call_output found for call_id={call_id}"
+        )
+    output_text = str(outputs[-1].get("output", ""))
+    missing = [sentinel for sentinel in APPLE_MCP_SOSUMI_SENTINELS if sentinel not in output_text]
+    if missing or "error" in output_text.lower():
+        raise AppleDocsCliProofAttemptError(
+            f"attempt={attempt}: Apple docs CLI output missed expected "
+            "documentation sentinels or looked erroneous. "
+            f"missing={missing!r} output={output_text[:1000]}"
+        )
+    timestamp_match = APPLE_MCP_SOSUMI_TIMESTAMP_RE.search(output_text)
+    if timestamp_match is None:
+        raise AppleDocsCliProofAttemptError(
+            f"attempt={attempt}: Apple docs CLI output did not contain a timestamp "
+            f"line. output={output_text[:1000]}"
+        )
+    expected_timestamp_reply = f"APPLE_DOCS_CLI_TIMESTAMP={timestamp_match.group('timestamp')}"
+    if expected_timestamp_reply not in transcript:
+        raise AppleDocsCliProofAttemptError(
+            f"attempt={attempt}: Apple docs CLI proof did not return "
             f"{expected_timestamp_reply}. Transcript:\n{transcript}"
         )
     return AppleMcpProof(
@@ -930,12 +1149,21 @@ def _session_item_summary(items: list[dict[str, Any]]) -> str:
     return "[" + ", ".join(summary[:40]) + "]"
 
 
-def asyncio_run_session_query(*, agent_dir: Path, codex_path: Path, prompt: str) -> SessionRun:
+def asyncio_run_session_query(
+    *,
+    agent_dir: Path,
+    codex_path: Path,
+    prompt: str,
+    query_timeout_seconds: float | None = None,
+) -> SessionRun:
     """Run the async session query from the synchronous proof script."""
-    import asyncio
-
     return asyncio.run(
-        _run_session_query(agent_dir=agent_dir, codex_path=codex_path, prompt=prompt)
+        _run_session_query(
+            agent_dir=agent_dir,
+            codex_path=codex_path,
+            prompt=prompt,
+            query_timeout_seconds=query_timeout_seconds,
+        )
     )
 
 
@@ -984,6 +1212,7 @@ def parse_args() -> argparse.Namespace:
             "mcp-tools",
             "apple-mcp",
             "apple-mcp-sosumi",
+            "apple-docs-cli",
             "apple-mcp-xcodebuild",
             "all",
         ),
@@ -992,7 +1221,8 @@ def parse_args() -> argparse.Namespace:
             "Proof gate to run. Defaults to the existing graph proof. "
             "'mcp-tools' is accepted as an alias for 'tool-plane'; "
             "'apple-mcp' proves memory, 'apple-mcp-sosumi' proves sosumi, "
-            "and 'apple-mcp-xcodebuild' proves read-only XcodeBuildMCP discovery."
+            "'apple-docs-cli' proves the Sosumi CLI Apple-docs adapter, and "
+            "'apple-mcp-xcodebuild' proves read-only XcodeBuildMCP discovery."
         ),
     )
     parser.add_argument(
@@ -1053,6 +1283,7 @@ def main() -> int:
         copy_bundle(source_bundle, agent_dir)
         needs_memory_mcp = proof in {"apple-mcp", "all"}
         needs_sosumi_mcp = proof in {"apple-mcp-sosumi", "all"}
+        needs_apple_docs_cli = proof == "apple-docs-cli"
         needs_xcodebuild_mcp = proof in {"apple-mcp-xcodebuild", "all"}
         needs_apple_mcp = needs_memory_mcp or needs_sosumi_mcp or needs_xcodebuild_mcp
         mcp_manifest = None
@@ -1092,6 +1323,8 @@ def main() -> int:
                     mcp_manifest,
                     APPLE_MCP_XCODEBUILD_SERVER,
                 )
+        if needs_apple_docs_cli:
+            write_fetch_apple_docs_cli_tool(agent_dir)
         if proof == "all" and not args.skip_live:
             # Keep each live proof surface minimal. With every MCP exposed at once,
             # stock Codex can choose to narrate instead of calling the one proof
@@ -1135,6 +1368,10 @@ def main() -> int:
             print(f"converted_apple_mcp_server={APPLE_MCP_SOSUMI_SERVER}")
             print(f"converted_apple_mcp_sosumi_path={APPLE_MCP_SOSUMI_DOC_PATH}")
             print("ASSERTION: Apple sosumi MCP config converted into Omnigent tools config")
+        if needs_apple_docs_cli:
+            print(f"apple_docs_cli_tool={APPLE_DOCS_CLI_TOOL}")
+            print(f"apple_docs_cli_url={APPLE_DOCS_CLI_URL}")
+            print("ASSERTION: Apple docs CLI adapter tool added to generated agent")
         if needs_xcodebuild_mcp:
             assert mcp_manifest is not None
             assert xcodebuild_workspace_root is not None
@@ -1237,6 +1474,21 @@ def main() -> int:
                 "Omnigent-converted MCP config"
             )
             print(f"ASSERTION: persisted session items include {APPLE_MCP_SOSUMI_TOOL} result")
+        if needs_apple_docs_cli:
+            cli_proof = run_live_proof_step(
+                "apple-docs-cli",
+                timeout_seconds=args.live_proof_timeout,
+                action=lambda: run_live_apple_docs_cli_proof(agent_dir, codex_path),
+            )
+            print(f"apple_docs_cli_session_id={cli_proof.session_id}")
+            print(f"apple_docs_cli_call_id={cli_proof.call_id}")
+            print(f"apple_docs_cli_output_preview={cli_proof.output_preview!r}")
+            print(f"apple_docs_cli_transcript_preview={cli_proof.transcript[:500]!r}")
+            print(
+                "ASSERTION: stock Codex invoked the generated Apple docs CLI adapter "
+                "through Omnigent dynamicTools"
+            )
+            print(f"ASSERTION: persisted session items include {APPLE_DOCS_CLI_TOOL} result")
         if needs_xcodebuild_mcp:
             assert xcodebuild_workspace_root is not None
             def run_xcodebuild_step() -> AppleMcpProof:
