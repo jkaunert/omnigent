@@ -132,6 +132,44 @@ class _FakeProcess:
         return self.returncode or 0
 
 
+def _make_router_bundle(root: Path) -> Path:
+    """Create a minimal plugin bundle with an Apple routerSelection manifest."""
+    bundle = root / "bundle"
+    skill_dir = bundle / "skills" / "apple-app-orchestrator"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: apple-app-orchestrator\n---\nUse the Apple orchestrator policy.\n",
+        encoding="utf-8",
+    )
+    manifest_dir = bundle / ".codex-plugin"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "apple-appdev-workflow",
+                "routerSelection": {
+                    "schemaVersion": 1,
+                    "topLevelOwner": "apple-appdev-workflow:apple-app-orchestrator",
+                    "hostScopes": ["desktop"],
+                    "domains": [
+                        {
+                            "id": "apple-appdev",
+                            "promptSignals": ["swiftui", "xcode"],
+                            "workspaceFiles": ["Package.swift"],
+                            "workspaceExtensions": ["xcodeproj", "xcworkspace"],
+                            "select": "apple-appdev-workflow:apple-app-orchestrator",
+                        }
+                    ],
+                    "suppression": {"whenExplicitSkillSelected": True},
+                    "evidence": {"emitRouteSelection": True},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return bundle
+
+
 class TestCodexExecutor(unittest.TestCase):
     def test_databricks_codex_config_overrides(self):
         overrides = _databricks_codex_config_overrides(
@@ -398,6 +436,135 @@ class TestCodexExecutor(unittest.TestCase):
             self.assertEqual(fake_session.calls[0]["system_prompt"], "Be helpful.")
             self.assertEqual(fake_session.calls[0]["model"], "gpt-5.4-mini")
             self.assertEqual(fake_session.calls[0]["tools"][0]["name"], "calculate")
+
+        _run(_t())
+
+    def test_run_turn_applies_bundle_router_selection_before_codex_output(self):
+        async def _t():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                bundle = _make_router_bundle(root)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                fake_session = _FakeAppSession(
+                    [
+                        [
+                            TextChunk(text="Reviewing the SwiftUI app."),
+                            TurnComplete(response="Reviewing the SwiftUI app."),
+                        ]
+                    ]
+                )
+
+                executor = CodexExecutor(
+                    codex_path="/bin/echo",
+                    cwd=str(workspace),
+                    bundle_dir=bundle,
+                    app_session_factory=lambda **kwargs: fake_session,
+                )
+                events = [
+                    e
+                    async for e in executor.run_turn(
+                        [
+                            {
+                                "role": "user",
+                                "content": "Review this SwiftUI diff",
+                                "session_id": "s1",
+                            }
+                        ],
+                        [],
+                        "Be helpful.",
+                    )
+                ]
+
+                self.assertIsInstance(events[0], TextChunk)
+                self.assertEqual(
+                    events[0].text,
+                    "Routing: orchestrator-led\n\n"
+                    "Activated skills\n"
+                    "- `apple-appdev-workflow:apple-app-orchestrator`\n\n",
+                )
+                self.assertEqual(events[1].text, "Reviewing the SwiftUI app.")
+                self.assertIsInstance(events[2], TurnComplete)
+                self.assertTrue(
+                    events[2].response.startswith(
+                        "Routing: orchestrator-led\n\n"
+                        "Activated skills\n"
+                        "- `apple-appdev-workflow:apple-app-orchestrator`\n\n"
+                    )
+                )
+                prompt = fake_session.calls[0]["system_prompt"]
+                self.assertIn("[Omnigent routerSelection]", prompt)
+                self.assertIn("Use the Apple orchestrator policy.", prompt)
+                self.assertIn("already emitted the route-evidence block", prompt)
+
+        _run(_t())
+
+    def test_run_turn_router_selection_suppresses_explicit_skill_invocation(self):
+        async def _t():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                bundle = _make_router_bundle(root)
+                fake_session = _FakeAppSession(
+                    [[TextChunk(text="Using explicit skill."), TurnComplete(response="done")]]
+                )
+
+                executor = CodexExecutor(
+                    codex_path="/bin/echo",
+                    bundle_dir=bundle,
+                    app_session_factory=lambda **kwargs: fake_session,
+                )
+                events = [
+                    e
+                    async for e in executor.run_turn(
+                        [
+                            {
+                                "role": "user",
+                                "content": "$apple-appdev-workflow:fetch-apple-docs SwiftUI docs",
+                                "session_id": "s1",
+                            }
+                        ],
+                        [],
+                        "Be helpful.",
+                    )
+                ]
+
+                self.assertEqual(events[0].text, "Using explicit skill.")
+                self.assertEqual(fake_session.calls[0]["system_prompt"], "Be helpful.")
+
+        _run(_t())
+
+    def test_run_turn_router_selection_respects_skills_filter(self):
+        async def _t():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                bundle = _make_router_bundle(root)
+                fake_session = _FakeAppSession(
+                    [[TextChunk(text="No auto route."), TurnComplete(response="done")]]
+                )
+
+                executor = CodexExecutor(
+                    codex_path="/bin/echo",
+                    bundle_dir=bundle,
+                    skills_filter=["fetch-apple-docs"],
+                    app_session_factory=lambda **kwargs: fake_session,
+                )
+                events = [
+                    e
+                    async for e in executor.run_turn(
+                        [
+                            {
+                                "role": "user",
+                                "content": "Review this SwiftUI diff",
+                                "session_id": "s1",
+                            }
+                        ],
+                        [],
+                        "Be helpful.",
+                    )
+                ]
+
+                self.assertEqual(events[0].text, "No auto route.")
+                self.assertEqual(fake_session.calls[0]["system_prompt"], "Be helpful.")
 
         _run(_t())
 

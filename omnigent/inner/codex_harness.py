@@ -81,6 +81,11 @@ Env vars read at startup:
   directory.
 - ``HARNESS_CODEX_AGENT_NAME``: Agent display name. Reserved
   for future use (e.g. namespacing bundled skills).
+- ``HARNESS_CODEX_ROUTER_SELECTION_HOST_SCOPE``: Host-scope value
+  used when matching a bundle manifest's optional
+  ``routerSelection.hostScopes``. Defaults to ``"desktop"`` for
+  the stock Codex app-server wrapper. Set to an empty string to
+  disable host-scoped manifest auto-routing.
 """
 
 from __future__ import annotations
@@ -117,6 +122,7 @@ _ENV_RETRY_POLICY = "HARNESS_CODEX_RETRY_POLICY"
 _ENV_SKILLS_FILTER = "HARNESS_CODEX_SKILLS_FILTER"
 _ENV_BUNDLE_DIR = "HARNESS_CODEX_BUNDLE_DIR"
 _ENV_AGENT_NAME = "HARNESS_CODEX_AGENT_NAME"
+_ENV_ROUTER_SELECTION_HOST_SCOPE = "HARNESS_CODEX_ROUTER_SELECTION_HOST_SCOPE"
 _ENV_GATEWAY_BASE_URL = "HARNESS_CODEX_GATEWAY_BASE_URL"
 _ENV_GATEWAY_AUTH_COMMAND = "HARNESS_CODEX_GATEWAY_AUTH_COMMAND"
 _ENV_GATEWAY_AUTH_REFRESH_INTERVAL_MS = "HARNESS_CODEX_GATEWAY_AUTH_REFRESH_INTERVAL_MS"
@@ -282,6 +288,8 @@ def _build_codex_executor() -> Executor:
     bundle_dir = Path(bundle_dir_raw) if bundle_dir_raw else None
     agent_name_raw = os.environ.get(_ENV_AGENT_NAME, "").strip()
     agent_name = agent_name_raw or None
+    router_host_scope_raw = os.environ.get(_ENV_ROUTER_SELECTION_HOST_SCOPE, "desktop").strip()
+    router_host_scope = router_host_scope_raw or None
     return CodexExecutor(
         cwd=os.environ.get(_ENV_CWD),
         os_env=_resolve_os_env(),
@@ -307,6 +315,7 @@ def _build_codex_executor() -> Executor:
         bundle_dir=bundle_dir,
         agent_name=agent_name,
         skills_filter=_resolve_skills_filter(),
+        router_selection_host_scope=router_host_scope,
     )
 
 

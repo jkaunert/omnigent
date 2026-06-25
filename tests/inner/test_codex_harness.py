@@ -44,7 +44,24 @@ def test_create_app_returns_fastapi_with_required_routes() -> None:
     real ``codex`` CLI on PATH.
     """
     app = codex_harness.create_app()
-    paths = {route.path for route in app.routes}  # type: ignore[attr-defined]
+    def _route_paths(routes: Any, prefix: str = "") -> set[str]:
+        paths: set[str] = set()
+        for route in routes:
+            path = getattr(route, "path", None)
+            if isinstance(path, str):
+                paths.add(prefix + path)
+            nested = getattr(route, "routes", None)
+            if nested is not None:
+                paths.update(_route_paths(nested, prefix=prefix))
+            original_router = getattr(route, "original_router", None)
+            original_routes = getattr(original_router, "routes", None)
+            include_context = getattr(route, "include_context", None)
+            include_prefix = getattr(include_context, "prefix", "")
+            if original_routes is not None:
+                paths.update(_route_paths(original_routes, prefix=prefix + include_prefix))
+        return paths
+
+    paths = _route_paths(app.routes)
     # Session-keyed harness API: liveness probe + single
     # discriminated-event endpoint per §The Harness API Subset.
     assert "/health" in paths
@@ -437,6 +454,44 @@ def test_bundle_dir_and_agent_name_env_vars_thread_through(
 
     assert captured["bundle_dir"] == Path("/tmp/fake/bundle")
     assert captured["agent_name"] == "my_codex_agent"
+
+
+def test_router_selection_host_scope_env_var_threads_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``HARNESS_CODEX_ROUTER_SELECTION_HOST_SCOPE`` reaches CodexExecutor."""
+    monkeypatch.setenv("HARNESS_CODEX_ROUTER_SELECTION_HOST_SCOPE", "xcode")
+    captured: dict[str, Any] = {}
+
+    def _fake_init(self: Any, **kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    with patch(
+        "omnigent.inner.codex_harness.CodexExecutor.__init__",
+        _fake_init,
+    ):
+        codex_harness._build_codex_executor()
+
+    assert captured["router_selection_host_scope"] == "xcode"
+
+
+def test_router_selection_host_scope_empty_env_var_disables_auto_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty host-scope env var passes ``None`` to disable matching."""
+    monkeypatch.setenv("HARNESS_CODEX_ROUTER_SELECTION_HOST_SCOPE", "")
+    captured: dict[str, Any] = {}
+
+    def _fake_init(self: Any, **kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    with patch(
+        "omnigent.inner.codex_harness.CodexExecutor.__init__",
+        _fake_init,
+    ):
+        codex_harness._build_codex_executor()
+
+    assert captured["router_selection_host_scope"] is None
 
 
 def test_bundle_dir_unset_passes_none(
