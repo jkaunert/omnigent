@@ -80,7 +80,7 @@ The current spike proves the first narrow adapter behavior:
 | Full Apple top-level skill graph from an Omnigent bundle | `replacement-ready` for the selected `apple-app-orchestrator` graph | `scripts/prove_stock_codex_replacement.py` resolved 19 relative reference files and 13 referenced Apple skills inside the generated Omnigent bundle, then stock Codex read `references/brigade-output-contract.md` through normal `run_prompt()` and returned `GRAPH_OK`; initially proven on `0.137.0` and revalidated on `0.142.2`. |
 | Omnigent dynamic tool exposure to stock Codex | `replacement-ready` for the `dynamicTools` channel | `scripts/prove_stock_codex_replacement.py --proof tool-plane` verified the Apple bundle's `.mcp.json` declares `XcodeBuildMCP`, `memory`, and `sosumi`, then stock Codex `0.142.2` invoked Omnigent-exposed `sys_os_read` through normal `run_prompt()`; persisted session items included a `function_call` and matching `function_call_output` containing the sentinel. |
 | Apple `.mcp.json` `memory` server execution through Omnigent | `replacement-ready` for the local stdio `memory` server | `scripts/prove_stock_codex_replacement.py --proof apple-mcp` converted the Apple plugin `.mcp.json` `memory` server into an Omnigent `tools: memory: type: mcp` declaration with an isolated temp `MEMORY_FILE_PATH`, then stock Codex `0.142.2` invoked `memory__create_entities`; persisted session items included a `function_call` and matching `function_call_output` containing `APPLE_MCP_SENTINEL_73`. |
-| Apple `.mcp.json` `sosumi` server execution through Omnigent | `replacement-ready` for the network-backed Apple documentation MCP server | `scripts/prove_stock_codex_replacement.py --proof apple-mcp-sosumi` converted the Apple plugin `.mcp.json` `sosumi` server into an Omnigent `tools: sosumi: type: mcp` declaration, then stock Codex `0.142.2` invoked `sosumi__fetchAppleDocumentation` with `/documentation/swift/string`; persisted session items included a `function_call` and matching `function_call_output` containing `title: String` and the Apple documentation source URL. |
+| Apple `.mcp.json` `sosumi` server execution through Omnigent | `unstable` for the network-backed Apple documentation MCP server | `scripts/prove_stock_codex_replacement.py --proof apple-mcp-sosumi` previously converted the Apple plugin `.mcp.json` `sosumi` server into an Omnigent `tools: sosumi: type: mcp` declaration and proved stock Codex `0.142.2` could invoke `sosumi__fetchAppleDocumentation` with `/documentation/swift/string`. Bounded reruns on 2026-06-25 timed out at the `apple-mcp-sosumi` live step, both standalone and inside `--proof all`, so this surface is blocked pending timeout diagnosis. |
 | Apple `.mcp.json` `XcodeBuildMCP` project discovery through Omnigent | `replacement-ready` for read-only project discovery | `scripts/prove_stock_codex_replacement.py --proof apple-mcp-xcodebuild` converted the Apple plugin `.mcp.json` `XcodeBuildMCP` server into an Omnigent `tools: XcodeBuildMCP: type: mcp` declaration, then stock Codex `0.142.2` invoked `XcodeBuildMCP__discover_projs` against the local Omnigent checkout; persisted session items included a `function_call` and matching `function_call_output` that found `ap-web/ios/Omnigent.xcodeproj`. This does not prove build, test, launch, simulator, or device execution. |
 
 This does not yet prove full Codex-fork replacement.
@@ -133,36 +133,61 @@ uvx --from . python scripts/prove_stock_codex_replacement.py \
   --codex-path /opt/homebrew/bin/codex
 ```
 
+Combined bounded proof:
+
+```bash
+uvx --from . python scripts/prove_stock_codex_replacement.py \
+  --proof all \
+  --codex-path /opt/homebrew/bin/codex \
+  --live-proof-timeout 180
+```
+
 The proof script copies the installed Apple workflow bundle into a temporary
 Omnigent agent, writes an Omnigent `harness: codex` config, refuses
 `.codex-fork` binaries by default, and removes the temp fixture unless
-`--keep-fixture` is passed.
+`--keep-fixture` is passed. Live proof runs emit `live_proof_start`,
+`live_proof_ok`, `live_proof_failed`, or `live_proof_timeout` for each bounded
+surface. In the combined proof, each MCP surface is run with its own generated
+Omnigent tools config so one hanging server does not obscure which replacement
+surface failed.
+
+Current aggregate status on 2026-06-25: `graph`, `tool-plane`, and
+`apple-mcp-memory` passed under `--proof all`; `apple-mcp-sosumi` timed out at
+180 seconds, and a standalone `apple-mcp-sosumi` rerun timed out at 90 seconds.
+The aggregate proof therefore does not currently reach the XcodeBuildMCP
+discovery step, which remains proven by its standalone gate.
 
 ## Next Proof Gates
 
 Run these in order unless a later gate becomes cheaper due to new evidence.
 
-1. XcodeBuildMCP build/run boundaries
+1. Sosumi live timeout diagnosis
+   - Determine whether the current `apple-mcp-sosumi` timeout is MCP server
+     launch, network fetch, stock-Codex tool invocation, or Omnigent session
+     plumbing. Keep this diagnosis separate from the already-passing memory MCP
+     and standalone XcodeBuildMCP discovery proofs.
+
+2. XcodeBuildMCP build/run boundaries
    - Extend the proven `XcodeBuildMCP` discovery path to bounded build/run
      checks only after selecting a safe local fixture. Keep build, test,
      simulator, and device checks separate so host setup failures do not blur
      the already-proven MCP adapter path.
 
-2. Session and terminal behavior
+3. Session and terminal behavior
    - Prove the Omnigent path supports the required live terminal/session shape,
      including tmux/native-terminal expectations where the workflow depends on
      them.
 
-3. Clean stock-Codex install
+4. Clean stock-Codex install
    - Prove the path from a clean Codex home or clean host profile using the
      stock Codex binary. Record every required install/config step.
 
-4. End-to-end Apple workflow smoke
+5. End-to-end Apple workflow smoke
    - Run a representative Apple workflow request through Omnigent plus stock
      Codex and compare the visible route, tool availability, and output contract
      against the current forked path.
 
-5. Cutover rehearsal
+6. Cutover rehearsal
    - In a separate environment, run the Omnigent path as the default without
      changing the existing Codex fork. Record fallback steps.
 
