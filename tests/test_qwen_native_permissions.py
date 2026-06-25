@@ -333,3 +333,73 @@ async def test_supervise_mirror_parks_then_releases_on_control_response(
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.asyncio
+async def test_supervise_mirror_skips_request_resolved_in_same_poll_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A request + its control_response in ONE poll batch never parks a card.
+
+    The decision was made (TUI/auto) within a single poll window, before the
+    mirror could park it. Parking now would race its own response — the response
+    branch would run against a freshly-created task that hasn't POSTed yet and so
+    couldn't release the card, leaving it stuck until the server-side timeout. So
+    the mirror must spawn no approval task and post nothing for that request.
+    """
+    created: list[object] = []
+
+    class _FakeAsyncClient:
+        def __init__(self, **_kw: object) -> None:
+            self.posts: list[tuple[str, dict]] = []
+            created.append(self)
+
+        async def __aenter__(self) -> _FakeAsyncClient:
+            return self
+
+        async def __aexit__(self, *_a: object) -> bool:
+            return False
+
+        async def post(self, url: str, *, json: dict, **_kw: object) -> httpx.Response:
+            self.posts.append((url, json))
+            return httpx.Response(200, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(qnp.httpx, "AsyncClient", _FakeAsyncClient)
+
+    run_one_calls: list[str] = []
+
+    async def _fake_run_one(_client: object, *, approval: object, **_kw: object) -> None:
+        run_one_calls.append(approval.request_id)  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(qnp, "_run_one_approval", _fake_run_one)
+
+    events_file = events_file_path(tmp_path)
+    events_file.write_bytes(b"")  # mirror seeds offset at EOF (==0 here)
+
+    task = asyncio.create_task(
+        qnp.supervise_qwen_approval_mirror(
+            base_url="http://t",
+            headers={},
+            session_id="conv_4",
+            bridge_dir=tmp_path,
+            poll_interval_s=0.02,
+        )
+    )
+    try:
+        # Let the mirror seed its offset at EOF and enter its sleep, then write
+        # BOTH events in a single atomic write so the next poll reads them as one
+        # batch (the file is empty until this one syscall completes, so a poll
+        # can only see neither line or both — never just the request).
+        await asyncio.sleep(0.08)
+        with open(events_file, "ab") as fh:
+            fh.write(_ev_bytes(_can_use_tool_ev("r1")) + _ev_bytes(_control_response_ev("r1")))
+        # Give the supervisor several poll cycles to consume the batch.
+        await asyncio.sleep(0.2)
+        assert run_one_calls == [], "should not park a request already resolved in-batch"
+        assert created, "supervisor never opened a client"
+        assert created[0].posts == [], "should not post external_elicitation_resolved"  # type: ignore[attr-defined]
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task

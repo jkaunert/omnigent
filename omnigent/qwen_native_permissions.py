@@ -261,9 +261,21 @@ async def supervise_qwen_approval_mirror(
                 events, offset = await asyncio.to_thread(
                     _read_new_control_events, events_file, offset
                 )
+                # A request whose control_response is already in THIS same batch
+                # was answered (in the TUI or auto) within one poll window, before
+                # we could park it. Parking it now would race its own response: the
+                # response branch runs against a freshly-created task that hasn't
+                # POSTed yet, so it can't release the card, which would then linger
+                # until the server-side park times out. The decision is already
+                # made — skip the card entirely.
+                resolved_in_batch = {ev.request_id for ev in events if ev.kind == "response"}
                 for ev in events:
                     if ev.kind == "request":
-                        if ev.request_id in pending or ev.approval is None:
+                        if (
+                            ev.request_id in pending
+                            or ev.approval is None
+                            or ev.request_id in resolved_in_batch
+                        ):
                             continue
                         elicitation_id = qwen_permission_elicitation_id(session_id, ev.request_id)
                         task = asyncio.create_task(
