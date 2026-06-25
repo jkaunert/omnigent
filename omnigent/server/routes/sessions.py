@@ -12868,8 +12868,11 @@ def create_sessions_router(
 
     @router.get(
         "/sessions/{session_id}",
-        # See create_session for the response_model=None rationale.
+        # See create_session for the response_model=None rationale. We keep
+        # response_model=None (no response re-validation/serialization) but
+        # still advertise the body schema for docs/SDK tooling via responses=.
         response_model=None,
+        responses={200: {"model": SessionResponse}},
     )
     async def get_session(
         request: Request,
@@ -12978,6 +12981,7 @@ def create_sessions_router(
     @router.get(
         "/sessions",
         response_model=None,
+        responses={200: {"model": PaginatedList}},
     )
     async def list_sessions(
         request: Request,
@@ -13505,6 +13509,7 @@ def create_sessions_router(
     @router.patch(
         "/sessions/{session_id}",
         response_model=None,
+        responses={200: {"model": SessionResponse}},
     )
     async def update_session(
         request: Request,
@@ -13878,10 +13883,11 @@ def create_sessions_router(
     @router.post(
         "/sessions/{source_id}/fork",
         status_code=201,
-        # response_model=None: handler returns SessionResponse
-        # but we suppress the OpenAPI schema injection to match
-        # the convention of sibling routes.
+        # response_model=None keeps FastAPI from re-validating/serializing
+        # the handler's SessionResponse; responses= still advertises the
+        # body schema to docs/SDK tooling.
         response_model=None,
+        responses={201: {"model": SessionResponse}},
     )
     async def fork_session(
         request: Request,
@@ -14069,9 +14075,11 @@ def create_sessions_router(
 
     @router.post(
         "/sessions/{session_id}/switch-agent",
-        # response_model=None: handler returns SessionResponse but we
-        # suppress the OpenAPI schema injection to match sibling routes.
+        # response_model=None keeps FastAPI from re-validating/serializing
+        # the handler's SessionResponse; responses= still advertises the
+        # body schema to docs/SDK tooling.
         response_model=None,
+        responses={200: {"model": SessionResponse}},
     )
     async def switch_session_agent(
         request: Request,
@@ -15015,6 +15023,7 @@ def create_sessions_router(
     @router.get(
         "/sessions/{session_id}/items",
         response_model=None,
+        responses={200: {"model": PaginatedList}},
     )
     async def list_session_items(
         request: Request,
@@ -15075,6 +15084,7 @@ def create_sessions_router(
     @router.get(
         "/sessions/{session_id}/child_sessions",
         response_model=None,
+        responses={200: {"model": PaginatedList}},
     )
     async def list_child_sessions(
         request: Request,
@@ -17711,6 +17721,7 @@ def create_sessions_router(
     @router.delete(
         "/sessions/{session_id}",
         response_model=None,
+        responses={200: {"model": ConversationDeleted}},
     )
     async def delete_session(
         request: Request,
@@ -17865,6 +17876,7 @@ def create_sessions_router(
     @router.put(
         "/sessions/{session_id}/permissions",
         response_model=None,
+        responses={200: {"model": PermissionObject}},
     )
     async def grant_permission(
         request: Request,
@@ -17998,6 +18010,7 @@ def create_sessions_router(
     @router.get(
         "/sessions/{session_id}/permissions",
         response_model=None,
+        responses={200: {"model": list[PermissionObject]}},
     )
     async def list_permissions(
         request: Request,
