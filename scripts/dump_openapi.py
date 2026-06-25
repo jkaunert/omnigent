@@ -464,7 +464,10 @@ _RST_OTHER_FIELD = re.compile(r"^:[a-zA-Z][\w ]*:")
 # Inline cross-reference role, e.g. ``:class:`Foo``` → `` `Foo` ``.
 _RST_ROLE = re.compile(r":[a-zA-Z]+:`([^`]+)`")
 # reST inline literal (double backtick) → Markdown code span (single).
-_RST_DOUBLE_BACKTICK = re.compile(r"``([^`]+)``")
+# Non-greedy + DOTALL so a literal may span lines and contain nested
+# single backticks (e.g. a role left inside it); the replacement flattens
+# those so the resulting code span is valid.
+_RST_DOUBLE_BACKTICK = re.compile(r"``(.+?)``", re.DOTALL)
 
 # Handler parameters that are FastAPI plumbing, not API inputs.
 _INTERNAL_PARAMS = frozenset(
@@ -472,10 +475,16 @@ _INTERNAL_PARAMS = frozenset(
 )
 
 
+def _rst_double_backtick_to_code(match: re.Match[str]) -> str:
+    """Flatten a reST ``literal`` into a single-line Markdown code span."""
+    inner = re.sub(r"\s+", " ", match.group(1).replace("`", "")).strip()
+    return f"`{inner}`"
+
+
 def _rst_inline_to_md(text: str) -> str:
     """Convert inline reST roles / literals in *text* to Markdown."""
     text = _RST_ROLE.sub(r"`\1`", text)
-    return _RST_DOUBLE_BACKTICK.sub(r"`\1`", text)
+    return _RST_DOUBLE_BACKTICK.sub(_rst_double_backtick_to_code, text)
 
 
 def _rst_field_text(lines: list[str]) -> str:
@@ -484,22 +493,20 @@ def _rst_field_text(lines: list[str]) -> str:
     return _rst_inline_to_md(joined)
 
 
-def _reformat_operation_doc(op: dict[str, Any]) -> None:
+def _parse_rst_doc(desc: str) -> tuple[str, list[tuple[str, str | None, str]]]:
     """
-    Rewrite one operation's reST ``description`` as Markdown in place.
+    Split a reST docstring into Markdown prose and parsed fields.
 
-    Matched ``:param:`` entries are moved onto ``op['parameters']``;
-    the remaining prose / body-params / returns / raises are rebuilt as
-    a Markdown description. No-op if there is no description.
+    Lines before the first reST field marker are prose; ``:param:`` /
+    ``:returns:`` / ``:raises:`` open a field that subsequent indented
+    continuation lines accumulate onto. Unknown field markers (e.g.
+    ``:rtype:``) are discarded.
 
-    :param op: An OpenAPI operation object; mutated in place.
+    :param desc: The raw (reST) description text.
+    :returns: ``(prose_markdown, fields)`` where ``fields`` is a list of
+        ``(kind, name, text)`` triples (``kind`` in ``param`` /
+        ``returns`` / ``raises``) with ``text`` already Markdown.
     """
-    desc = op.get("description")
-    if not desc:
-        return
-
-    # Split the docstring into leading prose and reST fields. ``cur``
-    # is the field currently accumulating continuation lines.
     prose: list[str] = []
     fields: list[tuple[str, str | None, list[str]]] = []
     cur: tuple[str, str | None, list[str]] | None = None
@@ -533,22 +540,51 @@ def _reformat_operation_doc(op: dict[str, Any]) -> None:
         else:
             prose.append(line)
 
-    param_names = {p.get("name") for p in op.get("parameters", [])}
+    prose_md = _rst_inline_to_md("\n".join(prose).strip())
+    parsed = [(kind, name, _rst_field_text(body)) for kind, name, body in fields if kind != "drop"]
+    return prose_md, parsed
+
+
+def _reformat_doc(
+    desc: str | None,
+    targets: dict[str, Any],
+    internal: frozenset[str] | None = None,
+) -> str | None:
+    """
+    Convert one reST ``description`` to Markdown.
+
+    Each ``:param name:`` whose ``name`` is a key in *targets* (a
+    parameter or property object) is moved onto that object's own
+    ``description``; entries with no matching target become a Markdown
+    ``**Parameters**`` list. ``:returns:`` / ``:raises:`` become
+    ``**Returns:**`` / ``**Raises**`` sections. Names in *internal*
+    (FastAPI plumbing) are dropped.
+
+    :param desc: The raw description, or ``None``.
+    :param targets: Map of name -> object that may receive a moved
+        ``description`` (empty when there are no field targets).
+    :param internal: Parameter names to drop entirely (``None`` = drop
+        none, used for schema fields).
+    :returns: The rebuilt Markdown description, or the original falsy
+        value when *desc* is empty.
+    """
+    if not desc:
+        return desc
+    skip = internal or frozenset()
+    prose_md, fields = _parse_rst_doc(desc)
     body_params: list[tuple[str, str]] = []
     raises: list[tuple[str, str]] = []
     returns: str | None = None
-    for kind, name, body_lines in fields:
-        text = _rst_field_text(body_lines)
+    for kind, name, text in fields:
         if kind == "param":
-            if not text or name in _INTERNAL_PARAMS:
+            if not text or name in skip:
                 continue
-            if name in param_names:
-                # Move onto the matching parameter (don't clobber an
-                # explicit Query(description=...) if one exists).
-                for param in op["parameters"]:
-                    if param.get("name") == name and not param.get("description"):
-                        param["description"] = text
-                        break
+            target = targets.get(name) if name else None
+            if isinstance(target, dict):
+                # Move onto the matching field; don't clobber an explicit
+                # Field/Query description if one already exists.
+                if not target.get("description"):
+                    target["description"] = text
             else:
                 body_params.append((name or "", text))
         elif kind == "raises" and text:
@@ -557,20 +593,70 @@ def _reformat_operation_doc(op: dict[str, Any]) -> None:
             returns = text
 
     sections: list[str] = []
-    prose_md = _rst_inline_to_md("\n".join(prose).strip())
     if prose_md:
         sections.append(prose_md)
     if body_params:
-        sections.append(
-            "**Parameters**\n\n" + "\n".join(f"- `{name}` — {text}" for name, text in body_params),
-        )
+        sections.append("**Parameters**\n\n" + "\n".join(f"- `{n}` — {t}" for n, t in body_params))
     if returns:
         sections.append(f"**Returns:** {returns}")
     if raises:
-        sections.append(
-            "**Raises**\n\n" + "\n".join(f"- `{exc}` — {text}" for exc, text in raises),
+        sections.append("**Raises**\n\n" + "\n".join(f"- `{e}` — {t}" for e, t in raises))
+    return "\n\n".join(sections)
+
+
+def _reformat_operation_doc(op: dict[str, Any]) -> None:
+    """
+    Rewrite an operation's (and its responses') reST docs as Markdown.
+
+    Matched ``:param:`` entries move onto ``op['parameters']``; response
+    descriptions are reformatted with no field targets.
+
+    :param op: An OpenAPI operation object; mutated in place.
+    """
+    if op.get("description"):
+        targets = {p.get("name"): p for p in op.get("parameters", []) if isinstance(p, dict)}
+        op["description"] = _reformat_doc(op["description"], targets, _INTERNAL_PARAMS)
+    for resp in (op.get("responses") or {}).values():
+        if isinstance(resp, dict) and resp.get("description"):
+            resp["description"] = _reformat_doc(resp["description"], {})
+
+
+def _reformat_schema_node(node: Any) -> None:
+    """
+    Rewrite a JSON-Schema node's reST ``description`` as Markdown.
+
+    A model's docstring becomes its schema ``description`` with
+    ``:param name:`` entries describing its fields; each moves onto the
+    matching ``properties[name]`` description. Recurses into nested
+    schema positions so inline sub-objects are handled too.
+
+    :param node: A JSON-Schema object (non-dicts are ignored); mutated
+        in place.
+    """
+    if not isinstance(node, dict):
+        return
+    if node.get("description"):
+        props = node.get("properties")
+        node["description"] = _reformat_doc(
+            node["description"],
+            props if isinstance(props, dict) else {},
         )
-    op["description"] = "\n\n".join(sections)
+    properties = node.get("properties")
+    if isinstance(properties, dict):
+        for sub in properties.values():
+            _reformat_schema_node(sub)
+    for defs_key in ("$defs", "definitions"):
+        defs = node.get(defs_key)
+        if isinstance(defs, dict):
+            for sub in defs.values():
+                _reformat_schema_node(sub)
+    for child_key in ("items", "additionalProperties"):
+        _reformat_schema_node(node.get(child_key))
+    for combinator in ("allOf", "anyOf", "oneOf", "prefixItems"):
+        members = node.get(combinator)
+        if isinstance(members, list):
+            for sub in members:
+                _reformat_schema_node(sub)
 
 
 def _reformat_descriptions(paths: dict[str, Any]) -> None:
@@ -581,6 +667,36 @@ def _reformat_descriptions(paths: dict[str, Any]) -> None:
                 _reformat_operation_doc(op)
 
 
+def _reformat_component_schemas(components: dict[str, Any]) -> None:
+    """Convert every component schema's reST description to Markdown."""
+    schemas = components.get("schemas")
+    if isinstance(schemas, dict):
+        for schema in schemas.values():
+            _reformat_schema_node(schema)
+
+
+def _normalize_inline_descriptions(node: Any) -> None:
+    """
+    Final safety net: normalize inline reST in any remaining description.
+
+    Walks the whole document and converts inline ``:role:`X``` roles and
+    reST double-backtick literals to Markdown `` `X` `` in every
+    ``description`` string — covering responses, ``info``, tags and
+    security schemes that the structured passes don't rewrite.
+
+    :param node: Any spec fragment; mutated in place.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "description" and isinstance(value, str):
+                node[key] = _rst_inline_to_md(value)
+            else:
+                _normalize_inline_descriptions(value)
+    elif isinstance(node, list):
+        for value in node:
+            _normalize_inline_descriptions(value)
+
+
 def _enrich_spec(spec: dict[str, Any]) -> None:
     """
     Inject document-level metadata for docs / SDK tooling.
@@ -588,7 +704,8 @@ def _enrich_spec(spec: dict[str, Any]) -> None:
     Adds ``info.description``, ``servers``, top-level ``tags`` with
     human-readable descriptions, and ``components.securitySchemes`` —
     none of which FastAPI emits — tags the untagged utility routes, and
-    rewrites reST operation docstrings as Markdown.
+    rewrites reST docstrings (operations, parameters, and component
+    schemas) as Markdown.
     Mutates ``spec`` in place. See the module-level enrichment
     constants for the rationale behind each value.
 
@@ -606,6 +723,8 @@ def _enrich_spec(spec: dict[str, Any]) -> None:
     _tag_system_routes(paths)
     _retag_session_resources(paths)
     _reformat_descriptions(paths)
+    _reformat_component_schemas(components)
+    _normalize_inline_descriptions(spec)
 
 
 def generate_spec() -> dict[str, Any]:
