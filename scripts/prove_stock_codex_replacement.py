@@ -66,6 +66,7 @@ APPLE_MCP_SOSUMI_SENTINELS = (
     "title: String",
     "source: https://developer.apple.com/documentation/swift/string",
 )
+APPLE_MCP_SOSUMI_TIMESTAMP_RE = re.compile(r"^timestamp: (?P<timestamp>\S+)$", re.MULTILINE)
 APPLE_MCP_XCODEBUILD_SERVER = "XcodeBuildMCP"
 APPLE_MCP_XCODEBUILD_TOOL = "XcodeBuildMCP__discover_projs"
 APPLE_MCP_XCODEBUILD_PROJECT_RELATIVE_PATH = "ap-web/ios/Omnigent.xcodeproj"
@@ -637,21 +638,25 @@ def run_live_apple_sosumi_mcp_proof(agent_dir: Path, codex_path: Path) -> AppleM
             "Tool invocation drill. After the required route block, your next "
             f"action must be a function call to {APPLE_MCP_SOSUMI_TOOL}, not "
             "prose. Use JSON arguments "
-            f'{{"path": "{APPLE_MCP_SOSUMI_DOC_PATH}"}}. After the tool result '
-            "is available, reply exactly SOSUMI_MCP_OK."
+            f'{{"path": "{APPLE_MCP_SOSUMI_DOC_PATH}"}}. The function result '
+            "will contain a line beginning 'timestamp:'. After the tool result "
+            "is available, reply exactly SOSUMI_MCP_TIMESTAMP=<timestamp value>. "
+            "Do not guess the timestamp; it is not present in this prompt."
         ),
         (
             "SwiftUI Apple documentation MCP proof. Call the available tool "
             f"named {APPLE_MCP_SOSUMI_TOOL} exactly once before answering. "
             f"Pass the path {APPLE_MCP_SOSUMI_DOC_PATH!r}. Do not use any "
-            "other tool for this proof. After the tool call succeeds, reply "
-            "exactly SOSUMI_MCP_OK."
+            "other tool for this proof. After the tool call succeeds, extract "
+            "the timestamp value from the function result and reply exactly "
+            "SOSUMI_MCP_TIMESTAMP=<timestamp value>."
         ),
         (
             f"Use {APPLE_MCP_SOSUMI_TOOL} now to fetch "
             f"{APPLE_MCP_SOSUMI_DOC_PATH}. This is a tool-call proof; a text "
             "answer without the function call is invalid. After the function "
-            "call output is available, reply exactly SOSUMI_MCP_OK."
+            "call output is available, copy only the timestamp value from the "
+            "tool result and reply exactly SOSUMI_MCP_TIMESTAMP=<timestamp value>."
         ),
     )
     errors: list[str] = []
@@ -716,10 +721,17 @@ def _validate_sosumi_mcp_run(run: SessionRun, *, attempt: int) -> AppleMcpProof:
             "documentation sentinels or looked erroneous. "
             f"missing={missing!r} output={output_text[:1000]}"
         )
-    if "SOSUMI_MCP_OK" not in transcript:
+    timestamp_match = APPLE_MCP_SOSUMI_TIMESTAMP_RE.search(output_text)
+    if timestamp_match is None:
+        raise SosumiProofAttemptError(
+            f"attempt={attempt}: sosumi MCP tool output did not contain a timestamp "
+            f"line. output={output_text[:1000]}"
+        )
+    expected_timestamp_reply = f"SOSUMI_MCP_TIMESTAMP={timestamp_match.group('timestamp')}"
+    if expected_timestamp_reply not in transcript:
         raise SosumiProofAttemptError(
             f"attempt={attempt}: sosumi MCP proof did not return "
-            f"SOSUMI_MCP_OK. Transcript:\n{transcript}"
+            f"{expected_timestamp_reply}. Transcript:\n{transcript}"
         )
     return AppleMcpProof(
         session_id=run.session_id,
