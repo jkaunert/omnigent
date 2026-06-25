@@ -14280,6 +14280,8 @@ def create_sessions_router(
 
     @router.post(
         "/sessions/{session_id}/hooks/permission-request",
+        # Internal harness callback webhook — hidden from the public API reference.
+        include_in_schema=False,
         response_model=None,
         # CSRF hardening: body is parsed via request.json(); require a JSON
         # Content-Type so a cross-site text/plain request can't reach it.
@@ -14845,6 +14847,8 @@ def create_sessions_router(
 
     @router.post(
         "/sessions/{session_id}/hooks/codex-elicitation-request",
+        # Internal harness callback webhook — hidden from the public API reference.
+        include_in_schema=False,
         response_model=None,
         # CSRF hardening: body is parsed via request.json(); require a JSON
         # Content-Type so a cross-site text/plain request can't reach it.
@@ -14916,6 +14920,8 @@ def create_sessions_router(
 
     @router.post(
         "/sessions/{session_id}/hooks/cursor-permission-request",
+        # Internal harness callback webhook — hidden from the public API reference.
+        include_in_schema=False,
         response_model=None,
         # CSRF hardening: body is parsed via request.json(); require a JSON
         # Content-Type so a cross-site text/plain request can't reach it.
@@ -15638,6 +15644,8 @@ def create_sessions_router(
 
     @router.post(
         "/sessions/{session_id}/resources/terminals/{terminal_id}/transfer",
+        # Internal terminal transfer — hidden from the public API reference.
+        include_in_schema=False,
         response_model=None,
         # CSRF hardening: body is parsed via request.json(); require a JSON
         # Content-Type so a cross-site text/plain request can't reach it.
@@ -16204,6 +16212,8 @@ def create_sessions_router(
 
     @router.get(
         "/sessions/{session_id}/resources/environments/{environment_id}/diff/{relative_path:path}",
+        # Internal (UI diff view) — hidden from the public API reference.
+        include_in_schema=False,
         response_model=None,
     )
     async def read_environment_file_diff(
@@ -16437,6 +16447,8 @@ def create_sessions_router(
 
     @router.post(
         "/sessions/{session_id}/elicitations/{elicitation_id}/resolve",
+        # Internal elicitation flow — hidden from the public API reference.
+        include_in_schema=False,
         status_code=202,
         # response_model=None: the body is a small acknowledgement
         # dict, not a domain model.
@@ -16505,6 +16517,8 @@ def create_sessions_router(
 
     @router.get(
         "/sessions/{session_id}/elicitations/{elicitation_id}",
+        # Internal elicitation flow — hidden from the public API reference.
+        include_in_schema=False,
         response_model=None,
     )
     async def get_elicitation(
@@ -16561,6 +16575,8 @@ def create_sessions_router(
 
     @router.post(
         "/sessions/{session_id}/events",
+        # Internal event ingestion — hidden from the public API reference.
+        include_in_schema=False,
         status_code=202,
         # response_model=None: the body is a small acknowledgement
         # dict, not a domain model.
@@ -18358,6 +18374,8 @@ def create_sessions_router(
 
     @router.post(
         "/sessions/{session_id}/mcp",
+        # Internal MCP proxy — hidden from the public API reference.
+        include_in_schema=False,
         response_model=None,  # Returns a raw Response with application/json
         # CSRF hardening: the MCP Streamable HTTP contract already mandates
         # an application/json request body; enforce it so a cross-site

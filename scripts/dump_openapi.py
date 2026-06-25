@@ -188,9 +188,19 @@ _TAGS: list[dict[str, str]] = [
         "description": (
             "Create, inspect, fork, and drive agent sessions — the core "
             "unit of work. Covers session items and events, agent "
-            "binding, permissions, labels, child sessions, and "
-            "per-session resources (files, terminals, and sandboxed "
-            "environments)."
+            "binding, permissions, labels, and child sessions. The "
+            "files, terminals, and sandboxed environments attached to a "
+            "session live under Session Resources."
+        ),
+    },
+    {
+        "name": "session_resources",
+        "x-displayName": "Session Resources",
+        "description": (
+            "Files, terminals, and sandboxed environments attached to a "
+            "session: upload and read files, create and manage "
+            "terminals, and read, write, edit, and search the "
+            "environment filesystem."
         ),
     },
     {
@@ -254,6 +264,21 @@ _SYSTEM_ROUTES: list[tuple[str, str]] = [
     ("/v1/info", "get"),
     ("/v1/me", "get"),
 ]
+
+# HTTP methods that denote an operation object inside a path item
+# (everything else under a path — ``parameters``, ``servers``, … — is
+# not an operation and must be skipped when retagging).
+_HTTP_METHODS: frozenset[str] = frozenset(
+    {"get", "put", "post", "delete", "patch", "options", "head", "trace"},
+)
+
+# Path prefix whose operations form the dedicated "Session Resources"
+# group. The sessions router is mounted with ``tags=["sessions"]`` in
+# app.py, so every session route — including the resource subtree —
+# inherits that single tag. We split this subtree (files, terminals,
+# sandboxed environments) into its own section in the published
+# reference rather than fracturing the router.
+_SESSION_RESOURCES_PREFIX: str = "/v1/sessions/{session_id}/resources"
 
 
 def _build_app_with_stub_stores() -> Any:
@@ -391,6 +416,26 @@ def _tag_system_routes(paths: dict[str, Any]) -> None:
             op["tags"] = ["system"]
 
 
+def _retag_session_resources(paths: dict[str, Any]) -> None:
+    """
+    Move the session-resource subtree into its own ``session_resources`` tag.
+
+    Every operation whose path starts with
+    :data:`_SESSION_RESOURCES_PREFIX` has its tag list *replaced* (not
+    appended) with ``["session_resources"]`` so it renders as a
+    dedicated section instead of inheriting the broad ``sessions`` tag.
+    Prefix-based so newly added resource endpoints group automatically.
+
+    :param paths: The OpenAPI ``paths`` map; mutated in place.
+    """
+    for path, methods in paths.items():
+        if not path.startswith(_SESSION_RESOURCES_PREFIX):
+            continue
+        for method, op in methods.items():
+            if method in _HTTP_METHODS and isinstance(op, dict):
+                op["tags"] = ["session_resources"]
+
+
 def _enrich_spec(spec: dict[str, Any]) -> None:
     """
     Inject document-level metadata for docs / SDK tooling.
@@ -411,7 +456,9 @@ def _enrich_spec(spec: dict[str, Any]) -> None:
     components = spec.setdefault("components", {})
     components["securitySchemes"] = _SECURITY_SCHEMES
 
-    _tag_system_routes(spec.setdefault("paths", {}))
+    paths = spec.setdefault("paths", {})
+    _tag_system_routes(paths)
+    _retag_session_resources(paths)
 
 
 def generate_spec() -> dict[str, Any]:
