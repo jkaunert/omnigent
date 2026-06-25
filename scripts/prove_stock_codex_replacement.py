@@ -54,6 +54,9 @@ EXPECTED_ROUTE = (
 )
 REFERENCE_SENTINEL = "Use this shared contract for broad brigade-orchestrator lanes"
 TOOL_SENTINEL = "OMNIGENT_TOOL_SENTINEL_42"
+APPLE_MCP_PROOF_SERVER = "memory"
+APPLE_MCP_PROOF_TOOL = "memory__create_entities"
+APPLE_MCP_SENTINEL = "APPLE_MCP_SENTINEL_73"
 RELATIVE_MARKDOWN_PATH_RE = re.compile(r"`((?:\.\.?/)[^`]+)`")
 PLUGIN_SKILL_REF_RE = re.compile(rf"\b{re.escape(PLUGIN_NAME)}:([A-Za-z0-9_.-]+)\b")
 EXPECTED_APPLE_MCP_SERVERS = frozenset({"sosumi", "memory", "XcodeBuildMCP"})
@@ -74,6 +77,16 @@ class ToolProof:
     session_id: str
     call_id: str
     transcript: str
+
+
+@dataclass(frozen=True)
+class AppleMcpProof:
+    """Live proof result for an Apple MCP-backed tool call."""
+
+    session_id: str
+    call_id: str
+    transcript: str
+    output_preview: str
 
 
 @dataclass(frozen=True)
@@ -161,10 +174,20 @@ def copy_bundle(source: Path, destination: Path) -> None:
     )
 
 
-def write_agent_config(agent_dir: Path) -> None:
+def write_agent_config(
+    agent_dir: Path,
+    *,
+    apple_mcp_memory: dict[str, Any] | None = None,
+    memory_file: Path | None = None,
+) -> None:
     """Write the Omnigent harness config into the copied bundle root."""
+    mcp_tools_block = ""
+    if apple_mcp_memory is not None:
+        if memory_file is None:
+            raise ValueError("memory_file is required when apple_mcp_memory is set")
+        mcp_tools_block = _memory_mcp_tools_yaml(apple_mcp_memory, memory_file)
     (agent_dir / "config.yaml").write_text(
-        """
+        f"""
 spec_version: 1
 name: apple_codex_stock_replacement_proof
 prompt: |
@@ -180,9 +203,39 @@ os_env:
   cwd: .
   sandbox:
     type: none
-""".lstrip(),
+{mcp_tools_block}""".lstrip(),
         encoding="utf-8",
     )
+
+
+def _memory_mcp_tools_yaml(memory_config: dict[str, Any], memory_file: Path) -> str:
+    """Translate the Apple ``memory`` MCP config into Omnigent YAML."""
+    command = memory_config.get("command")
+    args = memory_config.get("args", [])
+    if not isinstance(command, str) or not command:
+        raise SystemExit("Apple memory MCP config does not declare a command")
+    if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+        raise SystemExit("Apple memory MCP config args must be a list of strings")
+    lines = [
+        "tools:",
+        f"  {APPLE_MCP_PROOF_SERVER}:",
+        "    type: mcp",
+        f"    command: {_yaml_string(command)}",
+        "    args:",
+    ]
+    lines.extend(f"      - {_yaml_string(arg)}" for arg in args)
+    lines.extend(
+        [
+            "    env:",
+            f"      MEMORY_FILE_PATH: {_yaml_string(str(memory_file))}",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _yaml_string(value: str) -> str:
+    """Render a JSON-style quoted scalar, valid as YAML."""
+    return json.dumps(value)
 
 
 def prove_selected_skill_graph(bundle_dir: Path) -> GraphProof:
@@ -256,6 +309,14 @@ def prove_apple_mcp_manifest(bundle_dir: Path) -> dict[str, Any]:
         if not isinstance(config.get("command"), str) and not isinstance(config.get("url"), str):
             raise SystemExit(f"MCP server {name!r} has neither command nor url")
     return mcp_manifest
+
+
+def memory_mcp_config_from_manifest(mcp_manifest: dict[str, Any]) -> dict[str, Any]:
+    """Return the Apple memory MCP server config from a parsed manifest."""
+    memory_config = mcp_manifest.get(APPLE_MCP_PROOF_SERVER)
+    if not isinstance(memory_config, dict):
+        raise SystemExit("Apple MCP manifest does not contain a memory server object")
+    return memory_config
 
 
 def run_live_runner_proof(agent_dir: Path, codex_path: Path) -> str:
@@ -405,6 +466,58 @@ def run_live_tool_proof(agent_dir: Path, codex_path: Path) -> ToolProof:
     return ToolProof(session_id=run.session_id, call_id=call_id, transcript=transcript)
 
 
+def run_live_apple_mcp_proof(agent_dir: Path, codex_path: Path) -> AppleMcpProof:
+    """Prove stock Codex can call an Apple MCP-backed tool through Omnigent."""
+    prompt = (
+        "SwiftUI Apple MCP execution proof. Call the available tool named "
+        f"{APPLE_MCP_PROOF_TOOL} exactly once before answering. Pass exactly one "
+        "entity with name "
+        f"{APPLE_MCP_SENTINEL!r}, entityType 'proof', and one observation "
+        "'created by Omnigent stock Codex proof'. Do not use any other tool "
+        "for this proof. After the tool call succeeds, reply exactly APPLE_MCP_OK."
+    )
+    run = asyncio_run_session_query(agent_dir=agent_dir, codex_path=codex_path, prompt=prompt)
+    transcript = run.text.strip()
+    if not transcript.startswith(EXPECTED_ROUTE):
+        raise SystemExit(
+            "Apple MCP proof transcript did not start with expected route block.\n"
+            f"Expected prefix:\n{EXPECTED_ROUTE}\n\nActual:\n{transcript[:1000]}"
+        )
+    if "APPLE_MCP_OK" not in transcript:
+        raise SystemExit(f"Apple MCP proof did not return APPLE_MCP_OK. Transcript:\n{transcript}")
+
+    calls = [
+        item
+        for item in run.items
+        if item.get("type") == "function_call" and item.get("name") == APPLE_MCP_PROOF_TOOL
+    ]
+    if not calls:
+        raise SystemExit(f"No persisted {APPLE_MCP_PROOF_TOOL} function_call found")
+    call = calls[-1]
+    call_id = call.get("call_id")
+    if not isinstance(call_id, str) or not call_id:
+        raise SystemExit(f"Persisted {APPLE_MCP_PROOF_TOOL} call has invalid call_id: {call!r}")
+    outputs = [
+        item
+        for item in run.items
+        if item.get("type") == "function_call_output" and item.get("call_id") == call_id
+    ]
+    if not outputs:
+        raise SystemExit(f"No persisted function_call_output found for call_id={call_id}")
+    output_text = str(outputs[-1].get("output", ""))
+    if APPLE_MCP_SENTINEL not in output_text or "error" in output_text.lower():
+        raise SystemExit(
+            "Apple MCP tool output did not contain the sentinel or looked erroneous: "
+            f"{output_text}"
+        )
+    return AppleMcpProof(
+        session_id=run.session_id,
+        call_id=call_id,
+        transcript=transcript,
+        output_preview=output_text[:500],
+    )
+
+
 def asyncio_run_session_query(*, agent_dir: Path, codex_path: Path, prompt: str) -> SessionRun:
     """Run the async session query from the synchronous proof script."""
     import asyncio
@@ -441,7 +554,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--proof",
-        choices=("graph", "tool-plane", "mcp-tools", "all"),
+        choices=("graph", "tool-plane", "mcp-tools", "apple-mcp", "all"),
         default="graph",
         help=(
             "Proof gate to run. Defaults to the existing graph proof. "
@@ -494,7 +607,22 @@ def main() -> int:
 
     with temporary_agent_dir(args.keep_fixture) as agent_dir:
         copy_bundle(source_bundle, agent_dir)
-        write_agent_config(agent_dir)
+        needs_apple_mcp = proof in {"apple-mcp", "all"}
+        mcp_manifest = None
+        memory_file = None
+        if proof in {"tool-plane", "apple-mcp", "all"}:
+            mcp_manifest = prove_apple_mcp_manifest(agent_dir)
+        if needs_apple_mcp:
+            assert mcp_manifest is not None
+            memory_file = agent_dir / "memory-proof.json"
+            memory_file.write_text("{}", encoding="utf-8")
+            write_agent_config(
+                agent_dir,
+                apple_mcp_memory=memory_mcp_config_from_manifest(mcp_manifest),
+                memory_file=memory_file,
+            )
+        else:
+            write_agent_config(agent_dir)
 
         graph = prove_selected_skill_graph(agent_dir)
         print(f"bundle_source={source_bundle}")
@@ -510,9 +638,15 @@ def main() -> int:
         print("ASSERTION: selected Apple skill graph resolves inside the Omnigent bundle")
 
         if proof in {"tool-plane", "all"}:
-            mcp_manifest = prove_apple_mcp_manifest(agent_dir)
+            assert mcp_manifest is not None
             print(f"static_apple_mcp_servers={','.join(sorted(mcp_manifest))}")
             print("ASSERTION: Apple plugin MCP manifest is bundled and well-formed")
+        if proof in {"apple-mcp", "all"}:
+            assert mcp_manifest is not None
+            print(f"static_apple_mcp_servers={','.join(sorted(mcp_manifest))}")
+            print(f"converted_apple_mcp_server={APPLE_MCP_PROOF_SERVER}")
+            print(f"converted_apple_mcp_memory_file={memory_file}")
+            print("ASSERTION: Apple memory MCP config converted into Omnigent tools config")
 
         if args.skip_live:
             print("live_runner_proof=skipped")
@@ -537,6 +671,17 @@ def main() -> int:
                 "through dynamicTools"
             )
             print("ASSERTION: persisted session items include sys_os_read call and result")
+        if proof in {"apple-mcp", "all"}:
+            mcp_proof = run_live_apple_mcp_proof(agent_dir, codex_path)
+            print(f"apple_mcp_session_id={mcp_proof.session_id}")
+            print(f"apple_mcp_call_id={mcp_proof.call_id}")
+            print(f"apple_mcp_output_preview={mcp_proof.output_preview!r}")
+            print(f"apple_mcp_transcript_preview={mcp_proof.transcript[:500]!r}")
+            print(
+                "ASSERTION: stock Codex invoked Apple memory MCP through "
+                "Omnigent-converted MCP config"
+            )
+            print(f"ASSERTION: persisted session items include {APPLE_MCP_PROOF_TOOL} result")
     return 0
 
 
