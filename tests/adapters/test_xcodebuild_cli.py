@@ -12,15 +12,19 @@ from typing import Any
 import pytest
 
 from omnigent.adapters.xcodebuild_cli import (
+    XCODEBUILD_CLI_SCREENSHOT_TOOL_NAME,
     XCODEBUILD_CLI_TEST_TOOL_NAME,
     XCODEBUILD_CLI_TOOL_NAME,
     XCODEBUILDMCP_CLI_COMMAND,
     XCODEBUILDMCP_CLI_ENV_OVERRIDES,
+    XCODEBUILDMCP_CLI_SCREENSHOT_COMMAND,
     XCODEBUILDMCP_CLI_TEST_COMMAND,
     XcodeBuildCliAdapterPolicy,
     build_xcodebuildmcp_simulator_build_run_tool_source,
+    build_xcodebuildmcp_simulator_screenshot_tool_source,
     build_xcodebuildmcp_simulator_test_tool_source,
     write_xcodebuildmcp_simulator_build_run_tool,
+    write_xcodebuildmcp_simulator_screenshot_tool,
     write_xcodebuildmcp_simulator_test_tool,
 )
 
@@ -188,6 +192,18 @@ def test_generated_test_tool_source_names_expected_tool() -> None:
     assert "XCODEBUILDMCP_EXPERIMENTAL_WORKFLOW_DISCOVERY" in source
 
 
+def test_generated_screenshot_tool_source_names_expected_tool() -> None:
+    source = build_xcodebuildmcp_simulator_screenshot_tool_source()
+
+    assert f"def {XCODEBUILD_CLI_SCREENSHOT_TOOL_NAME}(" in source
+    assert "xcodebuildmcp" in source
+    assert "build-and-run" in source
+    assert "ui-automation" in source
+    assert "screenshot" in source
+    assert "XCODEBUILDMCP_ENABLED_WORKFLOWS" in source
+    assert "XCODEBUILDMCP_EXPERIMENTAL_WORKFLOW_DISCOVERY" in source
+
+
 def test_generated_tool_validates_arguments_before_calling_cli(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -344,3 +360,111 @@ def test_generated_test_tool_validates_arguments_before_calling_cli(
         )
     ]
     assert "Test complete" in valid_result
+
+
+def test_generated_screenshot_tool_launches_then_captures_screenshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_path = tmp_path / "Demo.xcodeproj"
+    project_path.mkdir()
+    derived_data_path = tmp_path / "DerivedData"
+    screenshot_path = tmp_path / "screenshot.jpg"
+    screenshot_path.write_bytes(b"jpeg")
+    policy = XcodeBuildCliAdapterPolicy(allowed_derived_data_roots=(str(tmp_path),))
+    tool_path = write_xcodebuildmcp_simulator_screenshot_tool(tmp_path, policy=policy)
+    module = _load_module(tool_path)
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append((cmd, kwargs))
+        if cmd[:3] == [*XCODEBUILDMCP_CLI_COMMAND]:
+            stdout = json.dumps(
+                {
+                    "didError": False,
+                    "data": {
+                        "summary": {"status": "SUCCEEDED"},
+                        "artifacts": {
+                            "bundleId": "ai.omnigent.ios",
+                            "simulatorId": "SIM-123",
+                        },
+                    },
+                }
+            )
+        else:
+            stdout = json.dumps(
+                {
+                    "didError": False,
+                    "data": {
+                        "summary": {"status": "SUCCEEDED"},
+                        "artifacts": {"screenshotPath": str(screenshot_path)},
+                        "capture": {
+                            "format": "image/jpeg",
+                            "width": 368,
+                            "height": 800,
+                        },
+                    },
+                }
+            )
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    invalid_result = module.xcodebuildmcp_simulator_screenshot(
+        str(project_path),
+        "Demo",
+        "Debug",
+        "Vision Pro",
+        str(derived_data_path),
+        ["-quiet"],
+    )
+    valid_result = module.xcodebuildmcp_simulator_screenshot(
+        str(project_path),
+        "Demo",
+        "Debug",
+        "iPhone 17",
+        str(derived_data_path),
+        ["-quiet"],
+    )
+
+    assert invalid_result.startswith("Error: simulator_name must start with")
+    assert len(calls) == 2
+    build_cmd, build_kwargs = calls[0]
+    screenshot_cmd, screenshot_kwargs = calls[1]
+    assert build_cmd[:3] == [*XCODEBUILDMCP_CLI_COMMAND]
+    assert build_cmd[-2:] == ["--output", "json"]
+    assert json.loads(build_cmd[build_cmd.index("--json") + 1]) == {
+        "projectPath": str(project_path),
+        "scheme": "Demo",
+        "configuration": "Debug",
+        "simulatorName": "iPhone 17",
+        "useLatestOS": True,
+        "derivedDataPath": str(derived_data_path),
+        "extraArgs": ["-quiet"],
+    }
+    assert screenshot_cmd[:3] == [*XCODEBUILDMCP_CLI_SCREENSHOT_COMMAND]
+    assert screenshot_cmd[-2:] == ["--output", "json"]
+    assert json.loads(screenshot_cmd[screenshot_cmd.index("--json") + 1]) == {
+        "simulatorId": "SIM-123",
+        "returnFormat": "path",
+    }
+    expected_env = {**module.os.environ, **XCODEBUILDMCP_CLI_ENV_OVERRIDES}
+    assert build_kwargs == {
+        "check": False,
+        "capture_output": True,
+        "text": True,
+        "timeout": 180,
+        "env": expected_env,
+    }
+    assert screenshot_kwargs == build_kwargs
+    result = json.loads(valid_result)
+    assert result == {
+        "buildStatus": "SUCCEEDED",
+        "bundleId": "ai.omnigent.ios",
+        "format": "image/jpeg",
+        "height": 800,
+        "screenshotPath": str(screenshot_path),
+        "screenshotStatus": "SUCCEEDED",
+        "simulatorId": "SIM-123",
+        "width": 368,
+    }
