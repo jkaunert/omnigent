@@ -12,11 +12,15 @@ XCODEBUILD_CLI_BUILD_RUN_TOOL_NAME = "xcodebuildmcp_simulator_build_run"
 XCODEBUILD_CLI_TOOL_NAME = XCODEBUILD_CLI_BUILD_RUN_TOOL_NAME
 XCODEBUILD_CLI_TEST_TOOL_NAME = "xcodebuildmcp_simulator_test"
 XCODEBUILD_CLI_SCREENSHOT_TOOL_NAME = "xcodebuildmcp_simulator_screenshot"
+XCODEBUILD_CLI_SNAPSHOT_UI_TOOL_NAME = "xcodebuildmcp_simulator_snapshot_ui"
 XCODEBUILDMCP_MCP_SERVER_NAME = "XcodeBuildMCP"
 XCODEBUILDMCP_CLI_BUILD_RUN_COMMAND = ("xcodebuildmcp", "simulator", "build-and-run")
 XCODEBUILDMCP_CLI_COMMAND = XCODEBUILDMCP_CLI_BUILD_RUN_COMMAND
 XCODEBUILDMCP_CLI_TEST_COMMAND = ("xcodebuildmcp", "simulator", "test")
 XCODEBUILDMCP_CLI_SCREENSHOT_COMMAND = ("xcodebuildmcp", "ui-automation", "screenshot")
+XCODEBUILDMCP_CLI_SNAPSHOT_UI_COMMAND = ("xcodebuildmcp", "ui-automation", "snapshot-ui")
+OMNIGENT_XCODEBUILDMCP_AXE_PATH_ENV = "OMNIGENT_XCODEBUILDMCP_AXE_PATH"
+XCODEBUILDMCP_AXE_PATH_ENV = "XCODEBUILDMCP_AXE_PATH"
 XCODEBUILDMCP_ALL_WORKFLOWS = (
     "coverage",
     "debugging",
@@ -59,11 +63,16 @@ class XcodeBuildCliAdapterPolicy:
     tool_name: str = XCODEBUILD_CLI_BUILD_RUN_TOOL_NAME
     test_tool_name: str = XCODEBUILD_CLI_TEST_TOOL_NAME
     screenshot_tool_name: str = XCODEBUILD_CLI_SCREENSHOT_TOOL_NAME
+    snapshot_ui_tool_name: str = XCODEBUILD_CLI_SNAPSHOT_UI_TOOL_NAME
     mcp_server_name: str = XCODEBUILDMCP_MCP_SERVER_NAME
     command_prefix: tuple[str, ...] = XCODEBUILDMCP_CLI_BUILD_RUN_COMMAND
     test_command_prefix: tuple[str, ...] = XCODEBUILDMCP_CLI_TEST_COMMAND
     screenshot_command_prefix: tuple[str, ...] = XCODEBUILDMCP_CLI_SCREENSHOT_COMMAND
+    snapshot_ui_command_prefix: tuple[str, ...] = XCODEBUILDMCP_CLI_SNAPSHOT_UI_COMMAND
     env_overrides: Mapping[str, str] | None = None
+    axe_path: str | None = None
+    axe_path_env_var: str = OMNIGENT_XCODEBUILDMCP_AXE_PATH_ENV
+    target_axe_path_env_var: str = XCODEBUILDMCP_AXE_PATH_ENV
     allowed_simulator_prefixes: tuple[str, ...] = XCODEBUILD_ALLOWED_SIMULATOR_PREFIXES
     allowed_derived_data_roots: tuple[str, ...] = XCODEBUILD_ALLOWED_DERIVED_DATA_ROOTS
     allowed_extra_args: tuple[str, ...] = XCODEBUILD_ALLOWED_EXTRA_ARGS
@@ -186,8 +195,7 @@ class XcodeBuildCliAdapterPolicy:
         if unexpected_extra_args:
             allowed = ", ".join(self.allowed_extra_args)
             raise ValueError(
-                f"extra_args may only contain: {allowed}; "
-                f"unexpected={unexpected_extra_args!r}"
+                f"extra_args may only contain: {allowed}; unexpected={unexpected_extra_args!r}"
             )
         return {
             "projectPath": str(project),
@@ -213,6 +221,9 @@ def build_xcodebuildmcp_simulator_build_run_tool_source(
         raise ValueError("timeout_seconds must be greater than zero")
     command_prefix = list(policy.command_prefix)
     env_overrides = dict(policy.env_overrides)
+    axe_path = policy.axe_path
+    axe_path_env_var = policy.axe_path_env_var
+    target_axe_path_env_var = policy.target_axe_path_env_var
     allowed_simulator_prefixes = tuple(policy.allowed_simulator_prefixes)
     allowed_derived_data_roots = tuple(policy.allowed_derived_data_roots)
     allowed_extra_args = tuple(policy.allowed_extra_args)
@@ -235,6 +246,18 @@ def build_xcodebuildmcp_simulator_build_run_tool_source(
         _ALLOWED_DERIVED_DATA_ROOTS = {allowed_derived_data_roots!r}
         _ALLOWED_EXTRA_ARGS = {allowed_extra_args!r}
         _TIMEOUT_SECONDS = {policy.timeout_seconds!r}
+        _STATIC_AXE_PATH = {axe_path!r}
+        _AXE_PATH_ENV_VAR = {axe_path_env_var!r}
+        _TARGET_AXE_PATH_ENV_VAR = {target_axe_path_env_var!r}
+
+
+        def _subprocess_env() -> dict[str, str]:
+            env = {{**os.environ, **_ENV_OVERRIDES}}
+            env.pop(_TARGET_AXE_PATH_ENV_VAR, None)
+            axe_path = _STATIC_AXE_PATH or os.environ.get(_AXE_PATH_ENV_VAR, "").strip()
+            if axe_path:
+                env[_TARGET_AXE_PATH_ENV_VAR] = str(Path(axe_path).expanduser())
+            return env
 
 
         def _validation_error(
@@ -311,7 +334,7 @@ def build_xcodebuildmcp_simulator_build_run_tool_source(
                 "extraArgs": list(extra_args or []),
             }}
             command = [*_COMMAND_PREFIX, "--json", json.dumps(payload), "--output", "text"]
-            env = {{**os.environ, **_ENV_OVERRIDES}}
+            env = _subprocess_env()
             try:
                 completed = subprocess.run(
                     command,
@@ -346,6 +369,9 @@ def build_xcodebuildmcp_simulator_test_tool_source(
         raise ValueError("timeout_seconds must be greater than zero")
     command_prefix = list(policy.test_command_prefix)
     env_overrides = dict(policy.env_overrides)
+    axe_path = policy.axe_path
+    axe_path_env_var = policy.axe_path_env_var
+    target_axe_path_env_var = policy.target_axe_path_env_var
     allowed_simulator_prefixes = tuple(policy.allowed_simulator_prefixes)
     allowed_derived_data_roots = tuple(policy.allowed_derived_data_roots)
     allowed_extra_args = tuple(policy.allowed_extra_args)
@@ -368,6 +394,18 @@ def build_xcodebuildmcp_simulator_test_tool_source(
         _ALLOWED_DERIVED_DATA_ROOTS = {allowed_derived_data_roots!r}
         _ALLOWED_EXTRA_ARGS = {allowed_extra_args!r}
         _TIMEOUT_SECONDS = {policy.timeout_seconds!r}
+        _STATIC_AXE_PATH = {axe_path!r}
+        _AXE_PATH_ENV_VAR = {axe_path_env_var!r}
+        _TARGET_AXE_PATH_ENV_VAR = {target_axe_path_env_var!r}
+
+
+        def _subprocess_env() -> dict[str, str]:
+            env = {{**os.environ, **_ENV_OVERRIDES}}
+            env.pop(_TARGET_AXE_PATH_ENV_VAR, None)
+            axe_path = _STATIC_AXE_PATH or os.environ.get(_AXE_PATH_ENV_VAR, "").strip()
+            if axe_path:
+                env[_TARGET_AXE_PATH_ENV_VAR] = str(Path(axe_path).expanduser())
+            return env
 
 
         def _validation_error(
@@ -444,7 +482,7 @@ def build_xcodebuildmcp_simulator_test_tool_source(
                 "extraArgs": list(extra_args or []),
             }}
             command = [*_COMMAND_PREFIX, "--json", json.dumps(payload), "--output", "text"]
-            env = {{**os.environ, **_ENV_OVERRIDES}}
+            env = _subprocess_env()
             try:
                 completed = subprocess.run(
                     command,
@@ -481,6 +519,9 @@ def build_xcodebuildmcp_simulator_screenshot_tool_source(
     build_run_command_prefix = list(policy.command_prefix)
     screenshot_command_prefix = list(policy.screenshot_command_prefix)
     env_overrides = dict(policy.env_overrides)
+    axe_path = policy.axe_path
+    axe_path_env_var = policy.axe_path_env_var
+    target_axe_path_env_var = policy.target_axe_path_env_var
     allowed_simulator_prefixes = tuple(policy.allowed_simulator_prefixes)
     allowed_derived_data_roots = tuple(policy.allowed_derived_data_roots)
     allowed_extra_args = tuple(policy.allowed_extra_args)
@@ -505,6 +546,18 @@ def build_xcodebuildmcp_simulator_screenshot_tool_source(
         _ALLOWED_DERIVED_DATA_ROOTS = {allowed_derived_data_roots!r}
         _ALLOWED_EXTRA_ARGS = {allowed_extra_args!r}
         _TIMEOUT_SECONDS = {policy.timeout_seconds!r}
+        _STATIC_AXE_PATH = {axe_path!r}
+        _AXE_PATH_ENV_VAR = {axe_path_env_var!r}
+        _TARGET_AXE_PATH_ENV_VAR = {target_axe_path_env_var!r}
+
+
+        def _subprocess_env() -> dict[str, str]:
+            env = {{**os.environ, **_ENV_OVERRIDES}}
+            env.pop(_TARGET_AXE_PATH_ENV_VAR, None)
+            axe_path = _STATIC_AXE_PATH or os.environ.get(_AXE_PATH_ENV_VAR, "").strip()
+            if axe_path:
+                env[_TARGET_AXE_PATH_ENV_VAR] = str(Path(axe_path).expanduser())
+            return env
 
 
         def _validation_error(
@@ -628,7 +681,7 @@ def build_xcodebuildmcp_simulator_screenshot_tool_source(
                 "derivedDataPath": str(Path(derived_data_path).expanduser()),
                 "extraArgs": list(extra_args or []),
             }}
-            env = {{**os.environ, **_ENV_OVERRIDES}}
+            env = _subprocess_env()
             build_command = [
                 *_BUILD_RUN_COMMAND_PREFIX,
                 "--json",
@@ -715,6 +768,301 @@ def build_xcodebuildmcp_simulator_screenshot_tool_source(
     )
 
 
+def build_xcodebuildmcp_simulator_snapshot_ui_tool_source(
+    policy: XcodeBuildCliAdapterPolicy = DEFAULT_XCODEBUILD_CLI_POLICY,
+) -> str:
+    """Build the self-contained Python source for the generated snapshot-ui tool."""
+    if not policy.snapshot_ui_tool_name.isidentifier():
+        raise ValueError(
+            "snapshot_ui_tool_name must be a valid Python identifier: "
+            f"{policy.snapshot_ui_tool_name!r}"
+        )
+    if policy.timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be greater than zero")
+    build_run_command_prefix = list(policy.command_prefix)
+    snapshot_ui_command_prefix = list(policy.snapshot_ui_command_prefix)
+    env_overrides = dict(policy.env_overrides)
+    axe_path = policy.axe_path
+    axe_path_env_var = policy.axe_path_env_var
+    target_axe_path_env_var = policy.target_axe_path_env_var
+    allowed_simulator_prefixes = tuple(policy.allowed_simulator_prefixes)
+    allowed_derived_data_roots = tuple(policy.allowed_derived_data_roots)
+    allowed_extra_args = tuple(policy.allowed_extra_args)
+    return textwrap.dedent(
+        f'''\
+        """XcodeBuildMCP simulator snapshot-ui CLI adapter generated by Omnigent."""
+
+        from __future__ import annotations
+
+        import json
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        from typing import Any
+
+        from omnigent_client import tool
+
+        _BUILD_RUN_COMMAND_PREFIX = {build_run_command_prefix!r}
+        _SNAPSHOT_UI_COMMAND_PREFIX = {snapshot_ui_command_prefix!r}
+        _ENV_OVERRIDES = {env_overrides!r}
+        _ALLOWED_SIMULATOR_PREFIXES = {allowed_simulator_prefixes!r}
+        _ALLOWED_DERIVED_DATA_ROOTS = {allowed_derived_data_roots!r}
+        _ALLOWED_EXTRA_ARGS = {allowed_extra_args!r}
+        _TIMEOUT_SECONDS = {policy.timeout_seconds!r}
+        _STATIC_AXE_PATH = {axe_path!r}
+        _AXE_PATH_ENV_VAR = {axe_path_env_var!r}
+        _TARGET_AXE_PATH_ENV_VAR = {target_axe_path_env_var!r}
+
+
+        def _subprocess_env() -> dict[str, str]:
+            env = {{**os.environ, **_ENV_OVERRIDES}}
+            env.pop(_TARGET_AXE_PATH_ENV_VAR, None)
+            axe_path = _STATIC_AXE_PATH or os.environ.get(_AXE_PATH_ENV_VAR, "").strip()
+            if axe_path:
+                env[_TARGET_AXE_PATH_ENV_VAR] = str(Path(axe_path).expanduser())
+            return env
+
+
+        def _validation_error(
+            project_path: str,
+            scheme: str,
+            configuration: str,
+            simulator_name: str,
+            derived_data_path: str,
+            extra_args: list[str] | None,
+        ) -> str | None:
+            if not project_path:
+                return "Error: project_path must not be empty."
+            project = Path(project_path).expanduser()
+            if not project.is_absolute():
+                return "Error: project_path must be absolute."
+            if project.suffix != ".xcodeproj":
+                return "Error: project_path must point to an .xcodeproj."
+            if not project.exists():
+                return f"Error: project_path does not exist: {{project}}."
+            if not scheme.strip():
+                return "Error: scheme must not be empty."
+            if not configuration.strip():
+                return "Error: configuration must not be empty."
+            if not simulator_name.startswith(_ALLOWED_SIMULATOR_PREFIXES):
+                prefixes = ", ".join(_ALLOWED_SIMULATOR_PREFIXES)
+                return f"Error: simulator_name must start with one of: {{prefixes}}."
+            derived_data = Path(derived_data_path).expanduser()
+            if not derived_data.is_absolute():
+                return "Error: derived_data_path must be absolute."
+            if not str(derived_data).startswith(_ALLOWED_DERIVED_DATA_ROOTS):
+                roots = ", ".join(_ALLOWED_DERIVED_DATA_ROOTS)
+                return f"Error: derived_data_path must be under one of: {{roots}}."
+            normalized_extra_args = list(extra_args or [])
+            unexpected_extra_args = [
+                arg for arg in normalized_extra_args if arg not in _ALLOWED_EXTRA_ARGS
+            ]
+            if unexpected_extra_args:
+                allowed = ", ".join(_ALLOWED_EXTRA_ARGS)
+                return (
+                    f"Error: extra_args may only contain: {{allowed}}; "
+                    f"unexpected={{unexpected_extra_args!r}}."
+                )
+            return None
+
+
+        def _run_json_command(
+            command: list[str],
+            env: dict[str, str],
+        ) -> tuple[dict[str, Any] | None, str | None]:
+            try:
+                completed = subprocess.run(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=_TIMEOUT_SECONDS,
+                    env=env,
+                )
+            except subprocess.TimeoutExpired:
+                return (
+                    None,
+                    "Error: xcodebuildmcp CLI timed out after "
+                    f"{{_TIMEOUT_SECONDS}} seconds.",
+                )
+            if completed.returncode != 0:
+                detail = (completed.stderr or completed.stdout).strip()
+                return (
+                    None,
+                    f"Error: xcodebuildmcp CLI exited {{completed.returncode}}: "
+                    f"{{detail[:4000]}}",
+                )
+            try:
+                result = json.loads(completed.stdout)
+            except json.JSONDecodeError as exc:
+                return None, f"Error: xcodebuildmcp CLI returned invalid JSON: {{exc}}."
+            if not isinstance(result, dict):
+                return None, "Error: xcodebuildmcp CLI returned a non-object JSON payload."
+            if result.get("didError"):
+                return (
+                    None,
+                    "Error: xcodebuildmcp CLI reported an error: "
+                    f"{{result.get('error')}}.",
+                )
+            return result, None
+
+
+        def _require_dict(value: object, path: str) -> dict[str, Any] | str:
+            if isinstance(value, dict):
+                return value
+            return f"Error: xcodebuildmcp JSON field {{path}} was not an object."
+
+
+        def _with_socket(command_prefix: list[str], socket_path: Path) -> list[str]:
+            if not command_prefix:
+                return command_prefix
+            return [command_prefix[0], "--socket", str(socket_path), *command_prefix[1:]]
+
+
+        def _stop_daemon(socket_path: Path, env: dict[str, str]) -> None:
+            binary = _BUILD_RUN_COMMAND_PREFIX[0] if _BUILD_RUN_COMMAND_PREFIX else "xcodebuildmcp"
+            try:
+                subprocess.run(
+                    [binary, "--socket", str(socket_path), "daemon", "stop"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    env=env,
+                )
+            except Exception:
+                return
+
+
+        @tool
+        def {policy.snapshot_ui_tool_name}(
+            project_path: str,
+            scheme: str,
+            configuration: str,
+            simulator_name: str,
+            derived_data_path: str,
+            extra_args: list[str] | None = None,
+            use_latest_os: bool = True,
+        ) -> str:
+            """Build, launch, then capture a semantic simulator UI snapshot."""
+            validation_error = _validation_error(
+                project_path,
+                scheme,
+                configuration,
+                simulator_name,
+                derived_data_path,
+                extra_args,
+            )
+            if validation_error is not None:
+                return validation_error
+
+            build_payload = {{
+                "projectPath": str(Path(project_path).expanduser()),
+                "scheme": scheme,
+                "configuration": configuration,
+                "simulatorName": simulator_name,
+                "useLatestOS": use_latest_os,
+                "derivedDataPath": str(Path(derived_data_path).expanduser()),
+                "extraArgs": list(extra_args or []),
+            }}
+            env = _subprocess_env()
+            socket_dir = Path(tempfile.mkdtemp(prefix="omnigent-xcodebuildmcp-"))
+            socket_path = socket_dir / "xcodebuildmcp.sock"
+            try:
+                build_command = [
+                    *_with_socket(_BUILD_RUN_COMMAND_PREFIX, socket_path),
+                    "--json",
+                    json.dumps(build_payload),
+                    "--output",
+                    "json",
+                ]
+                build_result, error = _run_json_command(build_command, env)
+                if error is not None:
+                    return error
+                assert build_result is not None
+                build_data = _require_dict(build_result.get("data"), "data")
+                if isinstance(build_data, str):
+                    return build_data
+                build_summary = _require_dict(build_data.get("summary"), "data.summary")
+                if isinstance(build_summary, str):
+                    return build_summary
+                build_artifacts = _require_dict(build_data.get("artifacts"), "data.artifacts")
+                if isinstance(build_artifacts, str):
+                    return build_artifacts
+                if build_summary.get("status") != "SUCCEEDED":
+                    return f"Error: build-and-run status was {{build_summary.get('status')!r}}."
+                simulator_id = build_artifacts.get("simulatorId")
+                if not isinstance(simulator_id, str) or not simulator_id:
+                    return "Error: build-and-run result did not include simulatorId."
+
+                snapshot_command = [
+                    *_with_socket(_SNAPSHOT_UI_COMMAND_PREFIX, socket_path),
+                    "--simulator-id",
+                    simulator_id,
+                    "--output",
+                    "json",
+                ]
+                snapshot_result, error = _run_json_command(snapshot_command, env)
+                if error is not None:
+                    return error
+                assert snapshot_result is not None
+                snapshot_data = _require_dict(snapshot_result.get("data"), "data")
+                if isinstance(snapshot_data, str):
+                    return snapshot_data
+                snapshot_summary = _require_dict(
+                    snapshot_data.get("summary"),
+                    "data.summary",
+                )
+                if isinstance(snapshot_summary, str):
+                    return snapshot_summary
+                snapshot_capture_value = snapshot_data.get("capture")
+                if (
+                    snapshot_capture_value is None
+                    and snapshot_data.get("type") == "runtime-snapshot"
+                ):
+                    snapshot_capture_value = snapshot_data
+                snapshot_capture = _require_dict(snapshot_capture_value, "data.capture")
+                if isinstance(snapshot_capture, str):
+                    return snapshot_capture
+                if snapshot_summary.get("status") != "SUCCEEDED":
+                    return f"Error: snapshot-ui status was {{snapshot_summary.get('status')!r}}."
+                if snapshot_capture.get("type") != "runtime-snapshot":
+                    return (
+                        "Error: snapshot-ui capture type was "
+                        f"{{snapshot_capture.get('type')!r}}."
+                    )
+                count = snapshot_capture.get("count")
+                targets = snapshot_capture.get("targets")
+                if not isinstance(count, int) or count <= 0:
+                    return f"Error: snapshot-ui count was not positive: {{count!r}}."
+                if not isinstance(targets, list) or not targets:
+                    return "Error: snapshot-ui result did not include targets."
+
+                return json.dumps(
+                    {{
+                        "buildStatus": build_summary.get("status"),
+                        "snapshotStatus": snapshot_summary.get("status"),
+                        "bundleId": build_artifacts.get("bundleId"),
+                        "simulatorId": simulator_id,
+                        "type": snapshot_capture.get("type"),
+                        "rs": snapshot_capture.get("rs"),
+                        "screenHash": snapshot_capture.get("screenHash"),
+                        "seq": snapshot_capture.get("seq"),
+                        "count": count,
+                        "targets": targets[:12],
+                    }},
+                    indent=2,
+                    sort_keys=True,
+                )
+            finally:
+                _stop_daemon(socket_path, env)
+                shutil.rmtree(socket_dir, ignore_errors=True)
+        '''
+    )
+
+
 def write_xcodebuildmcp_simulator_build_run_tool(
     agent_dir: Path,
     *,
@@ -753,5 +1101,19 @@ def write_xcodebuildmcp_simulator_screenshot_tool(
     tools_dir = agent_dir / "tools" / "python"
     tools_dir.mkdir(parents=True, exist_ok=True)
     tool_path = tools_dir / f"{policy.screenshot_tool_name}.py"
+    tool_path.write_text(source, encoding="utf-8")
+    return tool_path
+
+
+def write_xcodebuildmcp_simulator_snapshot_ui_tool(
+    agent_dir: Path,
+    *,
+    policy: XcodeBuildCliAdapterPolicy = DEFAULT_XCODEBUILD_CLI_POLICY,
+) -> Path:
+    """Write the generated XcodeBuildMCP CLI snapshot-ui tool into an agent bundle."""
+    source = build_xcodebuildmcp_simulator_snapshot_ui_tool_source(policy)
+    tools_dir = agent_dir / "tools" / "python"
+    tools_dir.mkdir(parents=True, exist_ok=True)
+    tool_path = tools_dir / f"{policy.snapshot_ui_tool_name}.py"
     tool_path.write_text(source, encoding="utf-8")
     return tool_path
