@@ -34,6 +34,11 @@ from omnigent.adapters.apple_docs_cli import (
     DEFAULT_APPLE_DOCS_CLI_POLICY,
     write_fetch_apple_docs_cli_tool,
 )
+from omnigent.adapters.xcodebuild_cli import (
+    DEFAULT_XCODEBUILD_CLI_POLICY,
+    XCODEBUILDMCP_CLI_COMMAND,
+    write_xcodebuildmcp_simulator_build_run_tool,
+)
 from omnigent.chat import (
     ChatOverrides,
     _bundle_agent,
@@ -81,6 +86,7 @@ APPLE_MCP_XCODEBUILD_TOOL = "XcodeBuildMCP__discover_projs"
 APPLE_MCP_XCODEBUILD_SESSION_SHOW_DEFAULTS_TOOL = "XcodeBuildMCP__session_show_defaults"
 APPLE_MCP_XCODEBUILD_SESSION_SET_DEFAULTS_TOOL = "XcodeBuildMCP__session_set_defaults"
 APPLE_MCP_XCODEBUILD_BUILD_SIM_TOOL = "XcodeBuildMCP__build_sim"
+APPLE_MCP_XCODEBUILD_BUILD_RUN_SIM_TOOL = "XcodeBuildMCP__build_run_sim"
 APPLE_MCP_XCODEBUILD_PROJECT_RELATIVE_PATH = "ap-web/ios/Omnigent.xcodeproj"
 APPLE_MCP_XCODEBUILD_SCHEME = "Omnigent"
 APPLE_MCP_XCODEBUILD_CONFIGURATION = "Debug"
@@ -99,6 +105,19 @@ APPLE_MCP_XCODEBUILD_SENTINELS = (
 APPLE_MCP_XCODEBUILD_BUILD_SENTINELS = (
     "iOS Simulator Build build succeeded",
     "scheme Omnigent",
+)
+APPLE_MCP_XCODEBUILD_RUN_SENTINELS = (
+    "iOS simulator build and run succeeded",
+    "scheme Omnigent",
+    "ai.omnigent.ios",
+    "is now running in the iOS Simulator",
+)
+XCODEBUILD_CLI_POLICY = DEFAULT_XCODEBUILD_CLI_POLICY
+XCODEBUILD_CLI_TOOL = XCODEBUILD_CLI_POLICY.tool_name
+XCODEBUILD_CLI_RUN_SENTINELS = (
+    "Build succeeded",
+    "Build & Run complete",
+    "Bundle ID: ai.omnigent.ios",
 )
 RELATIVE_MARKDOWN_PATH_RE = re.compile(r"`((?:\.\.?/)[^`]+)`")
 PLUGIN_SKILL_REF_RE = re.compile(rf"\b{re.escape(PLUGIN_NAME)}:([A-Za-z0-9_.-]+)\b")
@@ -142,6 +161,18 @@ class XcodeBuildMcpBuildProof:
     show_defaults_call_id: str
     set_defaults_call_id: str
     build_call_id: str
+    transcript: str
+    output_preview: str
+
+
+@dataclass(frozen=True)
+class XcodeBuildMcpRunProof:
+    """Live proof result for an XcodeBuildMCP simulator run boundary."""
+
+    session_id: str
+    show_defaults_call_id: str
+    set_defaults_call_id: str
+    run_call_id: str
     transcript: str
     output_preview: str
 
@@ -815,12 +846,75 @@ def run_live_apple_docs_cli_proof(agent_dir: Path, codex_path: Path) -> AppleMcp
     )
 
 
+def run_live_xcodebuild_cli_run_proof(
+    agent_dir: Path,
+    codex_path: Path,
+    *,
+    workspace_root: Path,
+    simulator_name: str,
+    derived_data_path: Path,
+) -> AppleMcpProof:
+    """Prove stock Codex can build/run through the XcodeBuildMCP CLI adapter."""
+    project_path = workspace_root / APPLE_MCP_XCODEBUILD_PROJECT_RELATIVE_PATH
+    tool_args = {
+        "project_path": str(project_path),
+        "scheme": APPLE_MCP_XCODEBUILD_SCHEME,
+        "configuration": APPLE_MCP_XCODEBUILD_CONFIGURATION,
+        "simulator_name": simulator_name,
+        "derived_data_path": str(derived_data_path),
+        "extra_args": ["-quiet"],
+        "use_latest_os": True,
+    }
+    tool_args_json = json.dumps(tool_args)
+    prompts = (
+        (
+            "Tool invocation drill. After the required route block, your next "
+            f"assistant item must be a real function call to {XCODEBUILD_CLI_TOOL}, "
+            "not prose. Do not write JSON as text, pseudo-calls, `tool=...`, "
+            "`mcp__...`, or dot notation. Use exactly these JSON arguments: "
+            f"{tool_args_json}. After the tool result contains 'Build & Run "
+            "complete', reply exactly XCODEBUILDMCP_CLI_RUN_OK."
+        ),
+        (
+            "XcodeBuildMCP CLI adapter proof. Call the available dynamic tool "
+            f"named {XCODEBUILD_CLI_TOOL} exactly once before answering. Pass "
+            f"these exact arguments: {tool_args_json}. Do not use any other "
+            "tool. Reply exactly XCODEBUILDMCP_CLI_RUN_OK only after the tool "
+            "output says Build & Run complete."
+        ),
+    )
+    errors: list[str] = []
+    for attempt, prompt in enumerate(prompts, start=1):
+        run = asyncio_run_session_query(
+            agent_dir=agent_dir,
+            codex_path=codex_path,
+            prompt=prompt,
+        )
+        try:
+            return _validate_xcodebuild_cli_run(
+                run,
+                attempt=attempt,
+                expected_arguments=tool_args,
+            )
+        except XcodeBuildCliProofAttemptError as exc:
+            errors.append(str(exc))
+    joined_errors = "\n\n".join(errors)
+    raise SystemExit(
+        f"XcodeBuildMCP CLI adapter proof failed after {len(prompts)} attempts:"
+        f"\n{joined_errors}"
+    )
+
+
 class SosumiProofAttemptError(Exception):
     """One failed sosumi proof attempt that can be retried."""
 
 
 class AppleDocsCliProofAttemptError(Exception):
     """One failed Apple docs CLI proof attempt that can be retried."""
+
+
+class XcodeBuildCliProofAttemptError(Exception):
+    """One failed XcodeBuildMCP CLI adapter proof attempt that can be retried."""
 
 
 def _validate_sosumi_mcp_run(run: SessionRun, *, attempt: int) -> AppleMcpProof:
@@ -945,6 +1039,81 @@ def _validate_apple_docs_cli_run(run: SessionRun, *, attempt: int) -> AppleMcpPr
         raise AppleDocsCliProofAttemptError(
             f"attempt={attempt}: Apple docs CLI proof did not return "
             f"{expected_timestamp_reply}. Transcript:\n{transcript}"
+        )
+    return AppleMcpProof(
+        session_id=run.session_id,
+        call_id=call_id,
+        transcript=transcript,
+        output_preview=output_text[:500],
+    )
+
+
+def _validate_xcodebuild_cli_run(
+    run: SessionRun,
+    *,
+    attempt: int,
+    expected_arguments: dict[str, object],
+) -> AppleMcpProof:
+    """Validate one XcodeBuildMCP CLI adapter proof attempt."""
+    transcript = run.text.strip()
+    if not transcript.startswith(EXPECTED_ROUTE):
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: transcript did not start with expected route block.\n"
+            f"Expected prefix:\n{EXPECTED_ROUTE}\n\nActual:\n{transcript[:1000]}"
+        )
+
+    calls = [
+        item
+        for item in run.items
+        if item.get("type") == "function_call" and item.get("name") == XCODEBUILD_CLI_TOOL
+    ]
+    if not calls:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: " + _missing_tool_call_message(XCODEBUILD_CLI_TOOL, run)
+        )
+    call = calls[-1]
+    call_id = call.get("call_id")
+    if not isinstance(call_id, str) or not call_id:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: persisted {XCODEBUILD_CLI_TOOL} call "
+            f"has invalid call_id: {call!r}"
+        )
+    arguments = _function_call_arguments(call)
+    mismatches = {
+        key: (expected, arguments.get(key))
+        for key, expected in expected_arguments.items()
+        if arguments.get(key) != expected
+    }
+    if mismatches:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: {XCODEBUILD_CLI_TOOL} used unexpected arguments. "
+            f"mismatches={mismatches!r} arguments={arguments!r}"
+        )
+    outputs = [
+        item
+        for item in run.items
+        if item.get("type") == "function_call_output" and item.get("call_id") == call_id
+    ]
+    if not outputs:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: no persisted function_call_output found for call_id={call_id}"
+        )
+    output_text = str(outputs[-1].get("output", ""))
+    missing = [
+        sentinel
+        for sentinel in XCODEBUILD_CLI_RUN_SENTINELS
+        if sentinel not in output_text
+    ]
+    if missing or "Error:" in output_text:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: XcodeBuildMCP CLI adapter output missed expected "
+            "run sentinels or looked erroneous. "
+            f"missing={missing!r} output={output_text[:1000]}"
+        )
+    if "XCODEBUILDMCP_CLI_RUN_OK" not in transcript:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: XcodeBuildMCP CLI adapter proof did not return "
+            f"XCODEBUILDMCP_CLI_RUN_OK. Transcript:\n{transcript}"
         )
     return AppleMcpProof(
         session_id=run.session_id,
@@ -1081,12 +1250,94 @@ def run_live_apple_xcodebuild_mcp_build_proof(
     )
 
 
+def run_live_apple_xcodebuild_mcp_run_proof(
+    agent_dir: Path,
+    codex_path: Path,
+    *,
+    workspace_root: Path,
+    simulator_name: str,
+    derived_data_path: Path,
+) -> XcodeBuildMcpRunProof:
+    """Prove stock Codex can drive an XcodeBuildMCP simulator build/install/launch."""
+    project_path = workspace_root / APPLE_MCP_XCODEBUILD_PROJECT_RELATIVE_PATH
+    set_defaults_args = (
+        "{"
+        f"\"projectPath\": \"{project_path}\", "
+        f"\"scheme\": \"{APPLE_MCP_XCODEBUILD_SCHEME}\", "
+        f"\"configuration\": \"{APPLE_MCP_XCODEBUILD_CONFIGURATION}\", "
+        f"\"simulatorName\": \"{simulator_name}\", "
+        "\"simulatorPlatform\": \"iOS Simulator\", "
+        "\"useLatestOS\": true, "
+        "\"persist\": false, "
+        "\"suppressWarnings\": true, "
+        f"\"derivedDataPath\": \"{derived_data_path}\""
+        "}"
+    )
+    run_args = "{\"extraArgs\": [\"-quiet\"]}"
+    prompts = (
+        (
+            "Function-call drill. After the required route block, your next "
+            "assistant item must be a real tool/function call, not prose. Do "
+            "not write JSON, pseudo-calls, `tool=...`, `mcp__...`, or dot "
+            "notation in text. Use only these exact function names, in order: "
+            f"{APPLE_MCP_XCODEBUILD_SESSION_SHOW_DEFAULTS_TOOL} with {{}}, "
+            f"{APPLE_MCP_XCODEBUILD_SESSION_SET_DEFAULTS_TOOL} with "
+            f"{set_defaults_args}, then {APPLE_MCP_XCODEBUILD_BUILD_RUN_SIM_TOOL} "
+            f"with {run_args}. This boundary is build/install/launch only; "
+            "do not call build_sim, launch_app_sim, boot_sim, open_sim, test, "
+            "device, log, screenshot, UI automation, or any persisted defaults "
+            "tool. After the build_run_sim result reports that the app is now "
+            "running in the iOS Simulator, reply exactly XCODEBUILDMCP_RUN_OK."
+        ),
+        (
+            "XcodeBuildMCP simulator run proof. A text answer with JSON is "
+            "invalid; only persisted function_call items count. Call "
+            f"{APPLE_MCP_XCODEBUILD_SESSION_SHOW_DEFAULTS_TOOL} with empty "
+            f"arguments, then call {APPLE_MCP_XCODEBUILD_SESSION_SET_DEFAULTS_TOOL} "
+            f"with {set_defaults_args}, then call "
+            f"{APPLE_MCP_XCODEBUILD_BUILD_RUN_SIM_TOOL} with {run_args}. "
+            "Do not call any other XcodeBuildMCP tool. Reply exactly "
+            "XCODEBUILDMCP_RUN_OK only after the build_run_sim tool output says "
+            "the app is now running in the iOS Simulator."
+        ),
+    )
+    errors: list[str] = []
+    for attempt, prompt in enumerate(prompts, start=1):
+        run = asyncio_run_session_query(
+            agent_dir=agent_dir,
+            codex_path=codex_path,
+            prompt=prompt,
+        )
+        try:
+            return _validate_xcodebuild_mcp_run_launch(
+                run,
+                project_path=project_path,
+                simulator_name=simulator_name,
+                derived_data_path=derived_data_path,
+            )
+        except XcodeBuildMcpRunProofError as exc:
+            errors.append(f"attempt={attempt}: {exc}")
+    joined_errors = "\n\n".join(errors)
+    raise SystemExit(
+        f"XcodeBuildMCP simulator run proof failed after {len(prompts)} attempts:"
+        f"\n{joined_errors}"
+    )
+
+
 class XcodeBuildMcpProofAttemptError(Exception):
     """One failed XcodeBuildMCP proof attempt that can be retried."""
 
 
-class XcodeBuildMcpBuildProofError(Exception):
+class XcodeBuildMcpSequenceProofError(Exception):
+    """A failed ordered XcodeBuildMCP tool sequence proof."""
+
+
+class XcodeBuildMcpBuildProofError(XcodeBuildMcpSequenceProofError):
     """A failed XcodeBuildMCP build boundary proof."""
+
+
+class XcodeBuildMcpRunProofError(XcodeBuildMcpSequenceProofError):
+    """A failed XcodeBuildMCP simulator run boundary proof."""
 
 
 def _validate_xcodebuild_mcp_run(
@@ -1268,6 +1519,126 @@ def _validate_xcodebuild_mcp_build_run(
     )
 
 
+def _validate_xcodebuild_mcp_run_launch(
+    run: SessionRun,
+    *,
+    project_path: Path,
+    simulator_name: str,
+    derived_data_path: Path,
+) -> XcodeBuildMcpRunProof:
+    """Validate the XcodeBuildMCP simulator build/install/launch proof sequence."""
+    transcript = run.text.strip()
+    if not transcript.startswith(EXPECTED_ROUTE):
+        raise XcodeBuildMcpRunProofError(
+            "transcript did not start with expected route block.\n"
+            f"Expected prefix:\n{EXPECTED_ROUTE}\n\nActual:\n{transcript[:1000]}"
+        )
+    allowed = {
+        APPLE_MCP_XCODEBUILD_SESSION_SHOW_DEFAULTS_TOOL,
+        APPLE_MCP_XCODEBUILD_SESSION_SET_DEFAULTS_TOOL,
+        APPLE_MCP_XCODEBUILD_BUILD_RUN_SIM_TOOL,
+    }
+    unexpected = [
+        name
+        for name in _function_call_names(run.items)
+        if name.startswith(f"{APPLE_MCP_XCODEBUILD_SERVER}__") and name not in allowed
+    ]
+    if unexpected:
+        raise XcodeBuildMcpRunProofError(
+            f"simulator run proof used unexpected XcodeBuildMCP tools: {unexpected!r}"
+        )
+
+    show_call = _single_indexed_call(
+        run,
+        APPLE_MCP_XCODEBUILD_SESSION_SHOW_DEFAULTS_TOOL,
+        error_type=XcodeBuildMcpRunProofError,
+    )
+    set_call = _single_indexed_call(
+        run,
+        APPLE_MCP_XCODEBUILD_SESSION_SET_DEFAULTS_TOOL,
+        error_type=XcodeBuildMcpRunProofError,
+    )
+    run_call = _single_indexed_call(
+        run,
+        APPLE_MCP_XCODEBUILD_BUILD_RUN_SIM_TOOL,
+        error_type=XcodeBuildMcpRunProofError,
+    )
+    if not (show_call[0] < set_call[0] < run_call[0]):
+        raise XcodeBuildMcpRunProofError(
+            "XcodeBuildMCP simulator run proof calls were not in the required "
+            f"order: show={show_call[0]} set={set_call[0]} run={run_call[0]}"
+        )
+
+    set_arguments = _function_call_arguments(set_call[1])
+    expected_set_args = {
+        "projectPath": str(project_path),
+        "scheme": APPLE_MCP_XCODEBUILD_SCHEME,
+        "configuration": APPLE_MCP_XCODEBUILD_CONFIGURATION,
+        "simulatorName": simulator_name,
+        "useLatestOS": True,
+        "persist": False,
+        "suppressWarnings": True,
+        "derivedDataPath": str(derived_data_path),
+    }
+    mismatches = {
+        key: (expected, set_arguments.get(key))
+        for key, expected in expected_set_args.items()
+        if set_arguments.get(key) != expected
+    }
+    if mismatches:
+        raise XcodeBuildMcpRunProofError(
+            "session_set_defaults used unexpected arguments: "
+            f"mismatches={mismatches!r} arguments={set_arguments!r}"
+        )
+    run_arguments = _function_call_arguments(run_call[1])
+    if run_arguments.get("extraArgs") != ["-quiet"]:
+        raise XcodeBuildMcpRunProofError(
+            f"build_run_sim used unexpected arguments: {run_arguments!r}"
+        )
+
+    run_call_id = _require_call_id(
+        run_call[1],
+        tool_name=APPLE_MCP_XCODEBUILD_BUILD_RUN_SIM_TOOL,
+        error_type=XcodeBuildMcpRunProofError,
+    )
+    run_output = _function_output_for_call(
+        run.items,
+        run_call_id,
+        error_type=XcodeBuildMcpRunProofError,
+    )
+    missing = [
+        sentinel
+        for sentinel in APPLE_MCP_XCODEBUILD_RUN_SENTINELS
+        if sentinel not in run_output
+    ]
+    if missing:
+        raise XcodeBuildMcpRunProofError(
+            f"XcodeBuildMCP simulator run output missed expected sentinels. "
+            f"missing={missing!r} output={run_output[:1000]}"
+        )
+    if "XCODEBUILDMCP_RUN_OK" not in transcript:
+        raise XcodeBuildMcpRunProofError(
+            "XcodeBuildMCP simulator run proof did not return "
+            f"XCODEBUILDMCP_RUN_OK. Transcript:\n{transcript}"
+        )
+    return XcodeBuildMcpRunProof(
+        session_id=run.session_id,
+        show_defaults_call_id=_require_call_id(
+            show_call[1],
+            tool_name=APPLE_MCP_XCODEBUILD_SESSION_SHOW_DEFAULTS_TOOL,
+            error_type=XcodeBuildMcpRunProofError,
+        ),
+        set_defaults_call_id=_require_call_id(
+            set_call[1],
+            tool_name=APPLE_MCP_XCODEBUILD_SESSION_SET_DEFAULTS_TOOL,
+            error_type=XcodeBuildMcpRunProofError,
+        ),
+        run_call_id=run_call_id,
+        transcript=transcript,
+        output_preview=run_output[:500],
+    )
+
+
 def _missing_tool_call_message(expected_tool: str, run: SessionRun) -> str:
     """Return a compact diagnostic for proof runs that skip a required tool."""
     return (
@@ -1303,7 +1674,12 @@ def _function_call_arguments(call: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _single_indexed_call(run: SessionRun, tool_name: str) -> tuple[int, dict[str, Any]]:
+def _single_indexed_call(
+    run: SessionRun,
+    tool_name: str,
+    *,
+    error_type: type[XcodeBuildMcpSequenceProofError] = XcodeBuildMcpBuildProofError,
+) -> tuple[int, dict[str, Any]]:
     """Return the single expected function call and its item index."""
     calls = [
         (index, item)
@@ -1311,24 +1687,34 @@ def _single_indexed_call(run: SessionRun, tool_name: str) -> tuple[int, dict[str
         if item.get("type") == "function_call" and item.get("name") == tool_name
     ]
     if len(calls) != 1:
-        raise XcodeBuildMcpBuildProofError(
+        raise error_type(
             f"expected exactly one {tool_name} function_call, found {len(calls)}.\n"
             + _missing_tool_call_message(tool_name, run)
         )
     return calls[0]
 
 
-def _require_call_id(call: dict[str, Any], *, tool_name: str) -> str:
+def _require_call_id(
+    call: dict[str, Any],
+    *,
+    tool_name: str,
+    error_type: type[XcodeBuildMcpSequenceProofError] = XcodeBuildMcpBuildProofError,
+) -> str:
     """Return a function-call id or raise a proof error."""
     call_id = call.get("call_id")
     if not isinstance(call_id, str) or not call_id:
-        raise XcodeBuildMcpBuildProofError(
+        raise error_type(
             f"persisted {tool_name} call has invalid call_id: {call!r}"
         )
     return call_id
 
 
-def _function_output_for_call(items: list[dict[str, Any]], call_id: str) -> str:
+def _function_output_for_call(
+    items: list[dict[str, Any]],
+    call_id: str,
+    *,
+    error_type: type[XcodeBuildMcpSequenceProofError] = XcodeBuildMcpBuildProofError,
+) -> str:
     """Return the persisted function output for a call id."""
     outputs = [
         item
@@ -1336,7 +1722,7 @@ def _function_output_for_call(items: list[dict[str, Any]], call_id: str) -> str:
         if item.get("type") == "function_call_output" and item.get("call_id") == call_id
     ]
     if not outputs:
-        raise XcodeBuildMcpBuildProofError(
+        raise error_type(
             f"no persisted function_call_output found for call_id={call_id}"
         )
     return str(outputs[-1].get("output", ""))
@@ -1473,6 +1859,8 @@ def parse_args() -> argparse.Namespace:
             "apple-docs-cli",
             "apple-mcp-xcodebuild",
             "apple-mcp-xcodebuild-build",
+            "apple-mcp-xcodebuild-run",
+            "apple-xcodebuild-cli-run",
             "all",
         ),
         default="graph",
@@ -1482,7 +1870,10 @@ def parse_args() -> argparse.Namespace:
             "'apple-mcp' proves memory, 'apple-mcp-sosumi' proves sosumi, "
             "'apple-docs-cli' proves the Sosumi CLI Apple-docs adapter, "
             "'apple-mcp-xcodebuild' proves read-only XcodeBuildMCP discovery, "
-            "and 'apple-mcp-xcodebuild-build' proves compile-only simulator build."
+            "'apple-mcp-xcodebuild-build' proves compile-only simulator build, "
+            "'apple-mcp-xcodebuild-run' proves simulator build/install/launch "
+            "through MCP, and 'apple-xcodebuild-cli-run' proves the simulator "
+            "build/install/launch CLI adapter."
         ),
     )
     parser.add_argument(
@@ -1546,22 +1937,47 @@ def main() -> int:
         needs_apple_docs_cli = proof == "apple-docs-cli"
         needs_xcodebuild_discovery_mcp = proof in {"apple-mcp-xcodebuild", "all"}
         needs_xcodebuild_build_mcp = proof == "apple-mcp-xcodebuild-build"
-        needs_xcodebuild_mcp = needs_xcodebuild_discovery_mcp or needs_xcodebuild_build_mcp
+        needs_xcodebuild_run_mcp = proof == "apple-mcp-xcodebuild-run"
+        needs_xcodebuild_cli_run = proof == "apple-xcodebuild-cli-run"
+        needs_xcodebuild_mcp = (
+            needs_xcodebuild_discovery_mcp
+            or needs_xcodebuild_build_mcp
+            or needs_xcodebuild_run_mcp
+        )
         needs_apple_mcp = needs_memory_mcp or needs_sosumi_mcp or needs_xcodebuild_mcp
-        needs_apple_mcp_manifest = needs_apple_mcp or needs_apple_docs_cli
+        needs_apple_mcp_manifest = (
+            needs_apple_mcp or needs_apple_docs_cli or needs_xcodebuild_cli_run
+        )
         mcp_manifest = None
         apple_docs_cli_decision = None
         apple_docs_cli_tool_path = None
+        xcodebuild_cli_decision = None
+        xcodebuild_cli_tool_path = None
         memory_file = None
         xcodebuild_workspace_root = (
-            resolve_xcodebuild_mcp_workspace_root() if needs_xcodebuild_mcp else None
+            resolve_xcodebuild_mcp_workspace_root()
+            if needs_xcodebuild_mcp or needs_xcodebuild_cli_run
+            else None
         )
         xcodebuild_simulator_name = (
-            resolve_xcodebuild_mcp_simulator_name() if needs_xcodebuild_build_mcp else None
+            resolve_xcodebuild_mcp_simulator_name()
+            if needs_xcodebuild_build_mcp
+            or needs_xcodebuild_run_mcp
+            or needs_xcodebuild_cli_run
+            else None
         )
         xcodebuild_derived_data_path = (
-            agent_dir.parent / "xcodebuild-deriveddata"
+            agent_dir.parent
+            / (
+                "xcodebuild-cli-run-deriveddata"
+                if needs_xcodebuild_cli_run
+                else "xcodebuild-run-deriveddata"
+                if needs_xcodebuild_run_mcp
+                else "xcodebuild-deriveddata"
+            )
             if needs_xcodebuild_build_mcp
+            or needs_xcodebuild_run_mcp
+            or needs_xcodebuild_cli_run
             else None
         )
         apple_mcp_servers: dict[str, dict[str, Any]] = {}
@@ -1573,6 +1989,8 @@ def main() -> int:
             "apple-docs-cli",
             "apple-mcp-xcodebuild",
             "apple-mcp-xcodebuild-build",
+            "apple-mcp-xcodebuild-run",
+            "apple-xcodebuild-cli-run",
             "all",
         }:
             mcp_manifest = prove_apple_mcp_manifest(agent_dir)
@@ -1609,6 +2027,17 @@ def main() -> int:
             apple_docs_cli_tool_path = write_fetch_apple_docs_cli_tool(
                 agent_dir,
                 policy=APPLE_DOCS_CLI_POLICY,
+            )
+        if needs_xcodebuild_cli_run:
+            assert mcp_manifest is not None
+            xcodebuild_cli_decision = XCODEBUILD_CLI_POLICY.decide_for_mcp_servers(
+                mcp_manifest
+            )
+            if not xcodebuild_cli_decision.install:
+                raise SystemExit(xcodebuild_cli_decision.reason)
+            xcodebuild_cli_tool_path = write_xcodebuildmcp_simulator_build_run_tool(
+                agent_dir,
+                policy=XCODEBUILD_CLI_POLICY,
             )
         if proof == "all" and not args.skip_live:
             # Keep each live proof surface minimal. With every MCP exposed at once,
@@ -1666,6 +2095,30 @@ def main() -> int:
                 "ASSERTION: Apple docs CLI adapter policy installed the generated "
                 "tool without mutating the Apple MCP manifest"
             )
+        if needs_xcodebuild_cli_run:
+            assert mcp_manifest is not None
+            assert xcodebuild_cli_decision is not None
+            assert xcodebuild_cli_tool_path is not None
+            assert xcodebuild_workspace_root is not None
+            assert xcodebuild_simulator_name is not None
+            assert xcodebuild_derived_data_path is not None
+            print(f"static_apple_mcp_servers={','.join(sorted(mcp_manifest))}")
+            print(f"xcodebuild_cli_policy_reason={xcodebuild_cli_decision.reason}")
+            print(f"xcodebuild_cli_tool={XCODEBUILD_CLI_TOOL}")
+            print(
+                "xcodebuild_cli_command="
+                + " ".join(XCODEBUILDMCP_CLI_COMMAND)
+            )
+            print(f"xcodebuild_cli_tool_path={xcodebuild_cli_tool_path}")
+            print(f"xcodebuild_cli_root={xcodebuild_workspace_root}")
+            print(f"xcodebuild_cli_scheme={APPLE_MCP_XCODEBUILD_SCHEME}")
+            print(f"xcodebuild_cli_configuration={APPLE_MCP_XCODEBUILD_CONFIGURATION}")
+            print(f"xcodebuild_cli_simulator={xcodebuild_simulator_name}")
+            print(f"xcodebuild_cli_derived_data={xcodebuild_derived_data_path}")
+            print(
+                "ASSERTION: XcodeBuildMCP CLI adapter policy installed the "
+                "generated tool without mutating the Apple MCP manifest"
+            )
         if needs_xcodebuild_mcp:
             assert mcp_manifest is not None
             assert xcodebuild_workspace_root is not None
@@ -1674,14 +2127,19 @@ def main() -> int:
             print(f"converted_apple_mcp_xcodebuild_root={xcodebuild_workspace_root}")
             if needs_xcodebuild_discovery_mcp:
                 print(f"converted_apple_mcp_xcodebuild_tool={APPLE_MCP_XCODEBUILD_TOOL}")
-            if needs_xcodebuild_build_mcp:
+            if needs_xcodebuild_build_mcp or needs_xcodebuild_run_mcp:
                 assert xcodebuild_simulator_name is not None
                 assert xcodebuild_derived_data_path is not None
+                xcodebuild_action_tool = (
+                    APPLE_MCP_XCODEBUILD_BUILD_RUN_SIM_TOOL
+                    if needs_xcodebuild_run_mcp
+                    else APPLE_MCP_XCODEBUILD_BUILD_SIM_TOOL
+                )
                 print(
                     "converted_apple_mcp_xcodebuild_tools="
                     f"{APPLE_MCP_XCODEBUILD_SESSION_SHOW_DEFAULTS_TOOL},"
                     f"{APPLE_MCP_XCODEBUILD_SESSION_SET_DEFAULTS_TOOL},"
-                    f"{APPLE_MCP_XCODEBUILD_BUILD_SIM_TOOL}"
+                    f"{xcodebuild_action_tool}"
                 )
                 print(f"xcodebuild_mcp_scheme={APPLE_MCP_XCODEBUILD_SCHEME}")
                 print(f"xcodebuild_mcp_configuration={APPLE_MCP_XCODEBUILD_CONFIGURATION}")
@@ -1795,6 +2253,36 @@ def main() -> int:
                 "through Omnigent dynamicTools"
             )
             print(f"ASSERTION: persisted session items include {APPLE_DOCS_CLI_TOOL} result")
+        if needs_xcodebuild_cli_run:
+            assert xcodebuild_workspace_root is not None
+            assert xcodebuild_simulator_name is not None
+            assert xcodebuild_derived_data_path is not None
+            xcodebuild_cli_proof = run_live_proof_step(
+                "apple-xcodebuild-cli-run",
+                timeout_seconds=args.live_proof_timeout,
+                action=lambda: run_live_xcodebuild_cli_run_proof(
+                    agent_dir,
+                    codex_path,
+                    workspace_root=xcodebuild_workspace_root,
+                    simulator_name=xcodebuild_simulator_name,
+                    derived_data_path=xcodebuild_derived_data_path,
+                ),
+            )
+            print(f"xcodebuild_cli_session_id={xcodebuild_cli_proof.session_id}")
+            print(f"xcodebuild_cli_call_id={xcodebuild_cli_proof.call_id}")
+            print(
+                "xcodebuild_cli_output_preview="
+                f"{xcodebuild_cli_proof.output_preview!r}"
+            )
+            print(
+                "xcodebuild_cli_transcript_preview="
+                f"{xcodebuild_cli_proof.transcript[:500]!r}"
+            )
+            print(
+                "ASSERTION: stock Codex invoked the generated XcodeBuildMCP "
+                "CLI adapter through Omnigent dynamicTools"
+            )
+            print(f"ASSERTION: persisted session items include {XCODEBUILD_CLI_TOOL} result")
         if needs_xcodebuild_discovery_mcp:
             assert xcodebuild_workspace_root is not None
             def run_xcodebuild_step() -> AppleMcpProof:
@@ -1867,6 +2355,44 @@ def main() -> int:
             print(
                 f"ASSERTION: persisted session items include "
                 f"{APPLE_MCP_XCODEBUILD_BUILD_SIM_TOOL} result"
+            )
+        if needs_xcodebuild_run_mcp:
+            assert xcodebuild_workspace_root is not None
+            assert xcodebuild_simulator_name is not None
+            assert xcodebuild_derived_data_path is not None
+            run_proof = run_live_proof_step(
+                "apple-mcp-xcodebuild-run",
+                timeout_seconds=args.live_proof_timeout,
+                action=lambda: run_live_apple_xcodebuild_mcp_run_proof(
+                    agent_dir,
+                    codex_path,
+                    workspace_root=xcodebuild_workspace_root,
+                    simulator_name=xcodebuild_simulator_name,
+                    derived_data_path=xcodebuild_derived_data_path,
+                ),
+            )
+            print(f"xcodebuild_mcp_run_session_id={run_proof.session_id}")
+            print(
+                "xcodebuild_mcp_run_show_defaults_call_id="
+                f"{run_proof.show_defaults_call_id}"
+            )
+            print(
+                "xcodebuild_mcp_run_set_defaults_call_id="
+                f"{run_proof.set_defaults_call_id}"
+            )
+            print(f"xcodebuild_mcp_run_call_id={run_proof.run_call_id}")
+            print(f"xcodebuild_mcp_run_output_preview={run_proof.output_preview!r}")
+            print(
+                "xcodebuild_mcp_run_transcript_preview="
+                f"{run_proof.transcript[:500]!r}"
+            )
+            print(
+                "ASSERTION: stock Codex drove XcodeBuildMCP simulator "
+                "build/install/launch through Omnigent-converted MCP config"
+            )
+            print(
+                f"ASSERTION: persisted session items include "
+                f"{APPLE_MCP_XCODEBUILD_BUILD_RUN_SIM_TOOL} result"
             )
     return 0
 

@@ -84,6 +84,8 @@ The current spike proves the first narrow adapter behavior:
 | Apple documentation fetch through a Sosumi CLI adapter | `replacement-ready` for the `fetch-apple-docs` CLI adapter/policy transport | `omnigent.adapters.apple_docs_cli.AppleDocsCliAdapterPolicy` installs a generated `fetch_apple_docs` Python dynamic tool when the Apple bundle MCP manifest still declares `sosumi`; the policy validates `https://developer.apple.com` documentation, HIG, and video URLs and leaves the existing MCP config unchanged. `scripts/prove_stock_codex_replacement.py --proof apple-docs-cli --codex-path /opt/homebrew/bin/codex --live-proof-timeout 180` proved stock Codex `0.142.2` invoked that tool through normal Omnigent `dynamicTools`; persisted session items included a `function_call` and matching `function_call_output` containing `title: String`, `source: https://developer.apple.com/documentation/swift/string`, and `timestamp: 2026-06-25T23:44:15.942Z`; the model replied with the exact timestamp. This proves the Apple-docs capability through the CLI adapter, not the network-backed MCP sessions path. |
 | Apple `.mcp.json` `XcodeBuildMCP` project discovery through Omnigent | `replacement-ready` for read-only project discovery | `scripts/prove_stock_codex_replacement.py --proof apple-mcp-xcodebuild` converted the Apple plugin `.mcp.json` `XcodeBuildMCP` server into an Omnigent `tools: XcodeBuildMCP: type: mcp` declaration, then stock Codex `0.142.2` invoked `XcodeBuildMCP__discover_projs` against the local Omnigent checkout; persisted session items included a `function_call` and matching `function_call_output` that found `ap-web/ios/Omnigent.xcodeproj`. This does not prove build, test, launch, simulator, or device execution. |
 | Apple `.mcp.json` `XcodeBuildMCP` simulator build through Omnigent | `replacement-ready` for compile-only iOS simulator build | `scripts/prove_stock_codex_replacement.py --proof apple-mcp-xcodebuild-build --codex-path /opt/homebrew/bin/codex --live-proof-timeout 240` converted the Apple plugin `.mcp.json` `XcodeBuildMCP` server into an Omnigent MCP tool config, then stock Codex `0.142.2` invoked `XcodeBuildMCP__session_show_defaults`, `XcodeBuildMCP__session_set_defaults` with `persist: false`, and `XcodeBuildMCP__build_sim` with `extraArgs: ["-quiet"]` against `ap-web/ios/Omnigent.xcodeproj`, scheme `Omnigent`, configuration `Debug`, simulator `iPhone 17`, and temporary DerivedData. Persisted session items included all three function calls and matching outputs; the build output included `iOS Simulator Build build succeeded for scheme Omnigent`. This proves compile-only simulator build, not install, launch, UI automation, tests, device builds, or XcodeBuildMCP CLI parity. |
+| Apple `.mcp.json` `XcodeBuildMCP` simulator run/launch through Omnigent MCP | `blocked` at the stock-Codex sessions/proxy layer | Direct XcodeBuildMCP `build_run_sim` succeeded on 2026-06-26 for `ap-web/ios/Omnigent.xcodeproj`, scheme `Omnigent`, simulator `iPhone 17`, and reported `The app (ai.omnigent.ios) is now running in the iOS Simulator.` The stock-Codex Omnigent MCP gate `scripts/prove_stock_codex_replacement.py --proof apple-mcp-xcodebuild-run --codex-path /opt/homebrew/bin/codex --live-proof-timeout 300` timed out after 301.3 seconds before producing a persisted proof result. This preserves the existing XcodeBuildMCP discovery/build proof while marking install/launch through the MCP sessions path as not replacement-ready. |
+| XcodeBuildMCP simulator run/launch through a CLI adapter | `replacement-ready` for bounded iOS simulator build/install/launch | `omnigent.adapters.xcodebuild_cli.XcodeBuildCliAdapterPolicy` installs a generated `xcodebuildmcp_simulator_build_run` Python dynamic tool when the Apple bundle MCP manifest declares `XcodeBuildMCP`; the policy keeps the existing MCP config unchanged and constrains the tool to `.xcodeproj` paths, iOS simulator names, temp DerivedData roots, and `extra_args: ["-quiet"]`. `scripts/prove_stock_codex_replacement.py --proof apple-xcodebuild-cli-run --codex-path /opt/homebrew/bin/codex --live-proof-timeout 300` proved stock Codex `0.142.2` invoked that generated tool through normal Omnigent `dynamicTools`; persisted session `conv_fec0776ba8f842b9b4daf0158e0b002d` included function call `call_bTHIl79YO21TkBwwOp2CeQNj`, CLI output containing `Build succeeded`, `Build & Run complete`, and `Bundle ID: ai.omnigent.ios`, and the model replied `XCODEBUILDMCP_CLI_RUN_OK`. This proves the bounded CLI-adapter run/launch path, not XcodeBuildMCP MCP run parity, UI automation, tests, device execution, or a clean-host install. |
 
 This does not yet prove full Codex-fork replacement.
 
@@ -153,6 +155,24 @@ uvx --from . python scripts/prove_stock_codex_replacement.py \
   --live-proof-timeout 240
 ```
 
+Apple XcodeBuildMCP simulator run/launch MCP proof:
+
+```bash
+uvx --from . python scripts/prove_stock_codex_replacement.py \
+  --proof apple-mcp-xcodebuild-run \
+  --codex-path /opt/homebrew/bin/codex \
+  --live-proof-timeout 300
+```
+
+Apple XcodeBuildMCP simulator run/launch CLI adapter proof:
+
+```bash
+uvx --from . python scripts/prove_stock_codex_replacement.py \
+  --proof apple-xcodebuild-cli-run \
+  --codex-path /opt/homebrew/bin/codex \
+  --live-proof-timeout 300
+```
+
 Combined bounded proof:
 
 ```bash
@@ -190,19 +210,24 @@ XcodeBuildMCP compile-only simulator build gate also passed on 2026-06-25 after
 an initial prompt-shape failure where stock Codex wrote a pseudo-call in prose
 instead of emitting persisted function calls; the final gate now explicitly
 rejects pseudo-calls and validates the three persisted build-boundary calls.
+On 2026-06-26, direct XcodeBuildMCP `build_run_sim` and direct
+`xcodebuildmcp simulator build-and-run` both launched `ai.omnigent.ios` on
+`iPhone 17`, but the stock-Codex Omnigent MCP run gate timed out after 301.3
+seconds. The generated XcodeBuildMCP CLI adapter gate then passed through normal
+stock-Codex `dynamicTools`, so bounded simulator build/install/launch is
+replacement-ready through the CLI adapter while the MCP run/launch path remains
+blocked.
 
 ## Next Proof Gates
 
 Run these in order unless a later gate becomes cheaper due to new evidence.
 
-1. XcodeBuildMCP simulator run/launch boundary
-   - Extend the proven compile-only `XcodeBuildMCP__build_sim` path to a bounded
-     simulator run/launch proof. Keep install/launch, UI automation, tests, and
-     device checks separate so host setup failures do not blur the already
-     proven discovery and build MCP adapter paths. If network-backed MCP
-     sessions block, evaluate the XcodeBuildMCP CLI as a separate fallback
-     hypothesis; do not claim full parity until the CLI proves the same
-     boundary.
+1. XcodeBuildMCP simulator test boundary
+   - Extend the proven simulator build/install/launch CLI-adapter path to a
+     bounded test proof. Keep unit/integration tests, UI automation, logs, and
+     device checks separate. Prefer a CLI adapter proof first if the
+     network-backed MCP sessions path continues to hang on long-running
+     XcodeBuildMCP run tools.
 
 2. Expand the Apple docs adapter contract only if needed
    - The current adapter/policy proof covers the documented `fetch-apple-docs`
