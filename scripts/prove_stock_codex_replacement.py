@@ -37,7 +37,10 @@ from omnigent.adapters.apple_docs_cli import (
 from omnigent.adapters.xcodebuild_cli import (
     DEFAULT_XCODEBUILD_CLI_POLICY,
     XCODEBUILDMCP_CLI_COMMAND,
+    XCODEBUILDMCP_CLI_ENV_OVERRIDES,
+    XCODEBUILDMCP_CLI_TEST_COMMAND,
     write_xcodebuildmcp_simulator_build_run_tool,
+    write_xcodebuildmcp_simulator_test_tool,
 )
 from omnigent.chat import (
     ChatOverrides,
@@ -114,10 +117,16 @@ APPLE_MCP_XCODEBUILD_RUN_SENTINELS = (
 )
 XCODEBUILD_CLI_POLICY = DEFAULT_XCODEBUILD_CLI_POLICY
 XCODEBUILD_CLI_TOOL = XCODEBUILD_CLI_POLICY.tool_name
+XCODEBUILD_CLI_TEST_TOOL = XCODEBUILD_CLI_POLICY.test_tool_name
 XCODEBUILD_CLI_RUN_SENTINELS = (
     "Build succeeded",
     "Build & Run complete",
     "Bundle ID: ai.omnigent.ios",
+)
+XCODEBUILD_CLI_TEST_SENTINELS = (
+    "9 tests passed",
+    "0 failed",
+    "0 skipped",
 )
 RELATIVE_MARKDOWN_PATH_RE = re.compile(r"`((?:\.\.?/)[^`]+)`")
 PLUGIN_SKILL_REF_RE = re.compile(rf"\b{re.escape(PLUGIN_NAME)}:([A-Za-z0-9_.-]+)\b")
@@ -905,6 +914,65 @@ def run_live_xcodebuild_cli_run_proof(
     )
 
 
+def run_live_xcodebuild_cli_test_proof(
+    agent_dir: Path,
+    codex_path: Path,
+    *,
+    workspace_root: Path,
+    simulator_name: str,
+    derived_data_path: Path,
+) -> AppleMcpProof:
+    """Prove stock Codex can test through the XcodeBuildMCP CLI adapter."""
+    project_path = workspace_root / APPLE_MCP_XCODEBUILD_PROJECT_RELATIVE_PATH
+    tool_args = {
+        "project_path": str(project_path),
+        "scheme": APPLE_MCP_XCODEBUILD_SCHEME,
+        "configuration": APPLE_MCP_XCODEBUILD_CONFIGURATION,
+        "simulator_name": simulator_name,
+        "derived_data_path": str(derived_data_path),
+        "extra_args": ["-quiet"],
+        "use_latest_os": True,
+    }
+    tool_args_json = json.dumps(tool_args)
+    prompts = (
+        (
+            "Tool invocation drill. After the required route block, your next "
+            f"assistant item must be a real function call to {XCODEBUILD_CLI_TEST_TOOL}, "
+            "not prose. Do not write JSON as text, pseudo-calls, `tool=...`, "
+            "`mcp__...`, or dot notation. Use exactly these JSON arguments: "
+            f"{tool_args_json}. After the tool result contains '9 tests passed', "
+            "reply exactly XCODEBUILDMCP_CLI_TEST_OK."
+        ),
+        (
+            "XcodeBuildMCP CLI simulator test adapter proof. Call the available "
+            f"dynamic tool named {XCODEBUILD_CLI_TEST_TOOL} exactly once before "
+            f"answering. Pass these exact arguments: {tool_args_json}. Do not "
+            "use any other tool. Reply exactly XCODEBUILDMCP_CLI_TEST_OK only "
+            "after the tool output says 9 tests passed."
+        ),
+    )
+    errors: list[str] = []
+    for attempt, prompt in enumerate(prompts, start=1):
+        run = asyncio_run_session_query(
+            agent_dir=agent_dir,
+            codex_path=codex_path,
+            prompt=prompt,
+        )
+        try:
+            return _validate_xcodebuild_cli_test(
+                run,
+                attempt=attempt,
+                expected_arguments=tool_args,
+            )
+        except XcodeBuildCliProofAttemptError as exc:
+            errors.append(str(exc))
+    joined_errors = "\n\n".join(errors)
+    raise SystemExit(
+        f"XcodeBuildMCP CLI simulator test proof failed after {len(prompts)} "
+        f"attempts:\n{joined_errors}"
+    )
+
+
 class SosumiProofAttemptError(Exception):
     """One failed sosumi proof attempt that can be retried."""
 
@@ -1114,6 +1182,82 @@ def _validate_xcodebuild_cli_run(
         raise XcodeBuildCliProofAttemptError(
             f"attempt={attempt}: XcodeBuildMCP CLI adapter proof did not return "
             f"XCODEBUILDMCP_CLI_RUN_OK. Transcript:\n{transcript}"
+        )
+    return AppleMcpProof(
+        session_id=run.session_id,
+        call_id=call_id,
+        transcript=transcript,
+        output_preview=output_text[:500],
+    )
+
+
+def _validate_xcodebuild_cli_test(
+    run: SessionRun,
+    *,
+    attempt: int,
+    expected_arguments: dict[str, object],
+) -> AppleMcpProof:
+    """Validate one XcodeBuildMCP CLI simulator test adapter proof attempt."""
+    transcript = run.text.strip()
+    if not transcript.startswith(EXPECTED_ROUTE):
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: transcript did not start with expected route block.\n"
+            f"Expected prefix:\n{EXPECTED_ROUTE}\n\nActual:\n{transcript[:1000]}"
+        )
+
+    calls = [
+        item
+        for item in run.items
+        if item.get("type") == "function_call"
+        and item.get("name") == XCODEBUILD_CLI_TEST_TOOL
+    ]
+    if not calls:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: " + _missing_tool_call_message(XCODEBUILD_CLI_TEST_TOOL, run)
+        )
+    call = calls[-1]
+    call_id = call.get("call_id")
+    if not isinstance(call_id, str) or not call_id:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: persisted {XCODEBUILD_CLI_TEST_TOOL} call "
+            f"has invalid call_id: {call!r}"
+        )
+    arguments = _function_call_arguments(call)
+    mismatches = {
+        key: (expected, arguments.get(key))
+        for key, expected in expected_arguments.items()
+        if arguments.get(key) != expected
+    }
+    if mismatches:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: {XCODEBUILD_CLI_TEST_TOOL} used unexpected "
+            f"arguments. mismatches={mismatches!r} arguments={arguments!r}"
+        )
+    outputs = [
+        item
+        for item in run.items
+        if item.get("type") == "function_call_output" and item.get("call_id") == call_id
+    ]
+    if not outputs:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: no persisted function_call_output found for call_id={call_id}"
+        )
+    output_text = str(outputs[-1].get("output", ""))
+    missing = [
+        sentinel
+        for sentinel in XCODEBUILD_CLI_TEST_SENTINELS
+        if sentinel not in output_text
+    ]
+    if missing or "Error:" in output_text:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: XcodeBuildMCP CLI test adapter output missed "
+            "expected test sentinels or looked erroneous. "
+            f"missing={missing!r} output={output_text[:1000]}"
+        )
+    if "XCODEBUILDMCP_CLI_TEST_OK" not in transcript:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: XcodeBuildMCP CLI test adapter proof did not "
+            f"return XCODEBUILDMCP_CLI_TEST_OK. Transcript:\n{transcript}"
         )
     return AppleMcpProof(
         session_id=run.session_id,
@@ -1861,6 +2005,7 @@ def parse_args() -> argparse.Namespace:
             "apple-mcp-xcodebuild-build",
             "apple-mcp-xcodebuild-run",
             "apple-xcodebuild-cli-run",
+            "apple-xcodebuild-cli-test",
             "all",
         ),
         default="graph",
@@ -1873,7 +2018,8 @@ def parse_args() -> argparse.Namespace:
             "'apple-mcp-xcodebuild-build' proves compile-only simulator build, "
             "'apple-mcp-xcodebuild-run' proves simulator build/install/launch "
             "through MCP, and 'apple-xcodebuild-cli-run' proves the simulator "
-            "build/install/launch CLI adapter."
+            "build/install/launch CLI adapter, and 'apple-xcodebuild-cli-test' "
+            "proves the simulator test CLI adapter."
         ),
     )
     parser.add_argument(
@@ -1939,6 +2085,8 @@ def main() -> int:
         needs_xcodebuild_build_mcp = proof == "apple-mcp-xcodebuild-build"
         needs_xcodebuild_run_mcp = proof == "apple-mcp-xcodebuild-run"
         needs_xcodebuild_cli_run = proof == "apple-xcodebuild-cli-run"
+        needs_xcodebuild_cli_test = proof == "apple-xcodebuild-cli-test"
+        needs_xcodebuild_cli = needs_xcodebuild_cli_run or needs_xcodebuild_cli_test
         needs_xcodebuild_mcp = (
             needs_xcodebuild_discovery_mcp
             or needs_xcodebuild_build_mcp
@@ -1946,7 +2094,7 @@ def main() -> int:
         )
         needs_apple_mcp = needs_memory_mcp or needs_sosumi_mcp or needs_xcodebuild_mcp
         needs_apple_mcp_manifest = (
-            needs_apple_mcp or needs_apple_docs_cli or needs_xcodebuild_cli_run
+            needs_apple_mcp or needs_apple_docs_cli or needs_xcodebuild_cli
         )
         mcp_manifest = None
         apple_docs_cli_decision = None
@@ -1956,20 +2104,22 @@ def main() -> int:
         memory_file = None
         xcodebuild_workspace_root = (
             resolve_xcodebuild_mcp_workspace_root()
-            if needs_xcodebuild_mcp or needs_xcodebuild_cli_run
+            if needs_xcodebuild_mcp or needs_xcodebuild_cli
             else None
         )
         xcodebuild_simulator_name = (
             resolve_xcodebuild_mcp_simulator_name()
             if needs_xcodebuild_build_mcp
             or needs_xcodebuild_run_mcp
-            or needs_xcodebuild_cli_run
+            or needs_xcodebuild_cli
             else None
         )
         xcodebuild_derived_data_path = (
             agent_dir.parent
             / (
-                "xcodebuild-cli-run-deriveddata"
+                "xcodebuild-cli-test-deriveddata"
+                if needs_xcodebuild_cli_test
+                else "xcodebuild-cli-run-deriveddata"
                 if needs_xcodebuild_cli_run
                 else "xcodebuild-run-deriveddata"
                 if needs_xcodebuild_run_mcp
@@ -1977,7 +2127,7 @@ def main() -> int:
             )
             if needs_xcodebuild_build_mcp
             or needs_xcodebuild_run_mcp
-            or needs_xcodebuild_cli_run
+            or needs_xcodebuild_cli
             else None
         )
         apple_mcp_servers: dict[str, dict[str, Any]] = {}
@@ -1991,6 +2141,7 @@ def main() -> int:
             "apple-mcp-xcodebuild-build",
             "apple-mcp-xcodebuild-run",
             "apple-xcodebuild-cli-run",
+            "apple-xcodebuild-cli-test",
             "all",
         }:
             mcp_manifest = prove_apple_mcp_manifest(agent_dir)
@@ -2028,16 +2179,23 @@ def main() -> int:
                 agent_dir,
                 policy=APPLE_DOCS_CLI_POLICY,
             )
-        if needs_xcodebuild_cli_run:
+        if needs_xcodebuild_cli:
             assert mcp_manifest is not None
             xcodebuild_cli_decision = XCODEBUILD_CLI_POLICY.decide_for_mcp_servers(
                 mcp_manifest
             )
             if not xcodebuild_cli_decision.install:
                 raise SystemExit(xcodebuild_cli_decision.reason)
-            xcodebuild_cli_tool_path = write_xcodebuildmcp_simulator_build_run_tool(
-                agent_dir,
-                policy=XCODEBUILD_CLI_POLICY,
+            xcodebuild_cli_tool_path = (
+                write_xcodebuildmcp_simulator_test_tool(
+                    agent_dir,
+                    policy=XCODEBUILD_CLI_POLICY,
+                )
+                if needs_xcodebuild_cli_test
+                else write_xcodebuildmcp_simulator_build_run_tool(
+                    agent_dir,
+                    policy=XCODEBUILD_CLI_POLICY,
+                )
             )
         if proof == "all" and not args.skip_live:
             # Keep each live proof surface minimal. With every MCP exposed at once,
@@ -2095,20 +2253,29 @@ def main() -> int:
                 "ASSERTION: Apple docs CLI adapter policy installed the generated "
                 "tool without mutating the Apple MCP manifest"
             )
-        if needs_xcodebuild_cli_run:
+        if needs_xcodebuild_cli:
             assert mcp_manifest is not None
             assert xcodebuild_cli_decision is not None
             assert xcodebuild_cli_tool_path is not None
             assert xcodebuild_workspace_root is not None
             assert xcodebuild_simulator_name is not None
             assert xcodebuild_derived_data_path is not None
+            xcodebuild_cli_tool = (
+                XCODEBUILD_CLI_TEST_TOOL
+                if needs_xcodebuild_cli_test
+                else XCODEBUILD_CLI_TOOL
+            )
+            xcodebuild_cli_command = (
+                XCODEBUILDMCP_CLI_TEST_COMMAND
+                if needs_xcodebuild_cli_test
+                else XCODEBUILDMCP_CLI_COMMAND
+            )
             print(f"static_apple_mcp_servers={','.join(sorted(mcp_manifest))}")
             print(f"xcodebuild_cli_policy_reason={xcodebuild_cli_decision.reason}")
-            print(f"xcodebuild_cli_tool={XCODEBUILD_CLI_TOOL}")
-            print(
-                "xcodebuild_cli_command="
-                + " ".join(XCODEBUILDMCP_CLI_COMMAND)
-            )
+            print(f"xcodebuild_cli_tool={xcodebuild_cli_tool}")
+            print("xcodebuild_cli_command=" + " ".join(xcodebuild_cli_command))
+            for env_key, env_value in sorted(XCODEBUILDMCP_CLI_ENV_OVERRIDES.items()):
+                print(f"xcodebuild_cli_env_{env_key}={env_value}")
             print(f"xcodebuild_cli_tool_path={xcodebuild_cli_tool_path}")
             print(f"xcodebuild_cli_root={xcodebuild_workspace_root}")
             print(f"xcodebuild_cli_scheme={APPLE_MCP_XCODEBUILD_SCHEME}")
@@ -2283,6 +2450,39 @@ def main() -> int:
                 "CLI adapter through Omnigent dynamicTools"
             )
             print(f"ASSERTION: persisted session items include {XCODEBUILD_CLI_TOOL} result")
+        if needs_xcodebuild_cli_test:
+            assert xcodebuild_workspace_root is not None
+            assert xcodebuild_simulator_name is not None
+            assert xcodebuild_derived_data_path is not None
+            xcodebuild_cli_test_proof = run_live_proof_step(
+                "apple-xcodebuild-cli-test",
+                timeout_seconds=args.live_proof_timeout,
+                action=lambda: run_live_xcodebuild_cli_test_proof(
+                    agent_dir,
+                    codex_path,
+                    workspace_root=xcodebuild_workspace_root,
+                    simulator_name=xcodebuild_simulator_name,
+                    derived_data_path=xcodebuild_derived_data_path,
+                ),
+            )
+            print(f"xcodebuild_cli_test_session_id={xcodebuild_cli_test_proof.session_id}")
+            print(f"xcodebuild_cli_test_call_id={xcodebuild_cli_test_proof.call_id}")
+            print(
+                "xcodebuild_cli_test_output_preview="
+                f"{xcodebuild_cli_test_proof.output_preview!r}"
+            )
+            print(
+                "xcodebuild_cli_test_transcript_preview="
+                f"{xcodebuild_cli_test_proof.transcript[:500]!r}"
+            )
+            print(
+                "ASSERTION: stock Codex invoked the generated XcodeBuildMCP "
+                "CLI simulator test adapter through Omnigent dynamicTools"
+            )
+            print(
+                f"ASSERTION: persisted session items include "
+                f"{XCODEBUILD_CLI_TEST_TOOL} result"
+            )
         if needs_xcodebuild_discovery_mcp:
             assert xcodebuild_workspace_root is not None
             def run_xcodebuild_step() -> AppleMcpProof:
