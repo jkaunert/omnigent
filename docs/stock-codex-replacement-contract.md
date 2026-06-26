@@ -87,6 +87,7 @@ The current spike proves the first narrow adapter behavior:
 | Apple `.mcp.json` `XcodeBuildMCP` simulator run/launch through Omnigent MCP | `blocked` at the stock-Codex sessions/proxy layer | Direct XcodeBuildMCP `build_run_sim` succeeded on 2026-06-26 for `ap-web/ios/Omnigent.xcodeproj`, scheme `Omnigent`, simulator `iPhone 17`, and reported `The app (ai.omnigent.ios) is now running in the iOS Simulator.` The stock-Codex Omnigent MCP gate `scripts/prove_stock_codex_replacement.py --proof apple-mcp-xcodebuild-run --codex-path /opt/homebrew/bin/codex --live-proof-timeout 300` timed out after 301.3 seconds before producing a persisted proof result. This preserves the existing XcodeBuildMCP discovery/build proof while marking install/launch through the MCP sessions path as not replacement-ready. |
 | XcodeBuildMCP simulator run/launch through a CLI adapter | `replacement-ready` for bounded iOS simulator build/install/launch | `omnigent.adapters.xcodebuild_cli.XcodeBuildCliAdapterPolicy` installs a generated `xcodebuildmcp_simulator_build_run` Python dynamic tool when the Apple bundle MCP manifest declares `XcodeBuildMCP`; the policy keeps the existing MCP config unchanged, constrains the tool to `.xcodeproj` paths, iOS simulator names, temp DerivedData roots, and `extra_args: ["-quiet"]`, and passes full-feature CLI env overrides: `XCODEBUILDMCP_ENABLED_WORKFLOWS=coverage,debugging,device,doctor,macos,project-discovery,project-scaffolding,session-management,simulator-management,simulator,swift-package,ui-automation,utilities,workflow-discovery,xcode-ide`, `XCODEBUILDMCP_EXPERIMENTAL_WORKFLOW_DISCOVERY=true`, and `XCODEBUILDMCP_DEBUG=true`. `scripts/prove_stock_codex_replacement.py --proof apple-xcodebuild-cli-run --codex-path /opt/homebrew/bin/codex --live-proof-timeout 300` re-proved stock Codex `0.142.2` invoked that generated tool through normal Omnigent `dynamicTools` with the full-feature env; persisted session `conv_aa44681fbc124422b92a3f02e1d84c96` included function call `call_v8VfWnpylRGiJMUR5FomGwXo`, CLI output containing `Build succeeded`, `Build & Run complete`, and `Bundle ID: ai.omnigent.ios`, and the model replied `XCODEBUILDMCP_CLI_RUN_OK`. This proves the bounded CLI-adapter run/launch path, not XcodeBuildMCP MCP run parity, UI automation, device execution, or a clean-host install. |
 | XcodeBuildMCP simulator tests through a CLI adapter | `replacement-ready` for bounded iOS simulator tests | `omnigent.adapters.xcodebuild_cli.XcodeBuildCliAdapterPolicy` now also installs a generated `xcodebuildmcp_simulator_test` Python dynamic tool for the simulator test boundary, with the same full-feature CLI env overrides that enable non-default workflows and experimental workflow discovery. Direct `xcodebuildmcp simulator test` with those env overrides found and passed 9 Omnigent iOS tests. `scripts/prove_stock_codex_replacement.py --proof apple-xcodebuild-cli-test --codex-path /opt/homebrew/bin/codex --live-proof-timeout 360` then proved stock Codex `0.142.2` invoked the generated test tool through normal Omnigent `dynamicTools`; persisted session `conv_f80892556ef54e96849b1de8481a1518` included function call `call_7Dzms7WmGDach013GZmEcJgC`, CLI output containing `9 tests passed`, `0 failed`, and `0 skipped`, and the model replied `XCODEBUILDMCP_CLI_TEST_OK`. This proves bounded simulator tests through the CLI adapter, not UI automation, device tests, or XcodeBuildMCP MCP test parity. |
+| XcodeBuildMCP simulator screenshot through a CLI adapter | `replacement-ready` for bounded non-mutating iOS simulator screenshot after launch | `omnigent.adapters.xcodebuild_cli.XcodeBuildCliAdapterPolicy` now also installs a generated `xcodebuildmcp_simulator_screenshot` Python dynamic tool for the UI screenshot boundary, with the same full-feature CLI env overrides. The tool runs `xcodebuildmcp simulator build-and-run --output json`, extracts the launched simulator id, runs `xcodebuildmcp ui-automation screenshot --output json`, verifies the screenshot file exists, and returns a compact JSON summary. Direct CLI calibration showed `ui-automation screenshot` succeeds and returns a JPEG path with positive dimensions, while semantic `snapshot-ui` currently fails against this host Xcode beta path because `SimulatorKit.framework` is missing under `/Applications/Xcode-27.0.0-Beta.app`. `scripts/prove_stock_codex_replacement.py --proof apple-xcodebuild-cli-screenshot --codex-path /opt/homebrew/bin/codex --live-proof-timeout 360` proved stock Codex `0.142.2` invoked the generated screenshot tool through normal Omnigent `dynamicTools`; persisted session `conv_f65409a009804370a00b35e00d26d727` included function call `call_wW5AEWaSRCFkxUy7m2z6LuoU`, output containing `"buildStatus": "SUCCEEDED"`, `"screenshotStatus": "SUCCEEDED"`, `"bundleId": "ai.omnigent.ios"`, `"format": "image/jpeg"`, `"width": 368`, and `"height": 800`, and the model replied `XCODEBUILDMCP_CLI_SCREENSHOT_OK`. This proves bounded screenshot capture through the CLI adapter, not semantic UI hierarchy snapshots, gestures, logs, device execution, or Xcode IDE bridge tools. |
 
 This does not yet prove full Codex-fork replacement.
 
@@ -183,6 +184,15 @@ uvx --from . python scripts/prove_stock_codex_replacement.py \
   --live-proof-timeout 360
 ```
 
+Apple XcodeBuildMCP simulator screenshot CLI adapter proof:
+
+```bash
+uvx --from . python scripts/prove_stock_codex_replacement.py \
+  --proof apple-xcodebuild-cli-screenshot \
+  --codex-path /opt/homebrew/bin/codex \
+  --live-proof-timeout 360
+```
+
 Combined bounded proof:
 
 ```bash
@@ -236,40 +246,52 @@ the full configured workflow surface. The bounded simulator test adapter proof
 also passed on 2026-06-26: stock Codex invoked `xcodebuildmcp_simulator_test`
 through Omnigent `dynamicTools`, and the CLI reported `9 tests passed, 0 failed,
 0 skipped`.
+The bounded simulator screenshot adapter proof also passed on 2026-06-26:
+stock Codex invoked `xcodebuildmcp_simulator_screenshot` through Omnigent
+`dynamicTools`, and the CLI returned a successful JPEG screenshot summary with
+positive dimensions. Semantic `snapshot-ui` remains a separate unproven surface:
+direct CLI calibration currently fails before hierarchy capture because this
+host's Xcode beta path does not contain the expected `SimulatorKit.framework`.
 
 ## Next Proof Gates
 
 Run these in order unless a later gate becomes cheaper due to new evidence.
 
-1. XcodeBuildMCP UI automation/screenshot boundary
-   - Extend the proven simulator build/run/test CLI-adapter path to a bounded UI
-     automation proof, starting with a non-mutating screenshot or `snapshot-ui`
-     after launch. Keep gestures, logs, device checks, and Xcode IDE bridge
-     tools separate.
+1. XcodeBuildMCP semantic UI snapshot blocker diagnosis
+   - Keep this separate from the proven screenshot boundary. First determine
+     whether `snapshot-ui` is blocked by the Xcode beta installation path,
+     XcodeBuildMCP's SimulatorKit lookup, or host permission/setup. Do not
+     promote semantic hierarchy inspection until direct CLI calibration succeeds.
 
-2. Expand the Apple docs adapter contract only if needed
+2. XcodeBuildMCP logs or runtime observation boundary
+   - Add a narrow, non-mutating runtime-observation proof only after deciding
+     whether screenshot-level UI evidence is sufficient for the replacement
+     contract. Keep runtime logs, OSLog, debugger attach, gestures, and device
+     checks separate.
+
+3. Expand the Apple docs adapter contract only if needed
    - The current adapter/policy proof covers the documented `fetch-apple-docs`
      transport shape and a targeted Apple `String` documentation URL. Broaden it
      only when a real workflow needs additional Apple docs, HIG, or video URL
      shapes beyond the current policy allowlist.
 
-3. Sosumi MCP timeout containment
+4. Sosumi MCP timeout containment
    - Keep the isolated blocker recorded: sosumi MCP launch, remote network
      fetch, runner-local MCP dispatch, direct CLI fetch, and dynamic tool
      execution are green. The remaining failing surface is the headless
      sessions/proxy stream from the Codex harness. Diagnose it later only if
      network-backed MCP execution is still required after the CLI adapter path.
 
-4. Session and terminal behavior
+5. Session and terminal behavior
    - Prove the Omnigent path supports the required live terminal/session shape,
      including tmux/native-terminal expectations where the workflow depends on
      them.
 
-5. Clean stock-Codex install
+6. Clean stock-Codex install
    - Prove the path from a clean Codex home or clean host profile using the
      stock Codex binary. Record every required install/config step.
 
-6. End-to-end Apple workflow smoke
+7. End-to-end Apple workflow smoke
    - Run a representative Apple workflow request through Omnigent plus stock
      Codex and compare the visible route, tool availability, and output contract
      against the current forked path.
