@@ -76,6 +76,15 @@ SELECTED_OWNER = f"{PLUGIN_NAME}:{SELECTED_SKILL}"
 EXPECTED_ROUTE = f"Routing: orchestrator-led\n\nActivated skills\n- `{SELECTED_OWNER}`"
 REFERENCE_SENTINEL = "Use this shared contract for broad brigade-orchestrator lanes"
 TOOL_SENTINEL = "OMNIGENT_TOOL_SENTINEL_42"
+ROUTER_MATRIX_REVIEW_OWNER = f"{PLUGIN_NAME}:apple-review-orchestrator"
+ROUTER_MATRIX_FOCUSED_OWNER = f"{PLUGIN_NAME}:apple-decision-stress-test"
+ROUTER_MATRIX_PROMPT_SIGNAL_SENTINEL = "ROUTER_MATRIX_PROMPT_SIGNAL_OK"
+ROUTER_MATRIX_XCODE_HOST_SENTINEL = "ROUTER_MATRIX_XCODE_HOST_OK"
+ROUTER_MATRIX_WORKSPACE_FILE_SENTINEL = "ROUTER_MATRIX_WORKSPACE_FILE_OK"
+ROUTER_MATRIX_WORKSPACE_EXTENSION_SENTINEL = "ROUTER_MATRIX_WORKSPACE_EXTENSION_OK"
+ROUTER_MATRIX_DOWNSTREAM_ROUTE_SENTINEL = "ROUTER_MATRIX_DOWNSTREAM_ROUTE_OK"
+ROUTER_MATRIX_FOCUSED_SUPPRESS_SENTINEL = "ROUTER_MATRIX_FOCUSED_SUPPRESS_OK"
+ROUTER_MATRIX_NON_MATCHING_HOST_SENTINEL = "ROUTER_MATRIX_NON_MATCHING_HOST_OK"
 APPLE_MCP_MEMORY_SERVER = "memory"
 APPLE_MCP_MEMORY_TOOL = "memory__create_entities"
 APPLE_MCP_MEMORY_SENTINEL = "APPLE_MCP_SENTINEL_73"
@@ -212,6 +221,17 @@ class ToolProof:
 
     session_id: str
     call_id: str
+    transcript: str
+
+
+@dataclass(frozen=True)
+class RouterMatrixCaseProof:
+    """Live proof result for one router-selection matrix case."""
+
+    name: str
+    session_id: str
+    sentinel: str
+    expected_route: bool
     transcript: str
 
 
@@ -440,6 +460,7 @@ def write_agent_config(
     *,
     apple_mcp_servers: dict[str, dict[str, Any]] | None = None,
     mcp_env_overrides: dict[str, dict[str, str]] | None = None,
+    router_selection_host_scope: str | None = None,
 ) -> None:
     """Write the Omnigent harness config into the copied bundle root."""
     mcp_tools_block = ""
@@ -447,6 +468,11 @@ def write_agent_config(
         mcp_tools_block = _mcp_tools_yaml(
             apple_mcp_servers,
             env_overrides=mcp_env_overrides or {},
+        )
+    router_selection_config = ""
+    if router_selection_host_scope is not None:
+        router_selection_config = (
+            f"    router_selection_host_scope: {_yaml_string(router_selection_host_scope)}\n"
         )
     (agent_dir / "config.yaml").write_text(
         f"""
@@ -460,6 +486,7 @@ executor:
   type: omnigent
   config:
     harness: codex
+{router_selection_config.rstrip()}
 os_env:
   type: caller_process
   cwd: .
@@ -633,6 +660,153 @@ def run_live_runner_proof(agent_dir: Path, codex_path: Path) -> str:
     if transcript.find(EXPECTED_ROUTE) > transcript.find("GRAPH_OK"):
         raise SystemExit("GRAPH_OK appeared before the route evidence block.")
     return transcript
+
+
+def run_live_router_matrix_proof(agent_dir: Path, codex_path: Path) -> list[RouterMatrixCaseProof]:
+    """Prove router-selection matrix behavior through stock Codex."""
+    proofs: list[RouterMatrixCaseProof] = []
+    marker_path = agent_dir / "Package.swift"
+    extension_path = agent_dir / "RouterMatrixProof.xcodeproj"
+
+    cases = [
+        {
+            "name": "prompt-signal",
+            "prompt": (
+                "Router matrix prompt-signal proof for a SwiftUI branch. "
+                f"Reply exactly {ROUTER_MATRIX_PROMPT_SIGNAL_SENTINEL}."
+            ),
+            "sentinel": ROUTER_MATRIX_PROMPT_SIGNAL_SENTINEL,
+            "expected_route": True,
+            "host_scope": "desktop",
+        },
+        {
+            "name": "xcode-host-scope",
+            "prompt": (
+                "Router matrix xcode host-scope proof for a SwiftUI branch. "
+                f"Reply exactly {ROUTER_MATRIX_XCODE_HOST_SENTINEL}."
+            ),
+            "sentinel": ROUTER_MATRIX_XCODE_HOST_SENTINEL,
+            "expected_route": True,
+            "host_scope": "xcode",
+        },
+        {
+            "name": "workspace-file",
+            "prompt": (
+                "Router matrix workspace-file proof. "
+                f"Reply exactly {ROUTER_MATRIX_WORKSPACE_FILE_SENTINEL}."
+            ),
+            "sentinel": ROUTER_MATRIX_WORKSPACE_FILE_SENTINEL,
+            "expected_route": True,
+            "host_scope": "desktop",
+            "before": lambda: marker_path.write_text(
+                "// router matrix marker\n", encoding="utf-8"
+            ),
+            "after": lambda: marker_path.unlink(missing_ok=True),
+        },
+        {
+            "name": "workspace-extension",
+            "prompt": (
+                "Router matrix workspace-extension proof. "
+                f"Reply exactly {ROUTER_MATRIX_WORKSPACE_EXTENSION_SENTINEL}."
+            ),
+            "sentinel": ROUTER_MATRIX_WORKSPACE_EXTENSION_SENTINEL,
+            "expected_route": True,
+            "host_scope": "desktop",
+            "before": lambda: extension_path.mkdir(exist_ok=True),
+            "after": lambda: shutil.rmtree(extension_path, ignore_errors=True),
+        },
+        {
+            "name": "explicit-downstream-route",
+            "prompt": (
+                f"${ROUTER_MATRIX_REVIEW_OWNER} review this iOS branch diff. "
+                f"Reply exactly {ROUTER_MATRIX_DOWNSTREAM_ROUTE_SENTINEL}."
+            ),
+            "sentinel": ROUTER_MATRIX_DOWNSTREAM_ROUTE_SENTINEL,
+            "expected_route": True,
+            "host_scope": "desktop",
+        },
+        {
+            "name": "focused-specialist-suppression",
+            "prompt": (
+                f"${ROUTER_MATRIX_FOCUSED_OWNER} stress test this iOS architecture decision. "
+                f"Reply exactly {ROUTER_MATRIX_FOCUSED_SUPPRESS_SENTINEL}."
+            ),
+            "sentinel": ROUTER_MATRIX_FOCUSED_SUPPRESS_SENTINEL,
+            "expected_route": False,
+            "host_scope": "desktop",
+        },
+        {
+            "name": "non-matching-host-scope",
+            "prompt": (
+                "Router matrix non-matching host proof for a SwiftUI branch. "
+                f"Reply exactly {ROUTER_MATRIX_NON_MATCHING_HOST_SENTINEL}."
+            ),
+            "sentinel": ROUTER_MATRIX_NON_MATCHING_HOST_SENTINEL,
+            "expected_route": False,
+            "host_scope": "server",
+        },
+    ]
+
+    for case in cases:
+        before = case.get("before")
+        after = case.get("after")
+        if callable(before):
+            before()
+        try:
+            write_agent_config(
+                agent_dir,
+                router_selection_host_scope=str(case["host_scope"]),
+            )
+            run = asyncio_run_session_query(
+                agent_dir=agent_dir,
+                codex_path=codex_path,
+                prompt=str(case["prompt"]),
+            )
+        finally:
+            if callable(after):
+                after()
+
+        proof = RouterMatrixCaseProof(
+            name=str(case["name"]),
+            session_id=run.session_id,
+            sentinel=str(case["sentinel"]),
+            expected_route=bool(case["expected_route"]),
+            transcript=run.text.strip(),
+        )
+        validate_router_matrix_case(proof)
+        proofs.append(proof)
+
+    write_agent_config(agent_dir)
+    return proofs
+
+
+def validate_router_matrix_case(proof: RouterMatrixCaseProof) -> None:
+    """Validate one router-selection matrix proof transcript."""
+    transcript = proof.transcript
+    if proof.sentinel not in transcript:
+        raise SystemExit(
+            f"Router matrix case {proof.name!r} missed sentinel {proof.sentinel!r}. "
+            f"Transcript:\n{transcript}"
+        )
+    route_index = transcript.find(EXPECTED_ROUTE)
+    sentinel_index = transcript.find(proof.sentinel)
+    if proof.expected_route:
+        if not transcript.startswith(EXPECTED_ROUTE):
+            raise SystemExit(
+                f"Router matrix case {proof.name!r} did not start with route block.\n"
+                f"Expected prefix:\n{EXPECTED_ROUTE}\n\nActual:\n{transcript[:1000]}"
+            )
+        if route_index > sentinel_index:
+            raise SystemExit(
+                f"Router matrix case {proof.name!r} returned sentinel before route evidence."
+            )
+        return
+
+    if route_index != -1:
+        raise SystemExit(
+            f"Router matrix case {proof.name!r} unexpectedly emitted route evidence. "
+            f"Transcript:\n{transcript}"
+        )
 
 
 async def _run_session_query(
@@ -2879,6 +3053,7 @@ def parse_args() -> argparse.Namespace:
         "--proof",
         choices=(
             "graph",
+            "router-matrix",
             "tool-plane",
             "mcp-tools",
             "apple-mcp",
@@ -2899,6 +3074,8 @@ def parse_args() -> argparse.Namespace:
         default="graph",
         help=(
             "Proof gate to run. Defaults to the existing graph proof. "
+            "'router-matrix' proves the manifest router-selection matrix "
+            "through the live stock-Codex session/runner path; "
             "'mcp-tools' is accepted as an alias for 'tool-plane'; "
             "'apple-mcp' proves memory, 'apple-mcp-sosumi' proves sosumi, "
             "'apple-docs-cli' proves the Sosumi CLI Apple-docs adapter, "
@@ -3310,6 +3487,26 @@ def main() -> int:
                 "emitted route block first"
             )
             print("ASSERTION: stock Codex read a bundled Apple reference through Omnigent")
+        if proof in {"router-matrix", "all"}:
+            matrix_proofs = run_live_proof_step(
+                "router-matrix",
+                timeout_seconds=args.live_proof_timeout,
+                action=lambda: run_live_router_matrix_proof(agent_dir, codex_path),
+            )
+            for case_proof in matrix_proofs:
+                print(f"router_matrix_case={case_proof.name}")
+                print(f"router_matrix_session_id={case_proof.session_id}")
+                print(f"router_matrix_expected_route={case_proof.expected_route}")
+                print(f"router_matrix_sentinel={case_proof.sentinel}")
+                print(f"router_matrix_transcript_preview={case_proof.transcript[:500]!r}")
+            print(
+                "ASSERTION: stock Codex preserved manifest routerSelection "
+                "positive route evidence through Omnigent"
+            )
+            print(
+                "ASSERTION: stock Codex suppressed manifest routerSelection "
+                "for focused explicit skills and non-matching host scopes"
+            )
         if proof in {"tool-plane", "all"}:
             tool_proof = run_live_proof_step(
                 "tool-plane",

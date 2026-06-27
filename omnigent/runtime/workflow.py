@@ -1274,6 +1274,9 @@ def _build_codex_spawn_env(
     on the Omnigent server directly (they propagate to the subprocess
     through normal env inheritance — the wrap's per-spawn
     overrides only override, they don't filter).
+    ``executor.config.router_selection_host_scope`` is an exception because
+    it is Omnigent-owned adapter policy used to prove and constrain bundled
+    manifest routing around stock Codex.
 
     :param spec: The agent spec.
     :param workdir: The bundle's on-disk path (extracted by the
@@ -1313,6 +1316,11 @@ def _build_codex_spawn_env(
         env["HARNESS_CODEX_AGENT_NAME"] = spec.name
     if workdir is not None:
         env["HARNESS_CODEX_BUNDLE_DIR"] = str(workdir)
+    router_selection_host_scope = spec.executor.config.get("router_selection_host_scope")
+    if router_selection_host_scope is None:
+        router_selection_host_scope = spec.executor.config.get("routerSelectionHostScope")
+    if router_selection_host_scope is not None:
+        env["HARNESS_CODEX_ROUTER_SELECTION_HOST_SCOPE"] = str(router_selection_host_scope)
     os_env_payload = _serialize_os_env(spec.os_env)
     if os_env_payload is not None:
         env["HARNESS_CODEX_OS_ENV"] = os_env_payload

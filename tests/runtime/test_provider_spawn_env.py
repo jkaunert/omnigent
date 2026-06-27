@@ -290,6 +290,19 @@ def test_codex_uses_openai_global_default(config_home: Path) -> None:
     assert env["HARNESS_CODEX_WIRE_API"] == "responses"
 
 
+def test_codex_threads_router_selection_host_scope_from_executor_config(
+    config_home: Path,
+) -> None:
+    """Codex spawn env carries Omnigent router-selection host scope."""
+    _write_config(config_home, {})
+    spec = _make_spec(harness="codex")
+    spec.executor.config["router_selection_host_scope"] = "xcode"
+
+    env = _build_codex_spawn_env(spec, workdir=None)
+
+    assert env["HARNESS_CODEX_ROUTER_SELECTION_HOST_SCOPE"] == "xcode"
+
+
 def test_codex_falls_back_to_first_available_openai_credential(
     config_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
