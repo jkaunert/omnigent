@@ -88,6 +88,7 @@ The current spike proves the first narrow adapter behavior:
 | XcodeBuildMCP simulator run/launch through a CLI adapter | `replacement-ready` for bounded iOS simulator build/install/launch | `omnigent.adapters.xcodebuild_cli.XcodeBuildCliAdapterPolicy` installs a generated `xcodebuildmcp_simulator_build_run` Python dynamic tool when the Apple bundle MCP manifest declares `XcodeBuildMCP`; the policy keeps the existing MCP config unchanged, constrains the tool to `.xcodeproj` paths, iOS simulator names, temp DerivedData roots, and `extra_args: ["-quiet"]`, and passes full-feature CLI env overrides: `XCODEBUILDMCP_ENABLED_WORKFLOWS=coverage,debugging,device,doctor,macos,project-discovery,project-scaffolding,session-management,simulator-management,simulator,swift-package,ui-automation,utilities,workflow-discovery,xcode-ide`, `XCODEBUILDMCP_EXPERIMENTAL_WORKFLOW_DISCOVERY=true`, and `XCODEBUILDMCP_DEBUG=true`. `scripts/prove_stock_codex_replacement.py --proof apple-xcodebuild-cli-run --codex-path /opt/homebrew/bin/codex --live-proof-timeout 300` re-proved stock Codex `0.142.2` invoked that generated tool through normal Omnigent `dynamicTools` with the full-feature env; persisted session `conv_aa44681fbc124422b92a3f02e1d84c96` included function call `call_v8VfWnpylRGiJMUR5FomGwXo`, CLI output containing `Build succeeded`, `Build & Run complete`, and `Bundle ID: ai.omnigent.ios`, and the model replied `XCODEBUILDMCP_CLI_RUN_OK`. This proves the bounded CLI-adapter run/launch path, not XcodeBuildMCP MCP run parity, UI automation, device execution, or a clean-host install. |
 | XcodeBuildMCP simulator tests through a CLI adapter | `replacement-ready` for bounded iOS simulator tests | `omnigent.adapters.xcodebuild_cli.XcodeBuildCliAdapterPolicy` now also installs a generated `xcodebuildmcp_simulator_test` Python dynamic tool for the simulator test boundary, with the same full-feature CLI env overrides that enable non-default workflows and experimental workflow discovery. Direct `xcodebuildmcp simulator test` with those env overrides found and passed 9 Omnigent iOS tests. `scripts/prove_stock_codex_replacement.py --proof apple-xcodebuild-cli-test --codex-path /opt/homebrew/bin/codex --live-proof-timeout 360` then proved stock Codex `0.142.2` invoked the generated test tool through normal Omnigent `dynamicTools`; persisted session `conv_f80892556ef54e96849b1de8481a1518` included function call `call_7Dzms7WmGDach013GZmEcJgC`, CLI output containing `9 tests passed`, `0 failed`, and `0 skipped`, and the model replied `XCODEBUILDMCP_CLI_TEST_OK`. This proves bounded simulator tests through the CLI adapter, not UI automation, device tests, or XcodeBuildMCP MCP test parity. |
 | XcodeBuildMCP simulator screenshot through a CLI adapter | `replacement-ready` for bounded non-mutating iOS simulator screenshot after launch | `omnigent.adapters.xcodebuild_cli.XcodeBuildCliAdapterPolicy` now also installs a generated `xcodebuildmcp_simulator_screenshot` Python dynamic tool for the UI screenshot boundary, with the same full-feature CLI env overrides. The tool runs `xcodebuildmcp simulator build-and-run --output json`, extracts the launched simulator id, runs `xcodebuildmcp ui-automation screenshot --output json`, verifies the screenshot file exists, and returns a compact JSON summary. `scripts/prove_stock_codex_replacement.py --proof apple-xcodebuild-cli-screenshot --codex-path /opt/homebrew/bin/codex --live-proof-timeout 360` proved stock Codex `0.142.2` invoked the generated screenshot tool through normal Omnigent `dynamicTools`; persisted session `conv_f65409a009804370a00b35e00d26d727` included function call `call_wW5AEWaSRCFkxUy7m2z6LuoU`, output containing `"buildStatus": "SUCCEEDED"`, `"screenshotStatus": "SUCCEEDED"`, `"bundleId": "ai.omnigent.ios"`, `"format": "image/jpeg"`, `"width": 368`, and `"height": 800`, and the model replied `XCODEBUILDMCP_CLI_SCREENSHOT_OK`. This proves bounded screenshot capture through the CLI adapter, not semantic UI hierarchy snapshots, gestures, logs, device execution, or Xcode IDE bridge tools. |
+| XcodeBuildMCP simulator runtime logs through a CLI adapter | `replacement-ready` for bounded iOS simulator launch log observation | `omnigent.adapters.xcodebuild_cli.XcodeBuildCliAdapterPolicy` now installs a generated `xcodebuildmcp_simulator_runtime_logs` Python dynamic tool for the runtime-observation boundary, with the same full-feature CLI env overrides. The tool runs `xcodebuildmcp simulator build-and-run --output json`, extracts `runtimeLogPath` and `osLogPath`, verifies the files exist, waits briefly for log content to flush, and returns compact JSON with build, launch, runtime-log, and OS-log statuses plus paths, line counts, and excerpts. `DEVELOPER_DIR=/Applications/Xcode-27.0.0-Beta.2.app/Contents/Developer uvx --from . python scripts/prove_stock_codex_replacement.py --proof apple-xcodebuild-cli-runtime-logs --codex-path /opt/homebrew/bin/codex --live-proof-timeout 480` proved stock Codex `0.142.2` invoked that generated tool through normal Omnigent `dynamicTools`; persisted session `conv_dd977e23d864414bbe2778912bff3274` included function call `call_vnSAHZBr9fRznS5S0NoK8uBs`, output containing `"buildStatus": "SUCCEEDED"`, `"launchStatus": "SUCCEEDED"`, `"runtimeLogStatus": "SUCCEEDED"`, `"osLogStatus": "SUCCEEDED"`, `"bundleId": "ai.omnigent.ios"`, a runtime log excerpt including `UIAccessibilityLoaderWebShared`, an OS log excerpt including `getpwuid_r did not find a match for uid 501`, and the model replied `XCODEBUILDMCP_CLI_RUNTIME_LOGS_OK`. This proves bounded launch log observation through the CLI adapter, not debugger attach, gestures, device logs, streaming log follow, XcodeBuildMCP MCP run parity, or Xcode IDE bridge tools. |
 | XcodeBuildMCP semantic UI snapshot through a CLI adapter | `replacement-ready` for bounded Xcode 27 Beta 2 simulator hierarchy snapshots with a source-provisioned patched AXe path | `omnigent.adapters.xcodebuild_cli.XcodeBuildCliAdapterPolicy` now installs a generated `xcodebuildmcp_simulator_snapshot_ui` Python dynamic tool for the semantic UI hierarchy boundary. The tool strips ambient `XCODEBUILDMCP_AXE_PATH`, maps an explicit `OMNIGENT_XCODEBUILDMCP_AXE_PATH` into the generated CLI subprocess env, uses a per-call isolated XcodeBuildMCP socket, runs `xcodebuildmcp simulator build-and-run --output json`, extracts the simulator id, runs `xcodebuildmcp ui-automation snapshot-ui --output json`, validates `type: runtime-snapshot`, positive `count`, and non-empty `targets`, then stops the isolated daemon best-effort. The patched AXe compatibility source is pinned to `jkaunert/AXe@9051a6e13fdd8e0789f734a11fc1e71f48def916`; upstream PR [cameroncooke/AXe#60](https://github.com/cameroncooke/AXe/pull/60) tracks absorption or supersession. That fork commit includes the Xcode 27 `SharedFrameworks` lookup fix plus the Xcode 27 deployment-target patch needed for IDB/AXe source builds under Xcode 27 Beta 2. `scripts/provision_xcode27_axe.py` builds, installs, and verifies the AXe runtime payload under `~/.cache/omnigent/axe/payloads/9051a6e13fdd8e0789f734a11fc1e71f48def916`, including the executable, sibling `Frameworks`, and both legacy and Xcode 27 `SimulatorKit` lookup markers in `FBControlCore`; source builds default to ad hoc signing (`-`). `DEVELOPER_DIR=/Applications/Xcode-27.0.0-Beta.2.app/Contents/Developer uvx --from . python scripts/provision_xcode27_axe.py --force --json` proved the default remote source-provisioning path. A stricter clean-profile run then used an empty temporary `HOME`, `UV_CACHE_DIR`, and AXe cache root, with only `CODEX_HOME=/Users/joshuakaunert/.codex` preserved for stock-Codex auth, and proved source provisioning from an empty cache plus the stock-Codex snapshot path. The clean-profile stock-Codex proof persisted session `conv_552d6c8d420a4e2fb709aa5cb980c922` with function call `call_kMObyDaKD0vtbW2vhsDnfIJI`; output contained `"buildStatus": "SUCCEEDED"`, `"snapshotStatus": "SUCCEEDED"`, `"bundleId": "ai.omnigent.ios"`, `"type": "runtime-snapshot"`, `"count": 16`, `screenHash: "0d3ho2y"`, and actionable refs including `e14|typeText|text-field||http://localhost:6767|` and `e15|tap|button|Connect||`; the model replied `XCODEBUILDMCP_CLI_SNAPSHOT_UI_OK`. This proves bounded semantic UI hierarchy capture through the CLI adapter plus source-provisioned patched AXe on this host, including an empty-cache profile run; it does not prove gestures, logs, device execution, upstream AXe direct parity, a different machine, or Xcode IDE bridge tools. |
 
 This does not yet prove full Codex-fork replacement.
@@ -194,6 +195,16 @@ uvx --from . python scripts/prove_stock_codex_replacement.py \
   --live-proof-timeout 360
 ```
 
+Apple XcodeBuildMCP simulator runtime logs CLI adapter proof:
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode-27.0.0-Beta.2.app/Contents/Developer \
+uvx --from . python scripts/prove_stock_codex_replacement.py \
+  --proof apple-xcodebuild-cli-runtime-logs \
+  --codex-path /opt/homebrew/bin/codex \
+  --live-proof-timeout 480
+```
+
 Provision the pinned Xcode 27-compatible AXe payload from source:
 
 ```bash
@@ -291,11 +302,15 @@ through Omnigent `dynamicTools`, and the CLI reported `9 tests passed, 0 failed,
 The bounded simulator screenshot adapter proof also passed on 2026-06-26:
 stock Codex invoked `xcodebuildmcp_simulator_screenshot` through Omnigent
 `dynamicTools`, and the CLI returned a successful JPEG screenshot summary with
-positive dimensions. The semantic `snapshot-ui` surface is now separately
-proven through a generated CLI adapter when the proof supplies an explicit
-patched AXe binary. That proof uses command-scoped `DEVELOPER_DIR` and
-`OMNIGENT_XCODEBUILDMCP_AXE_PATH`; it does not require global `xcode-select`
-mutation, Xcode bundle mutation, or Homebrew Cellar mutation.
+positive dimensions. The bounded simulator runtime-log adapter proof passed on
+2026-06-27: stock Codex invoked `xcodebuildmcp_simulator_runtime_logs` through
+Omnigent `dynamicTools`, and the CLI returned successful build, launch,
+runtime-log, and OS-log statuses with compact log excerpts. The semantic
+`snapshot-ui` surface is now separately proven through a generated CLI adapter
+when the proof supplies an explicit patched AXe binary. That proof uses
+command-scoped `DEVELOPER_DIR` and `OMNIGENT_XCODEBUILDMCP_AXE_PATH`; it does
+not require global `xcode-select` mutation, Xcode bundle mutation, or Homebrew
+Cellar mutation.
 
 ## Semantic Snapshot Resolution
 
@@ -386,11 +401,11 @@ Run these in order unless a later gate becomes cheaper due to new evidence.
      `DEVELOPER_DIR`; do not rely on global `xcode-select`, Xcode bundle
      mutation, or Homebrew Cellar mutation.
 
-2. XcodeBuildMCP logs or runtime observation boundary
-   - Add a narrow, non-mutating runtime-observation proof only after deciding
-     whether screenshot-level UI evidence is sufficient for the replacement
-     contract. Keep runtime logs, OSLog, debugger attach, gestures, and device
-     checks separate.
+2. XcodeBuildMCP gesture/interaction boundary
+   - Add a narrow UI-action proof only after preserving the current screenshot,
+     runtime-log, and semantic snapshot evidence. Keep tap/type/drag, debugger
+     attach, device logs, and streaming log follow as separate replacement
+     surfaces.
 
 3. Expand the Apple docs adapter contract only if needed
    - The current adapter/policy proof covers the documented `fetch-apple-docs`
