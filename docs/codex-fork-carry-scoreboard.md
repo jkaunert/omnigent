@@ -59,8 +59,8 @@ real `CODEX_HOME` for authentication. The next gate should move from
 carry-parity to product operations:
 
 - prove clean Codex-auth onboarding if first-run auth is in scope;
-- run a representative end-to-end Apple workflow smoke through Omnigent plus
-  stock Codex; or
+- broaden the Apple workflow smoke to release/readiness/review only if product
+  cutover requires that higher-fidelity path; or
 - run a default-path cutover rehearsal with documented fallback steps.
 
 If ChatGPT mobile/app-server remote resume compatibility becomes product scope

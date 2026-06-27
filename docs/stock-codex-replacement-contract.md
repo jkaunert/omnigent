@@ -105,6 +105,7 @@ The current spike proves the first narrow adapter behavior:
 | XcodeBuildMCP semantic UI snapshot through a CLI adapter | `replacement-ready` for bounded Xcode 27 Beta 2 simulator hierarchy snapshots with a source-provisioned patched AXe path | `omnigent.adapters.xcodebuild_cli.XcodeBuildCliAdapterPolicy` now installs a generated `xcodebuildmcp_simulator_snapshot_ui` Python dynamic tool for the semantic UI hierarchy boundary. The tool strips ambient `XCODEBUILDMCP_AXE_PATH`, maps an explicit `OMNIGENT_XCODEBUILDMCP_AXE_PATH` into the generated CLI subprocess env, uses a per-call isolated XcodeBuildMCP socket, runs `xcodebuildmcp simulator build-and-run --output json`, extracts the simulator id, runs `xcodebuildmcp ui-automation snapshot-ui --output json`, validates `type: runtime-snapshot`, positive `count`, and non-empty `targets`, then stops the isolated daemon best-effort. The patched AXe compatibility source is pinned to `jkaunert/AXe@9051a6e13fdd8e0789f734a11fc1e71f48def916`; upstream PR [cameroncooke/AXe#60](https://github.com/cameroncooke/AXe/pull/60) tracks absorption or supersession. That fork commit includes the Xcode 27 `SharedFrameworks` lookup fix plus the Xcode 27 deployment-target patch needed for IDB/AXe source builds under Xcode 27 Beta 2. `scripts/provision_xcode27_axe.py` builds, installs, and verifies the AXe runtime payload under `~/.cache/omnigent/axe/payloads/9051a6e13fdd8e0789f734a11fc1e71f48def916`, including the executable, sibling `Frameworks`, and both legacy and Xcode 27 `SimulatorKit` lookup markers in `FBControlCore`; source builds default to ad hoc signing (`-`). `DEVELOPER_DIR=/Applications/Xcode-27.0.0-Beta.2.app/Contents/Developer uvx --from . python scripts/provision_xcode27_axe.py --force --json` proved the default remote source-provisioning path. A stricter clean-profile run then used an empty temporary `HOME`, `UV_CACHE_DIR`, and AXe cache root, with only `CODEX_HOME=/Users/joshuakaunert/.codex` preserved for stock-Codex auth, and proved source provisioning from an empty cache plus the stock-Codex snapshot path. The clean-profile stock-Codex proof persisted session `conv_552d6c8d420a4e2fb709aa5cb980c922` with function call `call_kMObyDaKD0vtbW2vhsDnfIJI`; output contained `"buildStatus": "SUCCEEDED"`, `"snapshotStatus": "SUCCEEDED"`, `"bundleId": "ai.omnigent.ios"`, `"type": "runtime-snapshot"`, `"count": 16`, `screenHash: "0d3ho2y"`, and actionable refs including `e14|typeText|text-field||http://localhost:6767|` and `e15|tap|button|Connect||`; the model replied `XCODEBUILDMCP_CLI_SNAPSHOT_UI_OK`. This proves bounded semantic UI hierarchy capture through the CLI adapter plus source-provisioned patched AXe on this host, including an empty-cache profile run; it does not prove gestures, logs, device execution, upstream AXe direct parity, a different machine, or Xcode IDE bridge tools. |
 | XcodeBuildMCP type-text interaction through a CLI adapter | `replacement-ready` for bounded iOS simulator text entry into a discovered text-field ref | `omnigent.adapters.xcodebuild_cli.XcodeBuildCliAdapterPolicy` now installs a generated `xcodebuildmcp_simulator_type_text` Python dynamic tool for the first UI interaction boundary. The tool strips ambient `XCODEBUILDMCP_AXE_PATH`, maps an explicit `OMNIGENT_XCODEBUILDMCP_AXE_PATH`, uses a per-call isolated XcodeBuildMCP socket, runs `xcodebuildmcp simulator build-and-run --output json`, captures a semantic snapshot, selects the first target that explicitly advertises `typeText` on a `text-field`, runs `xcodebuildmcp ui-automation type-text --replace-existing`, then verifies the sentinel through `xcodebuildmcp ui-automation wait-for-ui --predicate textContains`. `DEVELOPER_DIR=/Applications/Xcode-27.0.0-Beta.2.app/Contents/Developer uvx --from . python scripts/prove_stock_codex_replacement.py --proof apple-xcodebuild-cli-type-text --codex-path /opt/homebrew/bin/codex --live-proof-timeout 480 --xcodebuildmcp-axe-path ~/.cache/omnigent/axe/payloads/9051a6e13fdd8e0789f734a11fc1e71f48def916/axe` proved stock Codex `0.142.2` invoked that generated tool through normal Omnigent `dynamicTools`; persisted session `conv_afea5726821741c6a2cfbe255d56d41e` included function call `call_D9IzTX3TfyN6OUgQOd8eopRx`, output containing `"buildStatus": "SUCCEEDED"`, `"typeTextStatus": "SUCCEEDED"`, `"waitStatus": "SUCCEEDED"`, `"bundleId": "ai.omnigent.ios"`, `"elementRef": "e14"`, `beforeTarget` with `http://localhost:6767`, and `afterTargets` with `http://localhost:6767/gesture-proof`; the model replied `XCODEBUILDMCP_CLI_TYPE_TEXT_OK`. This proves bounded text-entry interaction through the CLI adapter, not tap, drag, multi-step navigation, debugger attach, device execution, streaming log follow, XcodeBuildMCP MCP parity, or Xcode IDE bridge tools. |
 | XcodeBuildMCP tap interaction through a CLI adapter | `replacement-ready` for bounded iOS simulator tap on a discovered button ref after deterministic app-state reset | `omnigent.adapters.xcodebuild_cli.XcodeBuildCliAdapterPolicy` now installs a generated `xcodebuildmcp_simulator_tap` Python dynamic tool for the first tap boundary. The tool strips ambient `XCODEBUILDMCP_AXE_PATH`, maps an explicit `OMNIGENT_XCODEBUILDMCP_AXE_PATH`, uses a per-call isolated XcodeBuildMCP socket, performs an initial `xcodebuildmcp simulator build-and-run --output json` to discover the simulator and bundle id, clears persisted app state with command-scoped `xcrun simctl uninstall`, launches a fresh install, captures a semantic snapshot, types `http://localhost:6767/gesture-proof` into the discovered text field, selects only the discovered `tap` action on the `Connect` button, taps it, then waits for a settled post-tap snapshot whose text field has normalized back to `http://localhost:6767`. `DEVELOPER_DIR=/Applications/Xcode-27.0.0-Beta.2.app/Contents/Developer uvx --from . python scripts/prove_stock_codex_replacement.py --proof apple-xcodebuild-cli-tap --codex-path /opt/homebrew/bin/codex --live-proof-timeout 480 --xcodebuildmcp-axe-path ~/.cache/omnigent/axe/payloads/9051a6e13fdd8e0789f734a11fc1e71f48def916/axe` proved stock Codex `0.142.2` invoked that generated tool through normal Omnigent `dynamicTools`; persisted session `conv_a7d66fc64df148edbe616855fe0de7fd` included function call `call_DCsJXv24ga2bZYGrUaKz3Nef`, output containing `"preResetBuildStatus": "SUCCEEDED"`, `"resetStatus": "SUCCEEDED"`, `"buildStatus": "SUCCEEDED"`, `"typeTextStatus": "SUCCEEDED"`, `"tapStatus": "SUCCEEDED"`, `"settledStatus": "SUCCEEDED"`, `"bundleId": "ai.omnigent.ios"`, `afterTapTarget` with `http://localhost:6767`, and `afterTapScreenHash: "13s4ko7"`; the model replied `XCODEBUILDMCP_CLI_TAP_OK`. This proves one bounded tap interaction through the CLI adapter, not drag, multi-step navigation, debugger attach, device execution, streaming log follow, XcodeBuildMCP MCP parity, or Xcode IDE bridge tools. |
+| Representative Apple workflow smoke through Omnigent plus stock Codex | `replacement-ready` for a routed workflow that uses Apple docs plus read-only Xcode discovery in one stock-Codex session | `scripts/prove_stock_codex_replacement.py --proof apple-workflow-smoke --codex-path /opt/homebrew/bin/codex --live-proof-timeout 240` proved stock Codex `0.142.2` began with the deterministic Apple route block, invoked Omnigent's generated `fetch_apple_docs` tool for `https://developer.apple.com/documentation/swift/string`, then invoked read-only `XcodeBuildMCP__discover_projs` against the Omnigent checkout. Persisted session `conv_6a8bb2b3fa6c4dc182d79ed961581e13` included Apple-docs call `call_YhQNwu4vF4gs4nDZJcTRbNfp` with output containing `title: String`, source URL, and timestamp `2026-06-27T22:39:20.021Z`, plus XcodeBuildMCP call `call_0CgVXm1tP9O2Tcua92bYpovU` with output finding `ap-web/ios/Omnigent.xcodeproj`; the model replied `APPLE_WORKFLOW_SMOKE_OK`. The proof rejects build, run, test, launch, simulator boot/open, and device tools. This proves one representative routed workflow surface, not full release-readiness, branch-diff review, clean-auth onboarding, default-path cutover, or broader XcodeBuildMCP workflow parity. |
 
 This proves the scoped carry-parity claims above, but not full operational
 cutover. A clean install/runtime rehearsal is still required before replacing
@@ -327,6 +328,15 @@ uvx --from . python scripts/prove_stock_codex_replacement.py \
   --xcodebuildmcp-axe-path "$AXE_PATH"
 ```
 
+Representative Apple workflow smoke proof:
+
+```bash
+uvx --from . python scripts/prove_stock_codex_replacement.py \
+  --proof apple-workflow-smoke \
+  --codex-path /opt/homebrew/bin/codex \
+  --live-proof-timeout 240
+```
+
 Cutover-ready aggregate proof:
 
 ```bash
@@ -436,6 +446,17 @@ The temporary clean-profile tree was 1.3 GB after the run and was removed after
 evidence capture. This closes local clean-profile aggregate replacement proof
 for the current host, not cross-machine install portability and not a clean
 Codex-auth onboarding flow.
+
+Representative Apple workflow smoke status on 2026-06-27: `--proof
+apple-workflow-smoke` passed in 47.3s with stock Codex `0.142.2`. The session
+`conv_6a8bb2b3fa6c4dc182d79ed961581e13` started with the expected Apple route
+block, called `fetch_apple_docs` as `call_YhQNwu4vF4gs4nDZJcTRbNfp`, then called
+read-only `XcodeBuildMCP__discover_projs` as
+`call_0CgVXm1tP9O2Tcua92bYpovU`. The Apple docs result returned `title: String`,
+the Swift `String` source URL, and timestamp `2026-06-27T22:39:20.021Z`; the
+XcodeBuildMCP result found `ap-web/ios/Omnigent.xcodeproj`; the model replied
+`APPLE_WORKFLOW_SMOKE_OK`. This closes the first representative routed workflow
+smoke, not full release/readiness/review parity and not default-path cutover.
 
 Legacy aggregate status on 2026-06-25: `graph`, `tool-plane`, and
 `apple-mcp-memory` passed under `--proof all`; `apple-mcp-sosumi` timed out at
@@ -614,10 +635,11 @@ Run these in order unless a later gate becomes cheaper due to new evidence.
      needed if the product requires first-run authentication or a clean
      `CODEX_HOME` onboarding path.
 
-7. End-to-end Apple workflow smoke
-   - Run a representative Apple workflow request through Omnigent plus stock
-     Codex and compare the visible route, tool availability, and output contract
-     against the current forked path.
+7. Broader end-to-end Apple workflow smoke
+   - The first representative routed workflow is green for Apple docs plus
+     read-only Xcode project discovery in one stock-Codex session. Broaden this
+     only if product cutover requires a higher-fidelity release-readiness,
+     branch-diff review, or multi-tool Apple workflow path.
 
 8. Default-path cutover rehearsal
    - The clean-profile aggregate proof now proves the package/runtime contract

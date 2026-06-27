@@ -200,6 +200,7 @@ XCODEBUILD_CLI_TAP_SENTINELS = (
     '"tapTarget":',
     '"afterTapTarget":',
 )
+APPLE_WORKFLOW_SMOKE_SENTINEL = "APPLE_WORKFLOW_SMOKE_OK"
 RELATIVE_MARKDOWN_PATH_RE = re.compile(r"`((?:\.\.?/)[^`]+)`")
 PLUGIN_SKILL_REF_RE = re.compile(rf"\b{re.escape(PLUGIN_NAME)}:([A-Za-z0-9_.-]+)\b")
 EXPECTED_APPLE_MCP_SERVERS = frozenset({"sosumi", "memory", "XcodeBuildMCP"})
@@ -267,6 +268,18 @@ class XcodeBuildMcpRunProof:
     run_call_id: str
     transcript: str
     output_preview: str
+
+
+@dataclass(frozen=True)
+class AppleWorkflowSmokeProof:
+    """Live proof result for a representative Apple workflow smoke."""
+
+    session_id: str
+    apple_docs_call_id: str
+    xcodebuild_call_id: str
+    transcript: str
+    apple_docs_output_preview: str
+    xcodebuild_output_preview: str
 
 
 @dataclass(frozen=True)
@@ -1104,6 +1117,56 @@ def run_live_apple_docs_cli_proof(agent_dir: Path, codex_path: Path) -> AppleMcp
     joined_errors = "\n\n".join(errors)
     raise SystemExit(
         f"Apple docs CLI proof failed after {len(prompts)} attempts:\n{joined_errors}"
+    )
+
+
+def run_live_apple_workflow_smoke_proof(
+    agent_dir: Path,
+    codex_path: Path,
+    *,
+    workspace_root: Path,
+) -> AppleWorkflowSmokeProof:
+    """Run a representative routed Apple workflow with docs and project discovery."""
+    workspace = str(workspace_root)
+    docs_args = {"url": APPLE_DOCS_CLI_URL}
+    xcode_args = {"workspaceRoot": workspace, "maxDepth": 5}
+    prompts = (
+        (
+            "Representative Apple workflow smoke. After the required route block, "
+            f"call {APPLE_DOCS_CLI_TOOL} exactly once with JSON arguments "
+            f"{json.dumps(docs_args)}. Then call {APPLE_MCP_XCODEBUILD_TOOL} "
+            f"exactly once with JSON arguments {json.dumps(xcode_args)}. Do not "
+            "build, run, test, launch, mutate Xcode defaults, or call any other "
+            "tool. After both tool results are available, reply exactly "
+            f"{APPLE_WORKFLOW_SMOKE_SENTINEL}."
+        ),
+        (
+            "Apple workflow smoke: fetch the official Swift String documentation "
+            f"using {APPLE_DOCS_CLI_TOOL}, then discover local Xcode projects using "
+            f"{APPLE_MCP_XCODEBUILD_TOOL}. Use only these exact arguments: "
+            f"{APPLE_DOCS_CLI_TOOL}={json.dumps(docs_args)} and "
+            f"{APPLE_MCP_XCODEBUILD_TOOL}={json.dumps(xcode_args)}. End with "
+            f"only {APPLE_WORKFLOW_SMOKE_SENTINEL} after both tool calls finish."
+        ),
+    )
+    errors: list[str] = []
+    for attempt, prompt in enumerate(prompts, start=1):
+        run = asyncio_run_session_query(
+            agent_dir=agent_dir,
+            codex_path=codex_path,
+            prompt=prompt,
+        )
+        try:
+            return _validate_apple_workflow_smoke_run(
+                run,
+                attempt=attempt,
+                workspace_root=workspace_root,
+            )
+        except AppleWorkflowSmokeProofError as exc:
+            errors.append(str(exc))
+    joined_errors = "\n\n".join(errors)
+    raise SystemExit(
+        f"Apple workflow smoke proof failed after {len(prompts)} attempts:\n{joined_errors}"
     )
 
 
@@ -2545,6 +2608,10 @@ class XcodeBuildMcpProofAttemptError(Exception):
     """One failed XcodeBuildMCP proof attempt that can be retried."""
 
 
+class AppleWorkflowSmokeProofError(Exception):
+    """One failed representative Apple workflow smoke attempt."""
+
+
 class XcodeBuildMcpSequenceProofError(Exception):
     """A failed ordered XcodeBuildMCP tool sequence proof."""
 
@@ -2622,6 +2689,120 @@ def _validate_xcodebuild_mcp_run(
         call_id=call_id,
         transcript=transcript,
         output_preview=output_text[:500],
+    )
+
+
+def _validate_apple_workflow_smoke_run(
+    run: SessionRun,
+    *,
+    attempt: int,
+    workspace_root: Path,
+) -> AppleWorkflowSmokeProof:
+    """Validate a representative Apple workflow smoke session."""
+    transcript = run.text.strip()
+    if not transcript.startswith(EXPECTED_ROUTE):
+        raise AppleWorkflowSmokeProofError(
+            f"attempt={attempt}: transcript did not start with expected route block.\n"
+            f"Expected prefix:\n{EXPECTED_ROUTE}\n\nActual:\n{transcript[:1000]}"
+        )
+
+    disallowed_xcode_tools = {
+        "XcodeBuildMCP__build_sim",
+        "XcodeBuildMCP__build_run_sim",
+        "XcodeBuildMCP__launch_app_sim",
+        "XcodeBuildMCP__boot_sim",
+        "XcodeBuildMCP__open_sim",
+        "XcodeBuildMCP__test_sim",
+        "XcodeBuildMCP__build_device",
+        "XcodeBuildMCP__build_run_device",
+    }
+    observed_disallowed = [
+        name for name in _function_call_names(run.items) if name in disallowed_xcode_tools
+    ]
+    if observed_disallowed:
+        raise AppleWorkflowSmokeProofError(
+            f"attempt={attempt}: workflow smoke used disallowed Xcode tools: "
+            f"{observed_disallowed!r}"
+        )
+
+    docs_call = _single_indexed_call(
+        run,
+        APPLE_DOCS_CLI_TOOL,
+        error_type=AppleWorkflowSmokeProofError,
+    )
+    xcode_call = _single_indexed_call(
+        run,
+        APPLE_MCP_XCODEBUILD_TOOL,
+        error_type=AppleWorkflowSmokeProofError,
+    )
+    if docs_call[0] >= xcode_call[0]:
+        raise AppleWorkflowSmokeProofError(
+            "Apple workflow smoke calls were not in the required order: "
+            f"docs={docs_call[0]} xcodebuild={xcode_call[0]}"
+        )
+
+    docs_arguments = _function_call_arguments(docs_call[1])
+    if docs_arguments.get("url") != APPLE_DOCS_CLI_URL:
+        raise AppleWorkflowSmokeProofError(
+            f"attempt={attempt}: {APPLE_DOCS_CLI_TOOL} used unexpected url. "
+            f"expected={APPLE_DOCS_CLI_URL!r} arguments={docs_arguments!r}"
+        )
+    xcode_arguments = _function_call_arguments(xcode_call[1])
+    expected_workspace = str(workspace_root)
+    if xcode_arguments.get("workspaceRoot") != expected_workspace:
+        raise AppleWorkflowSmokeProofError(
+            f"attempt={attempt}: {APPLE_MCP_XCODEBUILD_TOOL} used unexpected "
+            f"workspaceRoot. expected={expected_workspace!r} arguments={xcode_arguments!r}"
+        )
+
+    docs_call_id = _require_call_id(
+        docs_call[1],
+        tool_name=APPLE_DOCS_CLI_TOOL,
+        error_type=AppleWorkflowSmokeProofError,
+    )
+    xcode_call_id = _require_call_id(
+        xcode_call[1],
+        tool_name=APPLE_MCP_XCODEBUILD_TOOL,
+        error_type=AppleWorkflowSmokeProofError,
+    )
+    docs_output = _function_output_for_call(
+        run.items,
+        docs_call_id,
+        error_type=AppleWorkflowSmokeProofError,
+    )
+    xcode_output = _function_output_for_call(
+        run.items,
+        xcode_call_id,
+        error_type=AppleWorkflowSmokeProofError,
+    )
+    docs_missing = [
+        sentinel for sentinel in APPLE_MCP_SOSUMI_SENTINELS if sentinel not in docs_output
+    ]
+    if docs_missing or "error" in docs_output.lower():
+        raise AppleWorkflowSmokeProofError(
+            f"attempt={attempt}: Apple docs output missed expected sentinels or "
+            f"looked erroneous. missing={docs_missing!r} output={docs_output[:1000]}"
+        )
+    xcode_missing = [
+        sentinel for sentinel in APPLE_MCP_XCODEBUILD_SENTINELS if sentinel not in xcode_output
+    ]
+    if xcode_missing:
+        raise AppleWorkflowSmokeProofError(
+            f"attempt={attempt}: XcodeBuildMCP output missed expected discovery "
+            f"sentinels. missing={xcode_missing!r} output={xcode_output[:1000]}"
+        )
+    if APPLE_WORKFLOW_SMOKE_SENTINEL not in transcript:
+        raise AppleWorkflowSmokeProofError(
+            f"attempt={attempt}: workflow smoke did not return "
+            f"{APPLE_WORKFLOW_SMOKE_SENTINEL}. Transcript:\n{transcript}"
+        )
+    return AppleWorkflowSmokeProof(
+        session_id=run.session_id,
+        apple_docs_call_id=docs_call_id,
+        xcodebuild_call_id=xcode_call_id,
+        transcript=transcript,
+        apple_docs_output_preview=docs_output[:500],
+        xcodebuild_output_preview=xcode_output[:500],
     )
 
 
@@ -2887,7 +3068,7 @@ def _single_indexed_call(
     run: SessionRun,
     tool_name: str,
     *,
-    error_type: type[XcodeBuildMcpSequenceProofError] = XcodeBuildMcpBuildProofError,
+    error_type: type[Exception] = XcodeBuildMcpBuildProofError,
 ) -> tuple[int, dict[str, Any]]:
     """Return the single expected function call and its item index."""
     calls = [
@@ -2907,7 +3088,7 @@ def _require_call_id(
     call: dict[str, Any],
     *,
     tool_name: str,
-    error_type: type[XcodeBuildMcpSequenceProofError] = XcodeBuildMcpBuildProofError,
+    error_type: type[Exception] = XcodeBuildMcpBuildProofError,
 ) -> str:
     """Return a function-call id or raise a proof error."""
     call_id = call.get("call_id")
@@ -2920,7 +3101,7 @@ def _function_output_for_call(
     items: list[dict[str, Any]],
     call_id: str,
     *,
-    error_type: type[XcodeBuildMcpSequenceProofError] = XcodeBuildMcpBuildProofError,
+    error_type: type[Exception] = XcodeBuildMcpBuildProofError,
 ) -> str:
     """Return the persisted function output for a call id."""
     outputs = [
@@ -3069,6 +3250,7 @@ def parse_args() -> argparse.Namespace:
             "apple-xcodebuild-cli-snapshot-ui",
             "apple-xcodebuild-cli-type-text",
             "apple-xcodebuild-cli-tap",
+            "apple-workflow-smoke",
             "cutover-ready",
             "all",
         ),
@@ -3096,6 +3278,8 @@ def parse_args() -> argparse.Namespace:
             "interaction through the XcodeBuildMCP CLI adapter, and "
             "'apple-xcodebuild-cli-tap' proves a bounded tap interaction "
             "through the XcodeBuildMCP CLI adapter. "
+            "'apple-workflow-smoke' runs one routed Apple workflow that uses "
+            "Apple docs plus read-only XcodeBuildMCP discovery, and "
             "'cutover-ready' runs the replacement-ready aggregate and "
             "intentionally excludes known-blocked MCP sosumi/run paths."
         ),
@@ -3177,8 +3361,18 @@ def main() -> int:
         aggregate_proof = proof in {"all", "cutover-ready"}
         needs_memory_mcp = proof in {"apple-mcp", "all", "cutover-ready"}
         needs_sosumi_mcp = proof in {"apple-mcp-sosumi", "all"}
-        needs_apple_docs_cli = proof in {"apple-docs-cli", "cutover-ready"}
+        needs_apple_docs_cli = proof in {
+            "apple-docs-cli",
+            "apple-workflow-smoke",
+            "cutover-ready",
+        }
         needs_xcodebuild_discovery_mcp = proof in {
+            "apple-mcp-xcodebuild",
+            "apple-workflow-smoke",
+            "all",
+            "cutover-ready",
+        }
+        runs_xcodebuild_discovery_mcp = proof in {
             "apple-mcp-xcodebuild",
             "all",
             "cutover-ready",
@@ -3192,6 +3386,7 @@ def main() -> int:
         needs_xcodebuild_cli_snapshot_ui = proof == "apple-xcodebuild-cli-snapshot-ui"
         needs_xcodebuild_cli_type_text = proof == "apple-xcodebuild-cli-type-text"
         needs_xcodebuild_cli_tap = proof == "apple-xcodebuild-cli-tap"
+        runs_apple_docs_cli = proof in {"apple-docs-cli", "cutover-ready"}
         needs_xcodebuild_cli = (
             needs_xcodebuild_cli_run
             or needs_xcodebuild_cli_test
@@ -3265,6 +3460,7 @@ def main() -> int:
             "apple-xcodebuild-cli-snapshot-ui",
             "apple-xcodebuild-cli-type-text",
             "apple-xcodebuild-cli-tap",
+            "apple-workflow-smoke",
             "cutover-ready",
             "all",
         }:
@@ -3585,7 +3781,7 @@ def main() -> int:
                 "Omnigent-converted MCP config"
             )
             print(f"ASSERTION: persisted session items include {APPLE_MCP_SOSUMI_TOOL} result")
-        if needs_apple_docs_cli:
+        if runs_apple_docs_cli:
             cli_proof = run_live_proof_step(
                 "apple-docs-cli",
                 timeout_seconds=args.live_proof_timeout,
@@ -3600,6 +3796,37 @@ def main() -> int:
                 "through Omnigent dynamicTools"
             )
             print(f"ASSERTION: persisted session items include {APPLE_DOCS_CLI_TOOL} result")
+        if proof == "apple-workflow-smoke":
+            assert xcodebuild_workspace_root is not None
+            smoke_proof = run_live_proof_step(
+                "apple-workflow-smoke",
+                timeout_seconds=args.live_proof_timeout,
+                action=lambda: run_live_apple_workflow_smoke_proof(
+                    agent_dir,
+                    codex_path,
+                    workspace_root=xcodebuild_workspace_root,
+                ),
+            )
+            print(f"apple_workflow_smoke_session_id={smoke_proof.session_id}")
+            print(f"apple_workflow_smoke_docs_call_id={smoke_proof.apple_docs_call_id}")
+            print(f"apple_workflow_smoke_xcodebuild_call_id={smoke_proof.xcodebuild_call_id}")
+            print(
+                "apple_workflow_smoke_docs_output_preview="
+                f"{smoke_proof.apple_docs_output_preview!r}"
+            )
+            print(
+                "apple_workflow_smoke_xcodebuild_output_preview="
+                f"{smoke_proof.xcodebuild_output_preview!r}"
+            )
+            print(f"apple_workflow_smoke_transcript_preview={smoke_proof.transcript[:500]!r}")
+            print(
+                "ASSERTION: representative Apple workflow emitted route evidence, "
+                "fetched Apple docs, and discovered the local Xcode project"
+            )
+            print(
+                f"ASSERTION: persisted session items include {APPLE_DOCS_CLI_TOOL} "
+                f"and {APPLE_MCP_XCODEBUILD_TOOL} results"
+            )
         if needs_xcodebuild_cli_run:
             assert xcodebuild_workspace_root is not None
             assert xcodebuild_simulator_name is not None
@@ -3828,7 +4055,7 @@ def main() -> int:
                 "CLI tap adapter through Omnigent dynamicTools"
             )
             print(f"ASSERTION: persisted session items include {XCODEBUILD_CLI_TAP_TOOL} result")
-        if needs_xcodebuild_discovery_mcp:
+        if runs_xcodebuild_discovery_mcp:
             assert xcodebuild_workspace_root is not None
 
             def run_xcodebuild_step() -> AppleMcpProof:
