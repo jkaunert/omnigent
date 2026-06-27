@@ -3069,6 +3069,7 @@ def parse_args() -> argparse.Namespace:
             "apple-xcodebuild-cli-snapshot-ui",
             "apple-xcodebuild-cli-type-text",
             "apple-xcodebuild-cli-tap",
+            "cutover-ready",
             "all",
         ),
         default="graph",
@@ -3094,7 +3095,9 @@ def parse_args() -> argparse.Namespace:
             "'apple-xcodebuild-cli-type-text' proves a bounded type-text "
             "interaction through the XcodeBuildMCP CLI adapter, and "
             "'apple-xcodebuild-cli-tap' proves a bounded tap interaction "
-            "through the XcodeBuildMCP CLI adapter."
+            "through the XcodeBuildMCP CLI adapter. "
+            "'cutover-ready' runs the replacement-ready aggregate and "
+            "intentionally excludes known-blocked MCP sosumi/run paths."
         ),
     )
     parser.add_argument(
@@ -3171,13 +3174,18 @@ def main() -> int:
 
     with temporary_agent_dir(args.keep_fixture) as agent_dir:
         copy_bundle(source_bundle, agent_dir)
-        needs_memory_mcp = proof in {"apple-mcp", "all"}
+        aggregate_proof = proof in {"all", "cutover-ready"}
+        needs_memory_mcp = proof in {"apple-mcp", "all", "cutover-ready"}
         needs_sosumi_mcp = proof in {"apple-mcp-sosumi", "all"}
-        needs_apple_docs_cli = proof == "apple-docs-cli"
-        needs_xcodebuild_discovery_mcp = proof in {"apple-mcp-xcodebuild", "all"}
+        needs_apple_docs_cli = proof in {"apple-docs-cli", "cutover-ready"}
+        needs_xcodebuild_discovery_mcp = proof in {
+            "apple-mcp-xcodebuild",
+            "all",
+            "cutover-ready",
+        }
         needs_xcodebuild_build_mcp = proof == "apple-mcp-xcodebuild-build"
         needs_xcodebuild_run_mcp = proof == "apple-mcp-xcodebuild-run"
-        needs_xcodebuild_cli_run = proof == "apple-xcodebuild-cli-run"
+        needs_xcodebuild_cli_run = proof in {"apple-xcodebuild-cli-run", "cutover-ready"}
         needs_xcodebuild_cli_test = proof == "apple-xcodebuild-cli-test"
         needs_xcodebuild_cli_screenshot = proof == "apple-xcodebuild-cli-screenshot"
         needs_xcodebuild_cli_runtime_logs = proof == "apple-xcodebuild-cli-runtime-logs"
@@ -3257,6 +3265,7 @@ def main() -> int:
             "apple-xcodebuild-cli-snapshot-ui",
             "apple-xcodebuild-cli-type-text",
             "apple-xcodebuild-cli-tap",
+            "cutover-ready",
             "all",
         }:
             mcp_manifest = prove_apple_mcp_manifest(agent_dir)
@@ -3331,7 +3340,7 @@ def main() -> int:
                     policy=XCODEBUILD_CLI_POLICY,
                 )
             )
-        if proof == "all" and not args.skip_live:
+        if aggregate_proof and not args.skip_live:
             # Keep each live proof surface minimal. With every MCP exposed at once,
             # stock Codex can choose to narrate instead of calling the one proof
             # tool, which tests model selection noise rather than the adapter path.
@@ -3358,7 +3367,7 @@ def main() -> int:
         print(f"static_skill_refs={len(graph.skill_refs)}")
         print("ASSERTION: selected Apple skill graph resolves inside the Omnigent bundle")
 
-        if proof in {"tool-plane", "all"}:
+        if proof in {"tool-plane", "all", "cutover-ready"}:
             assert mcp_manifest is not None
             print(f"static_apple_mcp_servers={','.join(sorted(mcp_manifest))}")
             print("ASSERTION: Apple plugin MCP manifest is bundled and well-formed")
@@ -3475,7 +3484,7 @@ def main() -> int:
             return 0
 
         assert codex_path is not None
-        if proof in {"graph", "all"}:
+        if proof in {"graph", "all", "cutover-ready"}:
             transcript = run_live_proof_step(
                 "graph",
                 timeout_seconds=args.live_proof_timeout,
@@ -3487,7 +3496,7 @@ def main() -> int:
                 "emitted route block first"
             )
             print("ASSERTION: stock Codex read a bundled Apple reference through Omnigent")
-        if proof in {"router-matrix", "all"}:
+        if proof in {"router-matrix", "all", "cutover-ready"}:
             matrix_proofs = run_live_proof_step(
                 "router-matrix",
                 timeout_seconds=args.live_proof_timeout,
@@ -3507,7 +3516,7 @@ def main() -> int:
                 "ASSERTION: stock Codex suppressed manifest routerSelection "
                 "for focused explicit skills and non-matching host scopes"
             )
-        if proof in {"tool-plane", "all"}:
+        if proof in {"tool-plane", "all", "cutover-ready"}:
             tool_proof = run_live_proof_step(
                 "tool-plane",
                 timeout_seconds=args.live_proof_timeout,
@@ -3523,7 +3532,7 @@ def main() -> int:
         if needs_memory_mcp:
 
             def run_memory_step() -> AppleMcpProof:
-                if proof == "all":
+                if aggregate_proof:
                     write_agent_config(
                         agent_dir,
                         apple_mcp_servers={
@@ -3823,7 +3832,7 @@ def main() -> int:
             assert xcodebuild_workspace_root is not None
 
             def run_xcodebuild_step() -> AppleMcpProof:
-                if proof == "all":
+                if aggregate_proof:
                     write_agent_config(
                         agent_dir,
                         apple_mcp_servers={

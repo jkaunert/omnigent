@@ -327,7 +327,59 @@ uvx --from . python scripts/prove_stock_codex_replacement.py \
   --xcodebuildmcp-axe-path "$AXE_PATH"
 ```
 
-Combined bounded proof:
+Cutover-ready aggregate proof:
+
+```bash
+uvx --from . python scripts/prove_stock_codex_replacement.py \
+  --proof cutover-ready \
+  --codex-path /opt/homebrew/bin/codex \
+  --live-proof-timeout 420
+```
+
+The `cutover-ready` proof is the bounded aggregate for the current replacement
+track. It runs only replacement-ready surfaces: graph, router-selection matrix,
+dynamic tool plane, Apple memory MCP, Apple-docs CLI adapter, XcodeBuildMCP
+read-only discovery, and XcodeBuildMCP CLI build/install/launch. It
+intentionally excludes known-blocked MCP Sosumi and MCP build/run launch paths,
+as well as the heavier optional UI-automation slices that remain covered by
+their standalone proof commands.
+
+Clean-profile cutover-ready rehearsal:
+
+```bash
+ROOT="$(mktemp -d /tmp/omnigent-cutover-ready.XXXXXX)"
+mkdir -p "$ROOT/home" "$ROOT/tmp" "$ROOT/uv-cache" \
+  "$ROOT/work" "$ROOT/xdg-cache" "$ROOT/xdg-config" "$ROOT/xdg-data"
+
+cd "$ROOT/work"
+env -i \
+  HOME="$ROOT/home" \
+  TMPDIR="$ROOT/tmp" \
+  UV_CACHE_DIR="$ROOT/uv-cache" \
+  XDG_CACHE_HOME="$ROOT/xdg-cache" \
+  XDG_CONFIG_HOME="$ROOT/xdg-config" \
+  XDG_DATA_HOME="$ROOT/xdg-data" \
+  CODEX_HOME="/Users/joshuakaunert/.codex" \
+  DEVELOPER_DIR="/Applications/Xcode-27.0.0-Beta.2.app/Contents/Developer" \
+  PATH="/Users/joshuakaunert/.local/bin:/nix/var/nix/profiles/default/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  LANG="en_US.UTF-8" \
+  LC_ALL="en_US.UTF-8" \
+  PYTHONUNBUFFERED=1 \
+  uvx --from /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit \
+    python /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit/scripts/prove_stock_codex_replacement.py \
+      --proof cutover-ready \
+      --apple-bundle /Users/joshuakaunert/.codex-fork/plugins/cache/LocalAppleWorkflow/apple-appdev-workflow/0.1.1 \
+      --codex-path /opt/homebrew/bin/codex \
+      --live-proof-timeout 420
+```
+
+In an isolated `HOME`, the Apple workflow bundle must be supplied explicitly
+with `--apple-bundle`; relying on the default `$HOME/.codex-fork` or
+`$HOME/.codex` plugin-cache lookup fails correctly because those directories
+are intentionally absent. The only preserved profile state in this rehearsal is
+`CODEX_HOME=/Users/joshuakaunert/.codex` for stock-Codex authentication.
+
+Legacy diagnostic aggregate proof:
 
 ```bash
 uvx --from . python scripts/prove_stock_codex_replacement.py \
@@ -341,11 +393,51 @@ Omnigent agent, writes an Omnigent `harness: codex` config, refuses
 `.codex-fork` binaries by default, and removes the temp fixture unless
 `--keep-fixture` is passed. Live proof runs emit `live_proof_start`,
 `live_proof_ok`, `live_proof_failed`, or `live_proof_timeout` for each bounded
-surface. In the combined proof, each MCP surface is run with its own generated
-Omnigent tools config so one hanging server does not obscure which replacement
-surface failed.
+surface. In aggregate proof modes, each MCP surface is run with its own
+generated Omnigent tools config so one hanging server does not obscure which
+replacement surface failed.
 
-Current aggregate status on 2026-06-25: `graph`, `tool-plane`, and
+Current cutover-ready status on 2026-06-27: the clean-profile
+`cutover-ready` proof passed through an installed `uvx --from` Omnigent package
+path, outside the repo working directory, with isolated `HOME`, `TMPDIR`,
+`UV_CACHE_DIR`, and XDG dirs. Stock Codex resolved from `/opt/homebrew/bin/codex`
+to `/opt/homebrew/Caskroom/codex/0.142.2/codex-aarch64-apple-darwin` and
+reported `codex-cli 0.142.2`. Static preflight resolved 19 relative files, 13
+skill refs, and Apple MCP servers `XcodeBuildMCP`, `memory`, and `sosumi`.
+Live proof results:
+
+- `graph` passed in 30.2s with `GRAPH_OK`.
+- `router-matrix` passed in 115.4s with sessions
+  `conv_54315e89816547a6a68c7229593b16d6`,
+  `conv_9189b4b5a7514c88b0bc5177a4d1196d`,
+  `conv_dd65baa4da074c42bb9783b87bd7f026`,
+  `conv_153f979a70a54331940e8a301af66590`,
+  `conv_4b3ef4a458624f2fb87e27019d266937`,
+  `conv_0a3858d7f7804f63999f8e8cd661134f`, and
+  `conv_d3fba08001bb4570b9b03f44dc0b32fe`.
+- `tool-plane` passed in 15.4s with session
+  `conv_afaafe9ff68a45109702f47ca594dbf9` and call
+  `call_LbcIcR30QNEmyGaJSDaGhSKF`.
+- `apple-mcp-memory` passed in 15.1s with session
+  `conv_214da46a61f043cd8b5ee99f877c13b3` and call
+  `call_fndovF4DaB6Z8bWe2VBnAIXC`.
+- `apple-docs-cli` passed in 26.9s with session
+  `conv_87e4829c34374418a95456bbd87c929c`, call
+  `call_sWsWw5mCK9phKxAsYIVzbTqh`, and timestamp
+  `2026-06-27T18:19:45.581Z`.
+- `apple-xcodebuild-cli-run` passed in 66.8s with session
+  `conv_bfb317d6d75442f7936e761237af3064` and call
+  `call_kHpoSE2vf1BbKLQLcYyXoK67`.
+- `apple-mcp-xcodebuild` passed in 55.0s with session
+  `conv_972d47c6b74d466c91ab0314e71072f0` and call
+  `call_VkqaRJESsOML6N6bKFPh2lav`.
+
+The temporary clean-profile tree was 1.3 GB after the run and was removed after
+evidence capture. This closes local clean-profile aggregate replacement proof
+for the current host, not cross-machine install portability and not a clean
+Codex-auth onboarding flow.
+
+Legacy aggregate status on 2026-06-25: `graph`, `tool-plane`, and
 `apple-mcp-memory` passed under `--proof all`; `apple-mcp-sosumi` timed out at
 180 seconds, and standalone `apple-mcp-sosumi` reruns also timed out. Follow-up
 diagnosis isolated sosumi itself as healthy: direct MCP, direct
@@ -516,18 +608,21 @@ Run these in order unless a later gate becomes cheaper due to new evidence.
      including tmux/native-terminal expectations where the workflow depends on
      them.
 
-6. Clean stock-Codex install
-   - Prove the path from a clean Codex home or clean host profile using the
-     stock Codex binary. Record every required install/config step.
+6. Clean Codex-auth onboarding
+   - The clean host-profile proof is now green while preserving the real
+     `CODEX_HOME` for stock-Codex authentication. A different gate is still
+     needed if the product requires first-run authentication or a clean
+     `CODEX_HOME` onboarding path.
 
 7. End-to-end Apple workflow smoke
    - Run a representative Apple workflow request through Omnigent plus stock
      Codex and compare the visible route, tool availability, and output contract
      against the current forked path.
 
-7. Cutover rehearsal
-   - In a separate environment, run the Omnigent path as the default without
-     changing the existing Codex fork. Record fallback steps.
+8. Default-path cutover rehearsal
+   - The clean-profile aggregate proof now proves the package/runtime contract
+     without changing the existing Codex fork. A later operational gate should
+     run the Omnigent path as the selected default and record fallback steps.
 
 ## Non-Actions
 
