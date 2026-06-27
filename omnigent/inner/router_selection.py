@@ -24,7 +24,11 @@ from typing import Any
 from .executor import Message
 
 _PLUGIN_MANIFEST = ".codex-plugin/plugin.json"
-_EXPLICIT_SKILL_RE = re.compile(r"\$[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+")
+_EXPLICIT_SKILL_RE = re.compile(r"\$([A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+)")
+_ROUTE_ROLE_TOP_LEVEL_ORCHESTRATOR = "top-level-orchestrator"
+_ROUTE_ROLE_BRIGADE_ORCHESTRATOR = "brigade-orchestrator"
+_ROUTING_SCOPE_BROAD = "broad"
+_ROUTING_SCOPE_DOMAIN = "domain"
 
 
 @dataclass(frozen=True)
@@ -75,14 +79,6 @@ def resolve_router_selection(
         return None
 
     prompt = _latest_user_text(messages)
-    suppression = router.get("suppression")
-    if (
-        isinstance(suppression, Mapping)
-        and suppression.get("whenExplicitSkillSelected") is True
-        and _EXPLICIT_SKILL_RE.search(prompt)
-    ):
-        return None
-
     selected_owner = _selected_owner(router, prompt, cwd)
     if selected_owner is None:
         return None
@@ -94,6 +90,17 @@ def resolve_router_selection(
     skill_name = _skill_name_for_owner(selected_owner, plugin_name)
     if skill_name is None:
         return None
+
+    suppression = router.get("suppression")
+    if isinstance(suppression, Mapping) and suppression.get("whenExplicitSkillSelected") is True:
+        decision = _explicit_skill_router_decision(
+            prompt=prompt,
+            selected_owner=selected_owner,
+            plugin_name=plugin_name,
+            bundle_dir=bundle_dir,
+        )
+        if decision in {"owner_already_selected", "suppress_parent"}:
+            return None
 
     if isinstance(skills_filter, list) and skill_name not in skills_filter:
         return None
@@ -140,8 +147,13 @@ def _read_manifest(path: Path) -> Mapping[str, Any] | None:
 def _host_scope_matches(value: object, host_scope: str | None) -> bool:
     if not isinstance(value, Sequence) or isinstance(value, str):
         return True
-    scopes = {scope for scope in value if isinstance(scope, str)}
-    return not scopes or (host_scope is not None and host_scope in scopes)
+    scopes = {scope.strip().lower() for scope in value if isinstance(scope, str) and scope.strip()}
+    if not scopes:
+        return True
+    if host_scope is None:
+        return False
+    host_scope_lc = host_scope.lower()
+    return any(scope in host_scope_lc for scope in scopes)
 
 
 def _selected_owner(router: Mapping[str, Any], prompt: str, cwd: str | None) -> str | None:
@@ -167,7 +179,10 @@ def _domain_matches(domain: Mapping[str, Any], prompt: str, cwd: str | None) -> 
     signals = domain.get("promptSignals")
     if isinstance(signals, Sequence) and not isinstance(signals, str):
         for signal in signals:
-            if isinstance(signal, str) and signal.lower() in prompt_lc:
+            if isinstance(signal, str) and _text_contains_prompt_signal(
+                prompt_lc,
+                signal.lower(),
+            ):
                 return True
 
     workspace_files = domain.get("workspaceFiles")
@@ -193,9 +208,7 @@ def _workspace_extension_matches(value: object, cwd: str | None) -> bool:
     if root is None or not isinstance(value, Sequence) or isinstance(value, str):
         return False
     suffixes = [
-        f".{ext.lstrip('.').lower()}"
-        for ext in value
-        if isinstance(ext, str) and ext.strip()
+        f".{ext.lstrip('.').lower()}" for ext in value if isinstance(ext, str) and ext.strip()
     ]
     if not suffixes:
         return False
@@ -243,12 +256,154 @@ def _skill_name_for_owner(owner: str, plugin_name: str) -> str | None:
     return name or None
 
 
-def _route_block(selected_owner: str) -> str:
-    return (
-        "Routing: orchestrator-led\n\n"
-        "Activated skills\n"
-        f"- `{selected_owner}`"
+def _explicit_skill_router_decision(
+    *,
+    prompt: str,
+    selected_owner: str,
+    plugin_name: str,
+    bundle_dir: Path,
+) -> str:
+    explicit_skill_names = _explicit_skill_names(prompt)
+    if not explicit_skill_names:
+        return "no_explicit_skill"
+
+    saw_compatible_route_skill = False
+    for explicit_skill_name in explicit_skill_names:
+        if _same_skill_identity(explicit_skill_name, selected_owner):
+            return "owner_already_selected"
+        if _explicit_skill_allows_parent_injection(
+            explicit_skill_name=explicit_skill_name,
+            selected_owner=selected_owner,
+            plugin_name=plugin_name,
+            bundle_dir=bundle_dir,
+        ):
+            saw_compatible_route_skill = True
+            continue
+        return "suppress_parent"
+
+    return "allow_parent" if saw_compatible_route_skill else "suppress_parent"
+
+
+def _explicit_skill_names(prompt: str) -> list[str]:
+    return [match.group(1).strip() for match in _EXPLICIT_SKILL_RE.finditer(prompt)]
+
+
+def _explicit_skill_allows_parent_injection(
+    *,
+    explicit_skill_name: str,
+    selected_owner: str,
+    plugin_name: str,
+    bundle_dir: Path,
+) -> bool:
+    if not _same_plugin_namespace(explicit_skill_name, selected_owner):
+        return False
+    skill_name = _skill_name_for_owner(
+        _skill_name_without_control_prefix(explicit_skill_name),
+        plugin_name,
     )
+    if skill_name is None:
+        return False
+    metadata = _read_skill_route_metadata(bundle_dir / "skills" / skill_name / "SKILL.md")
+    return metadata is not None and _is_broad_or_domain_route(metadata)
+
+
+def _same_plugin_namespace(explicit_skill_name: str, selected_owner: str) -> bool:
+    explicit_plugin, _, _ = _skill_name_without_control_prefix(explicit_skill_name).partition(":")
+    owner_plugin, _, _ = _skill_name_without_control_prefix(selected_owner).partition(":")
+    return bool(explicit_plugin and owner_plugin and explicit_plugin == owner_plugin)
+
+
+def _same_skill_identity(candidate: str, selected_owner: str) -> bool:
+    return (
+        _skill_name_without_control_prefix(candidate).strip()
+        == _skill_name_without_control_prefix(selected_owner).strip()
+    )
+
+
+def _skill_name_without_control_prefix(name: str) -> str:
+    stripped = name.strip()
+    return stripped[1:] if stripped.startswith("$") else stripped
+
+
+def _read_skill_route_metadata(path: Path) -> dict[str, str | None] | None:
+    try:
+        contents = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    frontmatter = _extract_skill_frontmatter(contents)
+    if frontmatter is None:
+        return None
+    return {
+        "role": _frontmatter_scalar(frontmatter, "role"),
+        "routing_scope": _frontmatter_scalar(frontmatter, "routing_scope"),
+    }
+
+
+def _extract_skill_frontmatter(contents: str) -> list[str] | None:
+    lines = contents.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    frontmatter: list[str] = []
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return frontmatter if frontmatter else None
+        frontmatter.append(line)
+    return None
+
+
+def _frontmatter_scalar(lines: list[str], key: str) -> str | None:
+    prefix = f"{key}:"
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith(prefix):
+            continue
+        value = stripped[len(prefix) :].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        return value or None
+    return None
+
+
+def _is_broad_or_domain_route(metadata: Mapping[str, str | None]) -> bool:
+    role = (metadata.get("role") or "").strip().lower()
+    routing_scope = (metadata.get("routing_scope") or "").strip().lower()
+    return role in {
+        _ROUTE_ROLE_TOP_LEVEL_ORCHESTRATOR,
+        _ROUTE_ROLE_BRIGADE_ORCHESTRATOR,
+    } or routing_scope in {
+        _ROUTING_SCOPE_BROAD,
+        _ROUTING_SCOPE_DOMAIN,
+    }
+
+
+def _text_contains_prompt_signal(text: str, signal: str) -> bool:
+    if not signal:
+        return False
+    start = 0
+    while True:
+        index = text.find(signal, start)
+        if index == -1:
+            return False
+        before = text[index - 1] if index > 0 else None
+        after_index = index + len(signal)
+        after = text[after_index] if after_index < len(text) else None
+        if _is_prompt_signal_boundary(before) and (
+            _is_prompt_signal_boundary(after) or _signal_allows_version_suffix(signal, after)
+        ):
+            return True
+        start = index + len(signal)
+
+
+def _signal_allows_version_suffix(signal: str, after: str | None) -> bool:
+    return signal in {"ios", "macos"} and after is not None and after.isascii() and after.isdigit()
+
+
+def _is_prompt_signal_boundary(ch: str | None) -> bool:
+    return ch is None or not ch.isalnum()
+
+
+def _route_block(selected_owner: str) -> str:
+    return f"Routing: orchestrator-led\n\nActivated skills\n- `{selected_owner}`"
 
 
 def _prompt_addendum(

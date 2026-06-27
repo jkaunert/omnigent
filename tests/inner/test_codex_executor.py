@@ -141,6 +141,20 @@ def _make_router_bundle(root: Path) -> Path:
         "---\nname: apple-app-orchestrator\n---\nUse the Apple orchestrator policy.\n",
         encoding="utf-8",
     )
+    review_skill_dir = bundle / "skills" / "apple-review-orchestrator"
+    review_skill_dir.mkdir(parents=True)
+    (review_skill_dir / "SKILL.md").write_text(
+        (
+            "---\n"
+            "name: apple-review-orchestrator\n"
+            "metadata:\n"
+            "  role: brigade-orchestrator\n"
+            "  routing_scope: domain\n"
+            "---\n"
+            "Use the Apple review policy.\n"
+        ),
+        encoding="utf-8",
+    )
     manifest_dir = bundle / ".codex-plugin"
     manifest_dir.mkdir(parents=True)
     (manifest_dir / "plugin.json").write_text(
@@ -504,6 +518,50 @@ class TestCodexExecutor(unittest.TestCase):
                     f"Resolve relative paths in that SKILL.md from `{selected_skill_dir}`",
                     prompt,
                 )
+
+        _run(_t())
+
+    def test_run_turn_router_selection_preserves_parent_for_explicit_downstream_route(self):
+        async def _t():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                bundle = _make_router_bundle(root)
+                fake_session = _FakeAppSession(
+                    [[TextChunk(text="Using review route."), TurnComplete(response="done")]]
+                )
+
+                executor = CodexExecutor(
+                    codex_path="/bin/echo",
+                    bundle_dir=bundle,
+                    app_session_factory=lambda **kwargs: fake_session,
+                )
+                events = [
+                    e
+                    async for e in executor.run_turn(
+                        [
+                            {
+                                "role": "user",
+                                "content": (
+                                    "$apple-appdev-workflow:apple-review-orchestrator "
+                                    "Review this SwiftUI diff"
+                                ),
+                                "session_id": "s1",
+                            }
+                        ],
+                        [],
+                        "Be helpful.",
+                    )
+                ]
+
+                self.assertIsInstance(events[0], TextChunk)
+                self.assertEqual(
+                    events[0].text,
+                    "Routing: orchestrator-led\n\n"
+                    "Activated skills\n"
+                    "- `apple-appdev-workflow:apple-app-orchestrator`\n\n",
+                )
+                self.assertEqual(events[1].text, "Using review route.")
+                self.assertIn("[Omnigent routerSelection]", fake_session.calls[0]["system_prompt"])
 
         _run(_t())
 

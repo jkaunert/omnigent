@@ -70,6 +70,14 @@ A replacement claim is not accepted until it records:
 - Known caveats and what the proof does not cover.
 - Confirmation that no Codex-fork files were changed by the proof.
 
+## Carry Scoreboard
+
+The current Codex-fork carry inventory is tracked in
+`docs/codex-fork-carry-scoreboard.md`. That scoreboard maps the 22 local
+carry commits against this Omnigent replacement track and preserves the
+separation rule: scoring a carry as replaceable is evidence for future cutover,
+not permission to mutate the existing Codex fork.
+
 ## Initial Proven Slice
 
 The current spike proves the first narrow adapter behavior:
@@ -77,6 +85,7 @@ The current spike proves the first narrow adapter behavior:
 | Behavior | Status | Evidence |
 | --- | --- | --- |
 | Deterministic `routerSelection` route evidence before Codex model output | `replacement-ready` for the narrow Apple top-level route case | Omnigent branch `spike/codex-router-selection-adapter`, commit `51dc45ea`; direct Codex executor proof and normal Omnigent `run_prompt()` session/runner proof both emitted `Routing: orchestrator-led` before model continuation. |
+| Router-selection matrix semantics | `unproven` for the full live stock-Codex matrix | `tests/inner/test_router_selection.py` covers prompt-signal boundaries, host scope, workspace file and extension signals, skill-filter gating, explicit downstream domain-route preservation, top-level duplicate suppression, focused specialist suppression, and foreign-plugin suppression. `tests/inner/test_codex_executor.py` covers route-prefix emission before Codex output for the preserved downstream-route case. This proves the local Omnigent adapter matrix; a live stock-Codex matrix proof is still required before the whole router-selection carry group can be classified as replacement-ready. |
 | Full Apple top-level skill graph from an Omnigent bundle | `replacement-ready` for the selected `apple-app-orchestrator` graph | `scripts/prove_stock_codex_replacement.py` resolved 19 relative reference files and 13 referenced Apple skills inside the generated Omnigent bundle, then stock Codex read `references/brigade-output-contract.md` through normal `run_prompt()` and returned `GRAPH_OK`; initially proven on `0.137.0` and revalidated on `0.142.2`. |
 | Omnigent dynamic tool exposure to stock Codex | `replacement-ready` for the `dynamicTools` channel | `scripts/prove_stock_codex_replacement.py --proof tool-plane` verified the Apple bundle's `.mcp.json` declares `XcodeBuildMCP`, `memory`, and `sosumi`, then stock Codex `0.142.2` invoked Omnigent-exposed `sys_os_read` through normal `run_prompt()`; persisted session items included a `function_call` and matching `function_call_output` containing the sentinel. |
 | Apple `.mcp.json` `memory` server execution through Omnigent | `replacement-ready` for the local stdio `memory` server | `scripts/prove_stock_codex_replacement.py --proof apple-mcp` converted the Apple plugin `.mcp.json` `memory` server into an Omnigent `tools: memory: type: mcp` declaration with an isolated temp `MEMORY_FILE_PATH`, then stock Codex `0.142.2` invoked `memory__create_entities`; persisted session items included a `function_call` and matching `function_call_output` containing `APPLE_MCP_SENTINEL_73`. |
