@@ -41,12 +41,14 @@ from omnigent.adapters.xcodebuild_cli import (
     XCODEBUILDMCP_CLI_ENV_OVERRIDES,
     XCODEBUILDMCP_CLI_SCREENSHOT_COMMAND,
     XCODEBUILDMCP_CLI_SNAPSHOT_UI_COMMAND,
+    XCODEBUILDMCP_CLI_TAP_COMMAND,
     XCODEBUILDMCP_CLI_TEST_COMMAND,
     XCODEBUILDMCP_CLI_TYPE_TEXT_COMMAND,
     write_xcodebuildmcp_simulator_build_run_tool,
     write_xcodebuildmcp_simulator_runtime_logs_tool,
     write_xcodebuildmcp_simulator_screenshot_tool,
     write_xcodebuildmcp_simulator_snapshot_ui_tool,
+    write_xcodebuildmcp_simulator_tap_tool,
     write_xcodebuildmcp_simulator_test_tool,
     write_xcodebuildmcp_simulator_type_text_tool,
 )
@@ -126,7 +128,10 @@ XCODEBUILD_CLI_SCREENSHOT_TOOL = XCODEBUILD_CLI_POLICY.screenshot_tool_name
 XCODEBUILD_CLI_SNAPSHOT_UI_TOOL = XCODEBUILD_CLI_POLICY.snapshot_ui_tool_name
 XCODEBUILD_CLI_RUNTIME_LOGS_TOOL = XCODEBUILD_CLI_POLICY.runtime_logs_tool_name
 XCODEBUILD_CLI_TYPE_TEXT_TOOL = XCODEBUILD_CLI_POLICY.type_text_tool_name
+XCODEBUILD_CLI_TAP_TOOL = XCODEBUILD_CLI_POLICY.tap_tool_name
 XCODEBUILD_CLI_TYPE_TEXT_PROOF_TEXT = "http://localhost:6767/gesture-proof"
+XCODEBUILD_CLI_TAP_PROOF_TEXT = "http://localhost:6767/gesture-proof"
+XCODEBUILD_CLI_TAP_POST_TEXT = "http://localhost:6767"
 XCODEBUILD_CLI_RUN_SENTINELS = (
     "Build succeeded",
     "Build & Run complete",
@@ -171,6 +176,20 @@ XCODEBUILD_CLI_TYPE_TEXT_SENTINELS = (
     f'"verifiedText": "{XCODEBUILD_CLI_TYPE_TEXT_PROOF_TEXT}"',
     '"beforeTarget":',
     '"afterTargets":',
+)
+XCODEBUILD_CLI_TAP_SENTINELS = (
+    '"preResetBuildStatus": "SUCCEEDED"',
+    '"resetStatus": "SUCCEEDED"',
+    '"buildStatus": "SUCCEEDED"',
+    '"typeTextStatus": "SUCCEEDED"',
+    '"typedWaitStatus": "SUCCEEDED"',
+    '"tapStatus": "SUCCEEDED"',
+    '"settledStatus": "SUCCEEDED"',
+    '"bundleId": "ai.omnigent.ios"',
+    f'"typedText": "{XCODEBUILD_CLI_TAP_PROOF_TEXT}"',
+    f'"postTapText": "{XCODEBUILD_CLI_TAP_POST_TEXT}"',
+    '"tapTarget":',
+    '"afterTapTarget":',
 )
 RELATIVE_MARKDOWN_PATH_RE = re.compile(r"`((?:\.\.?/)[^`]+)`")
 PLUGIN_SKILL_REF_RE = re.compile(rf"\b{re.escape(PLUGIN_NAME)}:([A-Za-z0-9_.-]+)\b")
@@ -1286,6 +1305,71 @@ def run_live_xcodebuild_cli_type_text_proof(
     )
 
 
+def run_live_xcodebuild_cli_tap_proof(
+    agent_dir: Path,
+    codex_path: Path,
+    *,
+    workspace_root: Path,
+    simulator_name: str,
+    derived_data_path: Path,
+    axe_path: Path | None,
+) -> AppleMcpProof:
+    """Prove stock Codex can perform a bounded tap UI interaction."""
+    project_path = workspace_root / APPLE_MCP_XCODEBUILD_PROJECT_RELATIVE_PATH
+    tool_args = {
+        "project_path": str(project_path),
+        "scheme": APPLE_MCP_XCODEBUILD_SCHEME,
+        "configuration": APPLE_MCP_XCODEBUILD_CONFIGURATION,
+        "simulator_name": simulator_name,
+        "derived_data_path": str(derived_data_path),
+        "text": XCODEBUILD_CLI_TAP_PROOF_TEXT,
+        "extra_args": ["-quiet"],
+        "use_latest_os": True,
+    }
+    tool_args_json = json.dumps(tool_args)
+    prompts = (
+        (
+            "Tool invocation drill. After the required route block, your next "
+            f"assistant item must be a real function call to {XCODEBUILD_CLI_TAP_TOOL}, "
+            "not prose. Do not write JSON as text, pseudo-calls, `tool=...`, "
+            "`mcp__...`, or dot notation. Use exactly these JSON arguments: "
+            f"{tool_args_json}. After the tool result contains "
+            '\'"tapStatus": "SUCCEEDED"\', reply exactly XCODEBUILDMCP_CLI_TAP_OK.'
+        ),
+        (
+            "XcodeBuildMCP CLI simulator tap adapter proof. Call the available "
+            f"dynamic tool named {XCODEBUILD_CLI_TAP_TOOL} exactly once before "
+            f"answering. Pass these exact arguments: {tool_args_json}. Do not use "
+            "any other tool. Reply exactly XCODEBUILDMCP_CLI_TAP_OK only after "
+            'the tool output says "tapStatus": "SUCCEEDED".'
+        ),
+    )
+    env_overrides = (
+        {OMNIGENT_XCODEBUILDMCP_AXE_PATH_ENV: str(axe_path)} if axe_path is not None else {}
+    )
+    errors: list[str] = []
+    with temporary_env(env_overrides):
+        for attempt, prompt in enumerate(prompts, start=1):
+            run = asyncio_run_session_query(
+                agent_dir=agent_dir,
+                codex_path=codex_path,
+                prompt=prompt,
+            )
+            try:
+                return _validate_xcodebuild_cli_tap(
+                    run,
+                    attempt=attempt,
+                    expected_arguments=tool_args,
+                )
+            except XcodeBuildCliProofAttemptError as exc:
+                errors.append(str(exc))
+    joined_errors = "\n\n".join(errors)
+    raise SystemExit(
+        f"XcodeBuildMCP CLI simulator tap proof failed after "
+        f"{len(prompts)} attempts:\n{joined_errors}"
+    )
+
+
 class SosumiProofAttemptError(Exception):
     """One failed sosumi proof attempt that can be retried."""
 
@@ -1965,6 +2049,117 @@ def _validate_xcodebuild_cli_type_text(
         raise XcodeBuildCliProofAttemptError(
             f"attempt={attempt}: XcodeBuildMCP CLI type-text adapter proof did not "
             f"return XCODEBUILDMCP_CLI_TYPE_TEXT_OK. Transcript:\n{transcript}"
+        )
+    return AppleMcpProof(
+        session_id=run.session_id,
+        call_id=call_id,
+        transcript=transcript,
+        output_preview=output_text[:500],
+    )
+
+
+def _validate_xcodebuild_cli_tap(
+    run: SessionRun,
+    *,
+    attempt: int,
+    expected_arguments: dict[str, object],
+) -> AppleMcpProof:
+    """Validate one XcodeBuildMCP CLI tap adapter proof attempt."""
+    transcript = run.text.strip()
+    if not transcript.startswith(EXPECTED_ROUTE):
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: transcript did not start with expected route block.\n"
+            f"Expected prefix:\n{EXPECTED_ROUTE}\n\nActual:\n{transcript[:1000]}"
+        )
+
+    calls = [
+        item
+        for item in run.items
+        if item.get("type") == "function_call" and item.get("name") == XCODEBUILD_CLI_TAP_TOOL
+    ]
+    if not calls:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: " + _missing_tool_call_message(XCODEBUILD_CLI_TAP_TOOL, run)
+        )
+    call = calls[-1]
+    call_id = call.get("call_id")
+    if not isinstance(call_id, str) or not call_id:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: persisted {XCODEBUILD_CLI_TAP_TOOL} call "
+            f"has invalid call_id: {call!r}"
+        )
+    arguments = _function_call_arguments(call)
+    mismatches = {
+        key: (expected, arguments.get(key))
+        for key, expected in expected_arguments.items()
+        if arguments.get(key) != expected
+    }
+    if mismatches:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: {XCODEBUILD_CLI_TAP_TOOL} used unexpected "
+            f"arguments. mismatches={mismatches!r} arguments={arguments!r}"
+        )
+    outputs = [
+        item
+        for item in run.items
+        if item.get("type") == "function_call_output" and item.get("call_id") == call_id
+    ]
+    if not outputs:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: no persisted function_call_output found for call_id={call_id}"
+        )
+    output_text = str(outputs[-1].get("output", ""))
+    missing = [
+        sentinel for sentinel in XCODEBUILD_CLI_TAP_SENTINELS if sentinel not in output_text
+    ]
+    if missing or "Error:" in output_text:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: XcodeBuildMCP CLI tap adapter output missed "
+            "expected interaction sentinels or looked erroneous. "
+            f"missing={missing!r} output={output_text[:1000]}"
+        )
+    try:
+        parsed_output = json.loads(output_text)
+    except json.JSONDecodeError as exc:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: tap adapter returned invalid JSON: {exc}"
+        ) from exc
+    tap_element_ref = parsed_output.get("tapElementRef")
+    tap_target = parsed_output.get("tapTarget")
+    after_tap_target = parsed_output.get("afterTapTarget")
+    after_tap_targets = parsed_output.get("afterTapTargets")
+    typed_target = parsed_output.get("typedTarget")
+    if (
+        parsed_output.get("preResetBuildStatus") != "SUCCEEDED"
+        or parsed_output.get("resetStatus") != "SUCCEEDED"
+        or parsed_output.get("typeTextStatus") != "SUCCEEDED"
+        or parsed_output.get("typedWaitStatus") != "SUCCEEDED"
+        or parsed_output.get("tapStatus") != "SUCCEEDED"
+        or parsed_output.get("settledStatus") != "SUCCEEDED"
+        or parsed_output.get("typedText") != XCODEBUILD_CLI_TAP_PROOF_TEXT
+        or parsed_output.get("postTapText") != XCODEBUILD_CLI_TAP_POST_TEXT
+        or not isinstance(tap_element_ref, str)
+        or not tap_element_ref
+        or not isinstance(tap_target, str)
+        or "tap" not in tap_target
+        or "button|Connect" not in tap_target
+        or not isinstance(typed_target, str)
+        or XCODEBUILD_CLI_TAP_PROOF_TEXT not in typed_target
+        or not isinstance(after_tap_target, str)
+        or XCODEBUILD_CLI_TAP_POST_TEXT not in after_tap_target
+        or XCODEBUILD_CLI_TAP_PROOF_TEXT in after_tap_target
+        or not isinstance(after_tap_targets, list)
+        or not after_tap_targets
+        or any(XCODEBUILD_CLI_TAP_PROOF_TEXT in str(target) for target in after_tap_targets)
+    ):
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: tap adapter JSON missed usable interaction evidence. "
+            f"output={parsed_output!r}"
+        )
+    if "XCODEBUILDMCP_CLI_TAP_OK" not in transcript:
+        raise XcodeBuildCliProofAttemptError(
+            f"attempt={attempt}: XcodeBuildMCP CLI tap adapter proof did not "
+            f"return XCODEBUILDMCP_CLI_TAP_OK. Transcript:\n{transcript}"
         )
     return AppleMcpProof(
         session_id=run.session_id,
@@ -2698,6 +2893,7 @@ def parse_args() -> argparse.Namespace:
             "apple-xcodebuild-cli-runtime-logs",
             "apple-xcodebuild-cli-snapshot-ui",
             "apple-xcodebuild-cli-type-text",
+            "apple-xcodebuild-cli-tap",
             "all",
         ),
         default="graph",
@@ -2719,7 +2915,9 @@ def parse_args() -> argparse.Namespace:
             "'apple-xcodebuild-cli-snapshot-ui' proves a bounded semantic UI "
             "snapshot through the XcodeBuildMCP CLI adapter, and "
             "'apple-xcodebuild-cli-type-text' proves a bounded type-text "
-            "interaction through the XcodeBuildMCP CLI adapter."
+            "interaction through the XcodeBuildMCP CLI adapter, and "
+            "'apple-xcodebuild-cli-tap' proves a bounded tap interaction "
+            "through the XcodeBuildMCP CLI adapter."
         ),
     )
     parser.add_argument(
@@ -2808,6 +3006,7 @@ def main() -> int:
         needs_xcodebuild_cli_runtime_logs = proof == "apple-xcodebuild-cli-runtime-logs"
         needs_xcodebuild_cli_snapshot_ui = proof == "apple-xcodebuild-cli-snapshot-ui"
         needs_xcodebuild_cli_type_text = proof == "apple-xcodebuild-cli-type-text"
+        needs_xcodebuild_cli_tap = proof == "apple-xcodebuild-cli-tap"
         needs_xcodebuild_cli = (
             needs_xcodebuild_cli_run
             or needs_xcodebuild_cli_test
@@ -2815,6 +3014,7 @@ def main() -> int:
             or needs_xcodebuild_cli_runtime_logs
             or needs_xcodebuild_cli_snapshot_ui
             or needs_xcodebuild_cli_type_text
+            or needs_xcodebuild_cli_tap
         )
         needs_xcodebuild_mcp = (
             needs_xcodebuild_discovery_mcp
@@ -2848,6 +3048,8 @@ def main() -> int:
                 if needs_xcodebuild_cli_snapshot_ui
                 else "xcodebuild-cli-type-text-deriveddata"
                 if needs_xcodebuild_cli_type_text
+                else "xcodebuild-cli-tap-deriveddata"
+                if needs_xcodebuild_cli_tap
                 else "xcodebuild-cli-runtime-logs-deriveddata"
                 if needs_xcodebuild_cli_runtime_logs
                 else "xcodebuild-cli-screenshot-deriveddata"
@@ -2877,6 +3079,7 @@ def main() -> int:
             "apple-xcodebuild-cli-runtime-logs",
             "apple-xcodebuild-cli-snapshot-ui",
             "apple-xcodebuild-cli-type-text",
+            "apple-xcodebuild-cli-tap",
             "all",
         }:
             mcp_manifest = prove_apple_mcp_manifest(agent_dir)
@@ -2936,6 +3139,11 @@ def main() -> int:
                     policy=XCODEBUILD_CLI_POLICY,
                 )
                 if needs_xcodebuild_cli_type_text
+                else write_xcodebuildmcp_simulator_tap_tool(
+                    agent_dir,
+                    policy=XCODEBUILD_CLI_POLICY,
+                )
+                if needs_xcodebuild_cli_tap
                 else write_xcodebuildmcp_simulator_runtime_logs_tool(
                     agent_dir,
                     policy=XCODEBUILD_CLI_POLICY,
@@ -3018,6 +3226,8 @@ def main() -> int:
                 if needs_xcodebuild_cli_snapshot_ui
                 else XCODEBUILD_CLI_TYPE_TEXT_TOOL
                 if needs_xcodebuild_cli_type_text
+                else XCODEBUILD_CLI_TAP_TOOL
+                if needs_xcodebuild_cli_tap
                 else XCODEBUILD_CLI_RUNTIME_LOGS_TOOL
                 if needs_xcodebuild_cli_runtime_logs
                 else XCODEBUILD_CLI_TOOL
@@ -3031,6 +3241,8 @@ def main() -> int:
                 if needs_xcodebuild_cli_snapshot_ui
                 else XCODEBUILDMCP_CLI_TYPE_TEXT_COMMAND
                 if needs_xcodebuild_cli_type_text
+                else XCODEBUILDMCP_CLI_TAP_COMMAND
+                if needs_xcodebuild_cli_tap
                 else XCODEBUILDMCP_CLI_COMMAND
             )
             print(f"static_apple_mcp_servers={','.join(sorted(mcp_manifest))}")
@@ -3382,6 +3594,34 @@ def main() -> int:
                 f"ASSERTION: persisted session items include "
                 f"{XCODEBUILD_CLI_TYPE_TEXT_TOOL} result"
             )
+        if needs_xcodebuild_cli_tap:
+            assert xcodebuild_workspace_root is not None
+            assert xcodebuild_simulator_name is not None
+            assert xcodebuild_derived_data_path is not None
+            xcodebuild_cli_tap_proof = run_live_proof_step(
+                "apple-xcodebuild-cli-tap",
+                timeout_seconds=args.live_proof_timeout,
+                action=lambda: run_live_xcodebuild_cli_tap_proof(
+                    agent_dir,
+                    codex_path,
+                    workspace_root=xcodebuild_workspace_root,
+                    simulator_name=xcodebuild_simulator_name,
+                    derived_data_path=xcodebuild_derived_data_path,
+                    axe_path=xcodebuildmcp_axe_path,
+                ),
+            )
+            print(f"xcodebuild_cli_tap_session_id={xcodebuild_cli_tap_proof.session_id}")
+            print(f"xcodebuild_cli_tap_call_id={xcodebuild_cli_tap_proof.call_id}")
+            print(f"xcodebuild_cli_tap_output_preview={xcodebuild_cli_tap_proof.output_preview!r}")
+            print(
+                "xcodebuild_cli_tap_transcript_preview="
+                f"{xcodebuild_cli_tap_proof.transcript[:500]!r}"
+            )
+            print(
+                "ASSERTION: stock Codex invoked the generated XcodeBuildMCP "
+                "CLI tap adapter through Omnigent dynamicTools"
+            )
+            print(f"ASSERTION: persisted session items include {XCODEBUILD_CLI_TAP_TOOL} result")
         if needs_xcodebuild_discovery_mcp:
             assert xcodebuild_workspace_root is not None
 

@@ -16,6 +16,7 @@ from omnigent.adapters.xcodebuild_cli import (
     XCODEBUILD_CLI_RUNTIME_LOGS_TOOL_NAME,
     XCODEBUILD_CLI_SCREENSHOT_TOOL_NAME,
     XCODEBUILD_CLI_SNAPSHOT_UI_TOOL_NAME,
+    XCODEBUILD_CLI_TAP_TOOL_NAME,
     XCODEBUILD_CLI_TEST_TOOL_NAME,
     XCODEBUILD_CLI_TOOL_NAME,
     XCODEBUILD_CLI_TYPE_TEXT_TOOL_NAME,
@@ -23,6 +24,7 @@ from omnigent.adapters.xcodebuild_cli import (
     XCODEBUILDMCP_CLI_COMMAND,
     XCODEBUILDMCP_CLI_ENV_OVERRIDES,
     XCODEBUILDMCP_CLI_SCREENSHOT_COMMAND,
+    XCODEBUILDMCP_CLI_TAP_COMMAND,
     XCODEBUILDMCP_CLI_TEST_COMMAND,
     XCODEBUILDMCP_CLI_TYPE_TEXT_COMMAND,
     XCODEBUILDMCP_CLI_WAIT_FOR_UI_COMMAND,
@@ -31,12 +33,14 @@ from omnigent.adapters.xcodebuild_cli import (
     build_xcodebuildmcp_simulator_runtime_logs_tool_source,
     build_xcodebuildmcp_simulator_screenshot_tool_source,
     build_xcodebuildmcp_simulator_snapshot_ui_tool_source,
+    build_xcodebuildmcp_simulator_tap_tool_source,
     build_xcodebuildmcp_simulator_test_tool_source,
     build_xcodebuildmcp_simulator_type_text_tool_source,
     write_xcodebuildmcp_simulator_build_run_tool,
     write_xcodebuildmcp_simulator_runtime_logs_tool,
     write_xcodebuildmcp_simulator_screenshot_tool,
     write_xcodebuildmcp_simulator_snapshot_ui_tool,
+    write_xcodebuildmcp_simulator_tap_tool,
     write_xcodebuildmcp_simulator_test_tool,
     write_xcodebuildmcp_simulator_type_text_tool,
 )
@@ -261,6 +265,20 @@ def test_generated_type_text_tool_source_names_expected_tool() -> None:
     assert "type-text" in source
     assert "wait-for-ui" in source
     assert "replace-existing" in source
+    assert "OMNIGENT_XCODEBUILDMCP_AXE_PATH" in source
+    assert "XCODEBUILDMCP_EXPERIMENTAL_WORKFLOW_DISCOVERY" in source
+
+
+def test_generated_tap_tool_source_names_expected_tool() -> None:
+    source = build_xcodebuildmcp_simulator_tap_tool_source()
+
+    assert f"def {XCODEBUILD_CLI_TAP_TOOL_NAME}(" in source
+    assert "xcodebuildmcp" in source
+    assert "snapshot-ui" in source
+    assert "type-text" in source
+    assert "tap" in source
+    assert "wait-for-ui" in source
+    assert "simctl" in source
     assert "OMNIGENT_XCODEBUILDMCP_AXE_PATH" in source
     assert "XCODEBUILDMCP_EXPERIMENTAL_WORKFLOW_DISCOVERY" in source
 
@@ -896,6 +914,310 @@ def test_generated_type_text_tool_launches_then_types_and_verifies(
         "typedText": proof_text,
         "verifiedText": proof_text,
         "waitStatus": "SUCCEEDED",
+    }
+
+
+def test_generated_tap_tool_resets_types_taps_and_verifies_settled_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_path = tmp_path / "Demo.xcodeproj"
+    project_path.mkdir()
+    derived_data_path = tmp_path / "DerivedData"
+    patched_axe_path = str(tmp_path / "axe")
+    proof_text = "http://localhost:6767/gesture-proof"
+    post_tap_text = "http://localhost:6767"
+    policy = XcodeBuildCliAdapterPolicy(allowed_derived_data_roots=(str(tmp_path),))
+    tool_path = write_xcodebuildmcp_simulator_tap_tool(tmp_path, policy=policy)
+    module = _load_module(tool_path)
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append((cmd, kwargs))
+        if "build-and-run" in cmd:
+            stdout = json.dumps(
+                {
+                    "didError": False,
+                    "data": {
+                        "summary": {"status": "SUCCEEDED"},
+                        "artifacts": {
+                            "bundleId": "ai.omnigent.ios",
+                            "simulatorId": "SIM-123",
+                        },
+                    },
+                }
+            )
+        elif cmd[:2] == ["xcrun", "simctl"]:
+            stdout = ""
+        elif "snapshot-ui" in cmd:
+            stdout = json.dumps(
+                {
+                    "didError": False,
+                    "data": {
+                        "summary": {"status": "SUCCEEDED"},
+                        "capture": {
+                            "type": "runtime-snapshot",
+                            "rs": "1",
+                            "screenHash": "before",
+                            "seq": 1,
+                            "count": 2,
+                            "targets": [
+                                f"e14|typeText|text-field||{post_tap_text}|",
+                                "e15|tap|button|Connect||",
+                            ],
+                        },
+                    },
+                }
+            )
+        elif "type-text" in cmd or "tap" in cmd:
+            stdout = json.dumps(
+                {
+                    "didError": False,
+                    "data": {"summary": {"status": "SUCCEEDED"}},
+                }
+            )
+        elif "wait-for-ui" in cmd and "settled" in cmd:
+            stdout = json.dumps(
+                {
+                    "didError": False,
+                    "data": {
+                        "summary": {"status": "SUCCEEDED"},
+                        "capture": {
+                            "type": "runtime-snapshot",
+                            "rs": "1",
+                            "screenHash": "after-tap",
+                            "seq": 3,
+                            "count": 2,
+                            "targets": [
+                                f"e14|typeText|text-field||{post_tap_text}|",
+                                "e15|tap|button|Connect||",
+                            ],
+                        },
+                    },
+                }
+            )
+        elif "wait-for-ui" in cmd:
+            stdout = json.dumps(
+                {
+                    "didError": False,
+                    "data": {
+                        "summary": {"status": "SUCCEEDED"},
+                        "capture": {
+                            "type": "runtime-snapshot",
+                            "rs": "1",
+                            "screenHash": "typed",
+                            "seq": 2,
+                            "count": 2,
+                            "targets": [
+                                f"e14|typeText|text-field||{proof_text}|",
+                                "e15|tap|button|Connect||",
+                            ],
+                        },
+                    },
+                }
+            )
+        elif "daemon" in cmd:
+            stdout = ""
+        else:
+            stdout = ""
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setenv(OMNIGENT_XCODEBUILDMCP_AXE_PATH_ENV, patched_axe_path)
+
+    invalid_result = module.xcodebuildmcp_simulator_tap(
+        str(project_path),
+        "Demo",
+        "Debug",
+        "Vision Pro",
+        str(derived_data_path),
+        proof_text,
+        ["-quiet"],
+    )
+    valid_result = module.xcodebuildmcp_simulator_tap(
+        str(project_path),
+        "Demo",
+        "Debug",
+        "iPhone 17",
+        str(derived_data_path),
+        proof_text,
+        ["-quiet"],
+    )
+
+    assert invalid_result.startswith("Error: simulator_name must start with")
+    assert len(calls) == 10
+    pre_reset_build_cmd, pre_reset_build_kwargs = calls[0]
+    reset_uninstall_cmd, reset_uninstall_kwargs = calls[1]
+    build_cmd, build_kwargs = calls[2]
+    snapshot_cmd, snapshot_kwargs = calls[3]
+    type_cmd, type_kwargs = calls[4]
+    typed_wait_cmd, typed_wait_kwargs = calls[5]
+    tap_cmd, tap_kwargs = calls[6]
+    settled_cmd, settled_kwargs = calls[7]
+    cleanup_uninstall_cmd, cleanup_uninstall_kwargs = calls[8]
+    stop_cmd, stop_kwargs = calls[9]
+    assert pre_reset_build_cmd[:5] == [
+        "xcodebuildmcp",
+        "--socket",
+        pre_reset_build_cmd[2],
+        "simulator",
+        "build-and-run",
+    ]
+    assert build_cmd[:5] == [
+        "xcodebuildmcp",
+        "--socket",
+        pre_reset_build_cmd[2],
+        "simulator",
+        "build-and-run",
+    ]
+    assert json.loads(build_cmd[build_cmd.index("--json") + 1]) == {
+        "projectPath": str(project_path),
+        "scheme": "Demo",
+        "configuration": "Debug",
+        "simulatorName": "iPhone 17",
+        "useLatestOS": True,
+        "derivedDataPath": str(derived_data_path),
+        "extraArgs": ["-quiet"],
+    }
+    assert reset_uninstall_cmd == ["xcrun", "simctl", "uninstall", "SIM-123", "ai.omnigent.ios"]
+    assert cleanup_uninstall_cmd == reset_uninstall_cmd
+    assert snapshot_cmd[:5] == [
+        "xcodebuildmcp",
+        "--socket",
+        pre_reset_build_cmd[2],
+        "ui-automation",
+        "snapshot-ui",
+    ]
+    assert snapshot_cmd[-4:] == ["--simulator-id", "SIM-123", "--output", "json"]
+    assert type_cmd[:5] == [
+        "xcodebuildmcp",
+        "--socket",
+        pre_reset_build_cmd[2],
+        *XCODEBUILDMCP_CLI_TYPE_TEXT_COMMAND[1:],
+    ]
+    assert type_cmd[5:] == [
+        "--simulator-id",
+        "SIM-123",
+        "--element-ref",
+        "e14",
+        "--text",
+        proof_text,
+        "--replace-existing",
+        "--output",
+        "json",
+    ]
+    assert typed_wait_cmd[:5] == [
+        "xcodebuildmcp",
+        "--socket",
+        pre_reset_build_cmd[2],
+        *XCODEBUILDMCP_CLI_WAIT_FOR_UI_COMMAND[1:],
+    ]
+    assert typed_wait_cmd[5:] == [
+        "--simulator-id",
+        "SIM-123",
+        "--predicate",
+        "textContains",
+        "--text",
+        proof_text,
+        "--timeout-ms",
+        "5000",
+        "--poll-interval-ms",
+        "500",
+        "--output",
+        "json",
+    ]
+    assert tap_cmd[:5] == [
+        "xcodebuildmcp",
+        "--socket",
+        pre_reset_build_cmd[2],
+        *XCODEBUILDMCP_CLI_TAP_COMMAND[1:],
+    ]
+    assert tap_cmd[5:] == [
+        "--simulator-id",
+        "SIM-123",
+        "--element-ref",
+        "e15",
+        "--post-delay",
+        "1",
+        "--output",
+        "json",
+    ]
+    assert settled_cmd[:5] == [
+        "xcodebuildmcp",
+        "--socket",
+        pre_reset_build_cmd[2],
+        *XCODEBUILDMCP_CLI_WAIT_FOR_UI_COMMAND[1:],
+    ]
+    assert settled_cmd[5:] == [
+        "--simulator-id",
+        "SIM-123",
+        "--predicate",
+        "settled",
+        "--timeout-ms",
+        "8000",
+        "--poll-interval-ms",
+        "500",
+        "--settled-duration-ms",
+        "1000",
+        "--output",
+        "json",
+    ]
+    assert stop_cmd == ["xcodebuildmcp", "--socket", pre_reset_build_cmd[2], "daemon", "stop"]
+    expected_env = _expected_subprocess_env(module, axe_path=patched_axe_path)
+    expected_cli_kwargs = {
+        "check": False,
+        "capture_output": True,
+        "text": True,
+        "timeout": 180,
+        "env": expected_env,
+    }
+    assert pre_reset_build_kwargs == expected_cli_kwargs
+    assert build_kwargs == expected_cli_kwargs
+    assert snapshot_kwargs == expected_cli_kwargs
+    assert type_kwargs == expected_cli_kwargs
+    assert typed_wait_kwargs == expected_cli_kwargs
+    assert tap_kwargs == expected_cli_kwargs
+    assert settled_kwargs == expected_cli_kwargs
+    assert reset_uninstall_kwargs == {
+        "check": False,
+        "capture_output": True,
+        "text": True,
+        "timeout": 30,
+        "env": expected_env,
+    }
+    assert cleanup_uninstall_kwargs == reset_uninstall_kwargs
+    assert stop_kwargs == {
+        "check": False,
+        "capture_output": True,
+        "text": True,
+        "timeout": 10,
+        "env": expected_env,
+    }
+    result = json.loads(valid_result)
+    assert result == {
+        "afterTapCount": 2,
+        "afterTapScreenHash": "after-tap",
+        "afterTapTarget": f"e14|typeText|text-field||{post_tap_text}|",
+        "afterTapTargets": [
+            f"e14|typeText|text-field||{post_tap_text}|",
+            "e15|tap|button|Connect||",
+        ],
+        "buildStatus": "SUCCEEDED",
+        "bundleId": "ai.omnigent.ios",
+        "postTapText": post_tap_text,
+        "preResetBuildStatus": "SUCCEEDED",
+        "resetStatus": "SUCCEEDED",
+        "settledStatus": "SUCCEEDED",
+        "simulatorId": "SIM-123",
+        "tapElementRef": "e15",
+        "tapStatus": "SUCCEEDED",
+        "tapTarget": "e15|tap|button|Connect||",
+        "textElementRef": "e14",
+        "typeTextStatus": "SUCCEEDED",
+        "typedScreenHash": "typed",
+        "typedTarget": f"e14|typeText|text-field||{proof_text}|",
+        "typedText": proof_text,
+        "typedWaitStatus": "SUCCEEDED",
     }
 
 
