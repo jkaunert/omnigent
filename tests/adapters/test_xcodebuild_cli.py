@@ -18,22 +18,27 @@ from omnigent.adapters.xcodebuild_cli import (
     XCODEBUILD_CLI_SNAPSHOT_UI_TOOL_NAME,
     XCODEBUILD_CLI_TEST_TOOL_NAME,
     XCODEBUILD_CLI_TOOL_NAME,
+    XCODEBUILD_CLI_TYPE_TEXT_TOOL_NAME,
     XCODEBUILDMCP_AXE_PATH_ENV,
     XCODEBUILDMCP_CLI_COMMAND,
     XCODEBUILDMCP_CLI_ENV_OVERRIDES,
     XCODEBUILDMCP_CLI_SCREENSHOT_COMMAND,
     XCODEBUILDMCP_CLI_TEST_COMMAND,
+    XCODEBUILDMCP_CLI_TYPE_TEXT_COMMAND,
+    XCODEBUILDMCP_CLI_WAIT_FOR_UI_COMMAND,
     XcodeBuildCliAdapterPolicy,
     build_xcodebuildmcp_simulator_build_run_tool_source,
     build_xcodebuildmcp_simulator_runtime_logs_tool_source,
     build_xcodebuildmcp_simulator_screenshot_tool_source,
     build_xcodebuildmcp_simulator_snapshot_ui_tool_source,
     build_xcodebuildmcp_simulator_test_tool_source,
+    build_xcodebuildmcp_simulator_type_text_tool_source,
     write_xcodebuildmcp_simulator_build_run_tool,
     write_xcodebuildmcp_simulator_runtime_logs_tool,
     write_xcodebuildmcp_simulator_screenshot_tool,
     write_xcodebuildmcp_simulator_snapshot_ui_tool,
     write_xcodebuildmcp_simulator_test_tool,
+    write_xcodebuildmcp_simulator_type_text_tool,
 )
 
 
@@ -244,6 +249,19 @@ def test_generated_runtime_logs_tool_source_names_expected_tool() -> None:
     assert "osLogPath" in source
     assert "import time" in source
     assert "XCODEBUILDMCP_ENABLED_WORKFLOWS" in source
+    assert "XCODEBUILDMCP_EXPERIMENTAL_WORKFLOW_DISCOVERY" in source
+
+
+def test_generated_type_text_tool_source_names_expected_tool() -> None:
+    source = build_xcodebuildmcp_simulator_type_text_tool_source()
+
+    assert f"def {XCODEBUILD_CLI_TYPE_TEXT_TOOL_NAME}(" in source
+    assert "xcodebuildmcp" in source
+    assert "snapshot-ui" in source
+    assert "type-text" in source
+    assert "wait-for-ui" in source
+    assert "replace-existing" in source
+    assert "OMNIGENT_XCODEBUILDMCP_AXE_PATH" in source
     assert "XCODEBUILDMCP_EXPERIMENTAL_WORKFLOW_DISCOVERY" in source
 
 
@@ -667,6 +685,217 @@ def test_generated_snapshot_ui_tool_launches_then_captures_semantic_snapshot(
             "e15|tap|button|Connect||",
         ],
         "type": "runtime-snapshot",
+    }
+
+
+def test_generated_type_text_tool_launches_then_types_and_verifies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_path = tmp_path / "Demo.xcodeproj"
+    project_path.mkdir()
+    derived_data_path = tmp_path / "DerivedData"
+    patched_axe_path = str(tmp_path / "axe")
+    proof_text = "http://localhost:6767/gesture-proof"
+    policy = XcodeBuildCliAdapterPolicy(allowed_derived_data_roots=(str(tmp_path),))
+    tool_path = write_xcodebuildmcp_simulator_type_text_tool(tmp_path, policy=policy)
+    module = _load_module(tool_path)
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append((cmd, kwargs))
+        if "build-and-run" in cmd:
+            stdout = json.dumps(
+                {
+                    "didError": False,
+                    "data": {
+                        "summary": {"status": "SUCCEEDED"},
+                        "artifacts": {
+                            "bundleId": "ai.omnigent.ios",
+                            "simulatorId": "SIM-123",
+                        },
+                    },
+                }
+            )
+        elif "snapshot-ui" in cmd:
+            stdout = json.dumps(
+                {
+                    "didError": False,
+                    "data": {
+                        "summary": {"status": "SUCCEEDED"},
+                        "capture": {
+                            "type": "runtime-snapshot",
+                            "rs": "1",
+                            "screenHash": "before",
+                            "seq": 1,
+                            "count": 2,
+                            "targets": [
+                                "e14|typeText|text-field||http://localhost:6767|",
+                                "e15|tap|button|Connect||",
+                            ],
+                        },
+                    },
+                }
+            )
+        elif "type-text" in cmd:
+            stdout = json.dumps(
+                {
+                    "didError": False,
+                    "data": {"summary": {"status": "SUCCEEDED"}},
+                }
+            )
+        elif "wait-for-ui" in cmd:
+            stdout = json.dumps(
+                {
+                    "didError": False,
+                    "data": {
+                        "summary": {"status": "SUCCEEDED"},
+                        "capture": {
+                            "type": "runtime-snapshot",
+                            "rs": "1",
+                            "screenHash": "after",
+                            "seq": 2,
+                            "count": 2,
+                            "targets": [
+                                f"e14|typeText|text-field||{proof_text}|",
+                                "e15|tap|button|Connect||",
+                            ],
+                        },
+                    },
+                }
+            )
+        else:
+            stdout = ""
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setenv(OMNIGENT_XCODEBUILDMCP_AXE_PATH_ENV, patched_axe_path)
+
+    invalid_result = module.xcodebuildmcp_simulator_type_text(
+        str(project_path),
+        "Demo",
+        "Debug",
+        "Vision Pro",
+        str(derived_data_path),
+        proof_text,
+        ["-quiet"],
+    )
+    valid_result = module.xcodebuildmcp_simulator_type_text(
+        str(project_path),
+        "Demo",
+        "Debug",
+        "iPhone 17",
+        str(derived_data_path),
+        proof_text,
+        ["-quiet"],
+    )
+
+    assert invalid_result.startswith("Error: simulator_name must start with")
+    assert len(calls) == 5
+    build_cmd, build_kwargs = calls[0]
+    snapshot_cmd, snapshot_kwargs = calls[1]
+    type_cmd, type_kwargs = calls[2]
+    wait_cmd, wait_kwargs = calls[3]
+    stop_cmd, stop_kwargs = calls[4]
+    assert build_cmd[:5] == [
+        "xcodebuildmcp",
+        "--socket",
+        build_cmd[2],
+        "simulator",
+        "build-and-run",
+    ]
+    assert build_cmd[-2:] == ["--output", "json"]
+    assert json.loads(build_cmd[build_cmd.index("--json") + 1]) == {
+        "projectPath": str(project_path),
+        "scheme": "Demo",
+        "configuration": "Debug",
+        "simulatorName": "iPhone 17",
+        "useLatestOS": True,
+        "derivedDataPath": str(derived_data_path),
+        "extraArgs": ["-quiet"],
+    }
+    assert snapshot_cmd[:5] == [
+        "xcodebuildmcp",
+        "--socket",
+        build_cmd[2],
+        "ui-automation",
+        "snapshot-ui",
+    ]
+    assert snapshot_cmd[-4:] == ["--simulator-id", "SIM-123", "--output", "json"]
+    assert type_cmd[:5] == [
+        "xcodebuildmcp",
+        "--socket",
+        build_cmd[2],
+        *XCODEBUILDMCP_CLI_TYPE_TEXT_COMMAND[1:],
+    ]
+    assert type_cmd[5:] == [
+        "--simulator-id",
+        "SIM-123",
+        "--element-ref",
+        "e14",
+        "--text",
+        proof_text,
+        "--replace-existing",
+        "--output",
+        "json",
+    ]
+    assert wait_cmd[:5] == [
+        "xcodebuildmcp",
+        "--socket",
+        build_cmd[2],
+        *XCODEBUILDMCP_CLI_WAIT_FOR_UI_COMMAND[1:],
+    ]
+    assert wait_cmd[5:] == [
+        "--simulator-id",
+        "SIM-123",
+        "--predicate",
+        "textContains",
+        "--text",
+        proof_text,
+        "--timeout-ms",
+        "5000",
+        "--poll-interval-ms",
+        "500",
+        "--output",
+        "json",
+    ]
+    assert stop_cmd == ["xcodebuildmcp", "--socket", build_cmd[2], "daemon", "stop"]
+    expected_env = _expected_subprocess_env(module, axe_path=patched_axe_path)
+    assert build_kwargs == {
+        "check": False,
+        "capture_output": True,
+        "text": True,
+        "timeout": 180,
+        "env": expected_env,
+    }
+    assert snapshot_kwargs == build_kwargs
+    assert type_kwargs == build_kwargs
+    assert wait_kwargs == build_kwargs
+    assert stop_kwargs == {
+        "check": False,
+        "capture_output": True,
+        "text": True,
+        "timeout": 10,
+        "env": expected_env,
+    }
+    result = json.loads(valid_result)
+    assert result == {
+        "afterCount": 2,
+        "afterScreenHash": "after",
+        "afterTargets": [
+            f"e14|typeText|text-field||{proof_text}|",
+            "e15|tap|button|Connect||",
+        ],
+        "beforeScreenHash": "before",
+        "beforeTarget": "e14|typeText|text-field||http://localhost:6767|",
+        "buildStatus": "SUCCEEDED",
+        "bundleId": "ai.omnigent.ios",
+        "elementRef": "e14",
+        "simulatorId": "SIM-123",
+        "typeTextStatus": "SUCCEEDED",
+        "typedText": proof_text,
+        "verifiedText": proof_text,
+        "waitStatus": "SUCCEEDED",
     }
 
 
