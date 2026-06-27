@@ -106,10 +106,12 @@ The current spike proves the first narrow adapter behavior:
 | XcodeBuildMCP type-text interaction through a CLI adapter | `replacement-ready` for bounded iOS simulator text entry into a discovered text-field ref | `omnigent.adapters.xcodebuild_cli.XcodeBuildCliAdapterPolicy` now installs a generated `xcodebuildmcp_simulator_type_text` Python dynamic tool for the first UI interaction boundary. The tool strips ambient `XCODEBUILDMCP_AXE_PATH`, maps an explicit `OMNIGENT_XCODEBUILDMCP_AXE_PATH`, uses a per-call isolated XcodeBuildMCP socket, runs `xcodebuildmcp simulator build-and-run --output json`, captures a semantic snapshot, selects the first target that explicitly advertises `typeText` on a `text-field`, runs `xcodebuildmcp ui-automation type-text --replace-existing`, then verifies the sentinel through `xcodebuildmcp ui-automation wait-for-ui --predicate textContains`. `DEVELOPER_DIR=/Applications/Xcode-27.0.0-Beta.2.app/Contents/Developer uvx --from . python scripts/prove_stock_codex_replacement.py --proof apple-xcodebuild-cli-type-text --codex-path /opt/homebrew/bin/codex --live-proof-timeout 480 --xcodebuildmcp-axe-path ~/.cache/omnigent/axe/payloads/9051a6e13fdd8e0789f734a11fc1e71f48def916/axe` proved stock Codex `0.142.2` invoked that generated tool through normal Omnigent `dynamicTools`; persisted session `conv_afea5726821741c6a2cfbe255d56d41e` included function call `call_D9IzTX3TfyN6OUgQOd8eopRx`, output containing `"buildStatus": "SUCCEEDED"`, `"typeTextStatus": "SUCCEEDED"`, `"waitStatus": "SUCCEEDED"`, `"bundleId": "ai.omnigent.ios"`, `"elementRef": "e14"`, `beforeTarget` with `http://localhost:6767`, and `afterTargets` with `http://localhost:6767/gesture-proof`; the model replied `XCODEBUILDMCP_CLI_TYPE_TEXT_OK`. This proves bounded text-entry interaction through the CLI adapter, not tap, drag, multi-step navigation, debugger attach, device execution, streaming log follow, XcodeBuildMCP MCP parity, or Xcode IDE bridge tools. |
 | XcodeBuildMCP tap interaction through a CLI adapter | `replacement-ready` for bounded iOS simulator tap on a discovered button ref after deterministic app-state reset | `omnigent.adapters.xcodebuild_cli.XcodeBuildCliAdapterPolicy` now installs a generated `xcodebuildmcp_simulator_tap` Python dynamic tool for the first tap boundary. The tool strips ambient `XCODEBUILDMCP_AXE_PATH`, maps an explicit `OMNIGENT_XCODEBUILDMCP_AXE_PATH`, uses a per-call isolated XcodeBuildMCP socket, performs an initial `xcodebuildmcp simulator build-and-run --output json` to discover the simulator and bundle id, clears persisted app state with command-scoped `xcrun simctl uninstall`, launches a fresh install, captures a semantic snapshot, types `http://localhost:6767/gesture-proof` into the discovered text field, selects only the discovered `tap` action on the `Connect` button, taps it, then waits for a settled post-tap snapshot whose text field has normalized back to `http://localhost:6767`. `DEVELOPER_DIR=/Applications/Xcode-27.0.0-Beta.2.app/Contents/Developer uvx --from . python scripts/prove_stock_codex_replacement.py --proof apple-xcodebuild-cli-tap --codex-path /opt/homebrew/bin/codex --live-proof-timeout 480 --xcodebuildmcp-axe-path ~/.cache/omnigent/axe/payloads/9051a6e13fdd8e0789f734a11fc1e71f48def916/axe` proved stock Codex `0.142.2` invoked that generated tool through normal Omnigent `dynamicTools`; persisted session `conv_a7d66fc64df148edbe616855fe0de7fd` included function call `call_DCsJXv24ga2bZYGrUaKz3Nef`, output containing `"preResetBuildStatus": "SUCCEEDED"`, `"resetStatus": "SUCCEEDED"`, `"buildStatus": "SUCCEEDED"`, `"typeTextStatus": "SUCCEEDED"`, `"tapStatus": "SUCCEEDED"`, `"settledStatus": "SUCCEEDED"`, `"bundleId": "ai.omnigent.ios"`, `afterTapTarget` with `http://localhost:6767`, and `afterTapScreenHash: "13s4ko7"`; the model replied `XCODEBUILDMCP_CLI_TAP_OK`. This proves one bounded tap interaction through the CLI adapter, not drag, multi-step navigation, debugger attach, device execution, streaming log follow, XcodeBuildMCP MCP parity, or Xcode IDE bridge tools. |
 | Representative Apple workflow smoke through Omnigent plus stock Codex | `replacement-ready` for a routed workflow that uses Apple docs plus read-only Xcode discovery in one stock-Codex session | `scripts/prove_stock_codex_replacement.py --proof apple-workflow-smoke --codex-path /opt/homebrew/bin/codex --live-proof-timeout 240` proved stock Codex `0.142.2` began with the deterministic Apple route block, invoked Omnigent's generated `fetch_apple_docs` tool for `https://developer.apple.com/documentation/swift/string`, then invoked read-only `XcodeBuildMCP__discover_projs` against the Omnigent checkout. Persisted session `conv_6a8bb2b3fa6c4dc182d79ed961581e13` included Apple-docs call `call_YhQNwu4vF4gs4nDZJcTRbNfp` with output containing `title: String`, source URL, and timestamp `2026-06-27T22:39:20.021Z`, plus XcodeBuildMCP call `call_0CgVXm1tP9O2Tcua92bYpovU` with output finding `ap-web/ios/Omnigent.xcodeproj`; the model replied `APPLE_WORKFLOW_SMOKE_OK`. The proof rejects build, run, test, launch, simulator boot/open, and device tools. This proves one representative routed workflow surface, not full release-readiness, branch-diff review, clean-auth onboarding, default-path cutover, or broader XcodeBuildMCP workflow parity. |
+| Default-path cutover rehearsal | `replacement-ready` for current-host ambient bundle lookup plus `PATH` stock-Codex resolution | `scripts/prove_stock_codex_replacement.py --proof default-path-cutover --live-proof-timeout 600` proved the same bounded replacement-ready aggregate as `cutover-ready` while rejecting explicit `--apple-bundle`, explicit `--codex-path`, and `--allow-fork-codex`. The successful run resolved the Apple workflow bundle through `$HOME/.codex-fork plugin cache`, resolved Codex from `PATH` to `/opt/homebrew/Caskroom/codex/0.142.2/codex-aarch64-apple-darwin`, reported `codex-cli 0.142.2`, printed fallback steps, and completed graph, router matrix, tool-plane, Apple memory MCP, Apple-docs CLI, XcodeBuildMCP CLI build/install/launch, and read-only XcodeBuildMCP discovery. Persisted evidence included tool-plane session `conv_43ac1aa5b2b54c6c9481e19f487b56e8`/call `call_s1JJto0zLnIntw6SWuOVVBIP`, memory session `conv_339991bb4daf457f9641c74087ba50e4`/call `call_X1378jE22OgPHISMZqrQnoEc`, Apple-docs session `conv_84b4d6ad9dc24d54a5af699a423361d2`/call `call_wOIBY2DurAKNFAOizWVMZ2K0` with timestamp `2026-06-27T23:48:47.569Z`, XcodeBuildMCP CLI run session `conv_516d0163660449f9bb26a89565f8a992`/call `call_qAavmde4rpb8om5WSu2QEYe2`, and read-only Xcode discovery session `conv_82c10dfceea1443abcabf22d23a8e9d6`/call `call_T6mZb5QP9aJnmWMTkokcWKLG`. An earlier `--live-proof-timeout 420` attempt timed out once at the final read-only Xcode discovery surface after preceding surfaces passed; a standalone discovery rerun then passed in 165.2s, and the full 600-second default-path rerun passed. This proves the current-host default lookup and fallback contract, not clean `CODEX_HOME` auth onboarding, cross-machine portability, or any actual mutation of launcher defaults. |
 
-This proves the scoped carry-parity claims above, but not full operational
-cutover. A clean install/runtime rehearsal is still required before replacing
-the proven Codex-fork path.
+This proves the scoped carry-parity claims above plus current-host clean-profile
+and default-path rehearsals, but not full operational cutover. Clean
+`CODEX_HOME` auth onboarding, cross-machine portability, and actual launcher or
+production-default mutation remain separate decisions.
 
 ## Proof Commands
 
@@ -354,6 +356,21 @@ intentionally excludes known-blocked MCP Sosumi and MCP build/run launch paths,
 as well as the heavier optional UI-automation slices that remain covered by
 their standalone proof commands.
 
+Default-path cutover rehearsal:
+
+```bash
+uvx --from . python scripts/prove_stock_codex_replacement.py \
+  --proof default-path-cutover \
+  --live-proof-timeout 600
+```
+
+The `default-path-cutover` proof runs the same bounded replacement-ready
+aggregate as `cutover-ready`, but it fails closed if `--apple-bundle`,
+`--codex-path`, or `--allow-fork-codex` are supplied. It must resolve the Apple
+workflow bundle through the ambient default lookup path and resolve stock Codex
+from `PATH`. The proof prints fallback steps and does not mutate `PATH`,
+`CODEX_HOME`, Xcode selection, the Codex fork, or launcher defaults.
+
 Clean-profile cutover-ready rehearsal:
 
 ```bash
@@ -457,6 +474,48 @@ the Swift `String` source URL, and timestamp `2026-06-27T22:39:20.021Z`; the
 XcodeBuildMCP result found `ap-web/ios/Omnigent.xcodeproj`; the model replied
 `APPLE_WORKFLOW_SMOKE_OK`. This closes the first representative routed workflow
 smoke, not full release/readiness/review parity and not default-path cutover.
+
+Current default-path cutover status on 2026-06-27: `--proof
+default-path-cutover --live-proof-timeout 600` passed using ambient default
+selection. The run used no `--apple-bundle` and no `--codex-path`; it selected
+the Apple workflow bundle from `$HOME/.codex-fork plugin cache`, selected stock
+Codex from `PATH`, resolved `/opt/homebrew/Caskroom/codex/0.142.2/codex-aarch64-apple-darwin`,
+reported `codex-cli 0.142.2`, and printed fallback steps that preserve the
+Codex fork and all carries. Live proof results:
+
+- `graph` passed in 27.4s with `GRAPH_OK`.
+- `router-matrix` passed in 139.5s with sessions
+  `conv_d30b2de8030445048dadc51dafada15e`,
+  `conv_9ae13372fa4541978691fc4e20a62ca1`,
+  `conv_9207b789e86f4b058e16d44fdeae25eb`,
+  `conv_ea854e8eb1e34bcba1a235bb66c8bb26`,
+  `conv_3b74cea696ca470498be73291eff5580`,
+  `conv_f25950902dca4d8fb16b3e64acc2a4ec`, and
+  `conv_b2b6f45061ba446cbed390071c80357a`.
+- `tool-plane` passed in 26.2s with session
+  `conv_43ac1aa5b2b54c6c9481e19f487b56e8` and call
+  `call_s1JJto0zLnIntw6SWuOVVBIP`.
+- `apple-mcp-memory` passed in 19.4s with session
+  `conv_339991bb4daf457f9641c74087ba50e4` and call
+  `call_X1378jE22OgPHISMZqrQnoEc`.
+- `apple-docs-cli` passed in 34.6s with session
+  `conv_84b4d6ad9dc24d54a5af699a423361d2`, call
+  `call_wOIBY2DurAKNFAOizWVMZ2K0`, and timestamp
+  `2026-06-27T23:48:47.569Z`.
+- `apple-xcodebuild-cli-run` passed in 70.0s with session
+  `conv_516d0163660449f9bb26a89565f8a992` and call
+  `call_qAavmde4rpb8om5WSu2QEYe2`.
+- `apple-mcp-xcodebuild` passed in 33.8s with session
+  `conv_82c10dfceea1443abcabf22d23a8e9d6` and call
+  `call_T6mZb5QP9aJnmWMTkokcWKLG`.
+
+An earlier default-path aggregate attempt with `--live-proof-timeout 420` timed
+out once at the final `apple-mcp-xcodebuild` surface after the preceding
+surfaces passed. A standalone `apple-mcp-xcodebuild` rerun then passed in
+165.2s with session `conv_9c2b49240b814805a16dc0b406f23a26` and call
+`call_5zS4Ehoowx603hJRfsZx5sXK`; the full default-path rerun with a 600-second
+per-step budget passed. This closes current-host default-path rehearsal without
+mutating launcher defaults, not clean-auth onboarding or cross-machine cutover.
 
 Legacy aggregate status on 2026-06-25: `graph`, `tool-plane`, and
 `apple-mcp-memory` passed under `--proof all`; `apple-mcp-sosumi` timed out at
@@ -641,10 +700,12 @@ Run these in order unless a later gate becomes cheaper due to new evidence.
      only if product cutover requires a higher-fidelity release-readiness,
      branch-diff review, or multi-tool Apple workflow path.
 
-8. Default-path cutover rehearsal
-   - The clean-profile aggregate proof now proves the package/runtime contract
-     without changing the existing Codex fork. A later operational gate should
-     run the Omnigent path as the selected default and record fallback steps.
+8. Default launcher activation decision
+   - The default-path rehearsal is green for current-host ambient bundle lookup
+     and `PATH` stock-Codex resolution, and it records fallback steps without
+     mutating launcher defaults. A later operational gate should explicitly
+     decide whether to point a real launcher, shell alias, or production default
+     at Omnigent and record the rollback command for that specific mutation.
 
 ## Non-Actions
 

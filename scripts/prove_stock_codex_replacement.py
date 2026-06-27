@@ -205,6 +205,15 @@ RELATIVE_MARKDOWN_PATH_RE = re.compile(r"`((?:\.\.?/)[^`]+)`")
 PLUGIN_SKILL_REF_RE = re.compile(rf"\b{re.escape(PLUGIN_NAME)}:([A-Za-z0-9_.-]+)\b")
 EXPECTED_APPLE_MCP_SERVERS = frozenset({"sosumi", "memory", "XcodeBuildMCP"})
 DEFAULT_LIVE_PROOF_TIMEOUT_SECONDS = 180.0
+DEFAULT_PATH_CUTOVER_FALLBACK_STEPS = (
+    "Keep the Codex fork and all carries intact; this rehearsal does not authorize deletion.",
+    "If default lookup fails, rerun cutover-ready with explicit --apple-bundle and --codex-path "
+    "to separate default-path drift from adapter/runtime failure.",
+    "If live stock-Codex execution fails, return launch/PATH selection to the previously proven "
+    "Codex-fork route and keep the failed Omnigent evidence for diagnosis.",
+    "If temporary cleanup is interrupted, remove only omnigent-stock-codex-proof-* temp trees "
+    "after preserving any needed logs.",
+)
 T = TypeVar("T")
 
 
@@ -299,24 +308,44 @@ class SessionQueryTimeoutError(Exception):
     """A sessions-API query timed out after capturing best-effort diagnostics."""
 
 
-def _candidate_bundles() -> list[Path]:
+def _candidate_bundle_entries() -> list[tuple[str, Path]]:
     env_path = os.environ.get("APPLE_APPDEV_WORKFLOW_BUNDLE", "").strip()
-    candidates: list[Path] = []
+    candidates: list[tuple[str, Path]] = []
     if env_path:
-        candidates.append(Path(env_path).expanduser())
+        candidates.append(("APPLE_APPDEV_WORKFLOW_BUNDLE", Path(env_path).expanduser()))
     candidates.extend(
         [
-            Path.home()
-            / ".codex-fork/plugins/cache/LocalAppleWorkflow/apple-appdev-workflow/0.1.1",
-            Path.home() / ".codex/plugins/cache/LocalAppleWorkflow/apple-appdev-workflow/0.1.1",
+            (
+                "$HOME/.codex-fork plugin cache",
+                Path.home()
+                / ".codex-fork/plugins/cache/LocalAppleWorkflow/apple-appdev-workflow/0.1.1",
+            ),
+            (
+                "$HOME/.codex plugin cache",
+                Path.home()
+                / ".codex/plugins/cache/LocalAppleWorkflow/apple-appdev-workflow/0.1.1",
+            ),
         ]
     )
     return candidates
 
 
+def _candidate_bundles() -> list[Path]:
+    return [path for _label, path in _candidate_bundle_entries()]
+
+
+def default_bundle_selector(path: Path) -> str:
+    """Return the default lookup source that selected an installed bundle."""
+    resolved_path = path.expanduser().resolve()
+    for label, candidate in _candidate_bundle_entries():
+        if candidate.expanduser().resolve() == resolved_path:
+            return label
+    return "unknown default candidate"
+
+
 def resolve_default_bundle() -> Path:
     """Return the first installed Apple workflow bundle candidate."""
-    for candidate in _candidate_bundles():
+    for _label, candidate in _candidate_bundle_entries():
         if (candidate / ".codex-plugin/plugin.json").is_file() and (
             candidate / "skills" / SELECTED_SKILL / "SKILL.md"
         ).is_file():
@@ -364,6 +393,28 @@ def codex_version(path: Path) -> str:
         return f"unknown ({exc})"
     text = (completed.stdout or completed.stderr).strip()
     return text or f"unknown (exit {completed.returncode})"
+
+
+def print_default_path_cutover_fallback_steps(
+    *,
+    source_bundle: Path,
+    bundle_selector: str,
+    codex_path: Path,
+) -> None:
+    """Emit operator fallback evidence for the default-path rehearsal."""
+    print("default_path_cutover_rehearsal=selected")
+    print("default_path_cutover_apple_bundle_arg=not_set")
+    print("default_path_cutover_codex_path_arg=not_set")
+    print(f"default_path_cutover_bundle_selector={bundle_selector}")
+    print(f"default_path_cutover_bundle_source={source_bundle}")
+    print("default_path_cutover_codex_selector=PATH")
+    print(f"default_path_cutover_codex_path={codex_path}")
+    for index, step in enumerate(DEFAULT_PATH_CUTOVER_FALLBACK_STEPS, start=1):
+        print(f"default_path_cutover_fallback_step_{index}={step}")
+    print(
+        "ASSERTION: default-path cutover rehearsal used ambient bundle lookup "
+        "and PATH-resolved stock Codex without mutating the Codex fork"
+    )
 
 
 def run_live_proof_step(
@@ -3252,6 +3303,7 @@ def parse_args() -> argparse.Namespace:
             "apple-xcodebuild-cli-tap",
             "apple-workflow-smoke",
             "cutover-ready",
+            "default-path-cutover",
             "all",
         ),
         default="graph",
@@ -3281,7 +3333,9 @@ def parse_args() -> argparse.Namespace:
             "'apple-workflow-smoke' runs one routed Apple workflow that uses "
             "Apple docs plus read-only XcodeBuildMCP discovery, and "
             "'cutover-ready' runs the replacement-ready aggregate and "
-            "intentionally excludes known-blocked MCP sosumi/run paths."
+            "intentionally excludes known-blocked MCP sosumi/run paths. "
+            "'default-path-cutover' runs the same replacement-ready aggregate "
+            "using ambient default bundle lookup and PATH-resolved stock Codex."
         ),
     )
     parser.add_argument(
@@ -3336,7 +3390,20 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    proof = "tool-plane" if args.proof == "mcp-tools" else args.proof
+    requested_proof = "tool-plane" if args.proof == "mcp-tools" else args.proof
+    default_path_cutover = requested_proof == "default-path-cutover"
+    if default_path_cutover:
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "default-path-cutover must use default Apple bundle lookup; omit --apple-bundle."
+            )
+        if args.codex_path is not None:
+            raise SystemExit(
+                "default-path-cutover must use PATH-resolved stock Codex; omit --codex-path."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit("default-path-cutover cannot allow a Codex-fork binary.")
+    proof = "cutover-ready" if default_path_cutover else requested_proof
     source_bundle = (
         args.apple_bundle.expanduser() if args.apple_bundle else resolve_default_bundle()
     )
@@ -3344,7 +3411,7 @@ def main() -> int:
         raise SystemExit(f"Apple bundle not found: {source_bundle}")
 
     codex_path: Path | None = None
-    if not args.skip_live or args.codex_path:
+    if not args.skip_live or args.codex_path or default_path_cutover:
         codex_path = resolve_codex_path(args.codex_path)
         assert_stock_codex_path(codex_path, allow_fork_codex=args.allow_fork_codex)
 
@@ -3462,6 +3529,7 @@ def main() -> int:
             "apple-xcodebuild-cli-tap",
             "apple-workflow-smoke",
             "cutover-ready",
+            "default-path-cutover",
             "all",
         }:
             mcp_manifest = prove_apple_mcp_manifest(agent_dir)
@@ -3559,6 +3627,13 @@ def main() -> int:
         else:
             print(f"codex_path={codex_path}")
             print(f"codex_version={codex_version(codex_path)}")
+        if default_path_cutover:
+            assert codex_path is not None
+            print_default_path_cutover_fallback_steps(
+                source_bundle=source_bundle,
+                bundle_selector=default_bundle_selector(source_bundle),
+                codex_path=codex_path,
+            )
         print(f"static_relative_files={len(graph.relative_paths)}")
         print(f"static_skill_refs={len(graph.skill_refs)}")
         print("ASSERTION: selected Apple skill graph resolves inside the Omnigent bundle")

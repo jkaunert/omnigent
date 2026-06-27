@@ -52,16 +52,20 @@ track.
 
 ## Next Proof Gate
 
-The clean-profile `cutover-ready` aggregate proof is now green for the current
-host with stock Codex `0.142.2`, an installed `uvx --from` Omnigent package
-path, isolated `HOME`/cache/XDG dirs, explicit Apple bundle input, and preserved
-real `CODEX_HOME` for authentication. The next gate should move from
-carry-parity to product operations:
+The clean-profile `cutover-ready` aggregate proof and the default-path cutover
+rehearsal are now green for the current host with stock Codex `0.142.2`. The
+clean-profile gate used isolated `HOME`/cache/XDG dirs, explicit Apple bundle
+input, and preserved real `CODEX_HOME` for authentication. The default-path gate
+used ambient Apple bundle lookup, `PATH` stock-Codex resolution, and documented
+fallback steps without mutating launcher defaults. The next gate should stay in
+product operations:
 
 - prove clean Codex-auth onboarding if first-run auth is in scope;
 - broaden the Apple workflow smoke to release/readiness/review only if product
   cutover requires that higher-fidelity path; or
-- run a default-path cutover rehearsal with documented fallback steps.
+- explicitly decide whether to mutate a real launcher, shell alias, or
+  production default to point at Omnigent, and document the rollback command
+  for that specific mutation.
 
 If ChatGPT mobile/app-server remote resume compatibility becomes product scope
 later, reopen that as a new Omnigent-side remote-resume proof instead of
