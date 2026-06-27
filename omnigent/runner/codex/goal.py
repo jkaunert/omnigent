@@ -17,6 +17,8 @@ from fastapi.responses import JSONResponse, Response
 
 from omnigent.native_coding_agents import CODEX_NATIVE_CODING_AGENT
 
+_GOALS_DISABLED_MESSAGE = "goals feature is disabled"
+
 
 class BridgeStateForSession(Protocol):
     """Callable that resolves a live Codex app-server bridge state."""
@@ -129,6 +131,11 @@ class CodexGoalRunner:
             },
         )
 
+    @staticmethod
+    def _is_goals_disabled_error(exc: BaseException) -> bool:
+        """Return true for Codex app-server's disabled-goals JSON-RPC error."""
+        return _GOALS_DISABLED_MESSAGE in str(exc).lower()
+
     async def _request(
         self,
         conv_id: str,
@@ -156,6 +163,8 @@ class CodexGoalRunner:
         except ValueError as exc:
             return self._malformed_response(action, str(exc))
         except Exception as exc:  # noqa: BLE001 - surface app-server goal failures to AP.
+            if method == "thread/goal/get" and self._is_goals_disabled_error(exc):
+                return {"goal": None}
             self._logger.warning(
                 "Codex-native %s failed for session=%s",
                 method,
