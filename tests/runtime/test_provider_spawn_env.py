@@ -290,6 +290,65 @@ def test_codex_uses_openai_global_default(config_home: Path) -> None:
     assert env["HARNESS_CODEX_WIRE_API"] == "responses"
 
 
+def test_codex_allows_http_provider_base_url(config_home: Path) -> None:
+    """Codex provider URLs may use plain HTTP for local gateways."""
+    config = {
+        "providers": {
+            "openai": {
+                "kind": "local",
+                "default": True,
+                "openai": _key_family(
+                    "http://127.0.0.1:4000/v1",
+                    "sk-local-secret",
+                    "gpt-local-model",
+                ),
+            }
+        }
+    }
+    _write_config(config_home, config)
+    spec = _make_spec(harness="codex")
+
+    env = _build_codex_spawn_env(spec, workdir=None)
+
+    assert env["HARNESS_CODEX_GATEWAY_BASE_URL"] == "http://127.0.0.1:4000/v1"
+    assert env["HARNESS_CODEX_GATEWAY_HOST"] == "http://127.0.0.1:4000"
+
+
+@pytest.mark.parametrize(
+    "provider_base_url",
+    [
+        "ws://openai.example.com/v1",
+        "wss://openai.example.com/v1",
+        "not a url",
+    ],
+)
+def test_codex_rejects_non_http_provider_base_url(
+    config_home: Path,
+    provider_base_url: str,
+) -> None:
+    """Codex fails closed before stock Codex sees unsafe fallback URLs."""
+    from omnigent.errors import OmnigentError
+
+    config = {
+        "providers": {
+            "openai": {
+                "kind": "key",
+                "default": True,
+                "openai": _key_family(
+                    provider_base_url,
+                    "sk-oai-secret",
+                    "gpt-default-model",
+                ),
+            }
+        }
+    }
+    _write_config(config_home, config)
+    spec = _make_spec(harness="codex")
+
+    with pytest.raises(OmnigentError, match=r"http:// or https://"):
+        _build_codex_spawn_env(spec, workdir=None)
+
+
 def test_codex_threads_router_selection_host_scope_from_executor_config(
     config_home: Path,
 ) -> None:

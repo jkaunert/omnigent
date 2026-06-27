@@ -155,6 +155,12 @@ def use_error(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
+def use_tool_call_then_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MockExecutor that yields tool-call progress, then an ExecutorError."""
+    monkeypatch.setenv("MOCK_EXECUTOR_SCRIPT", "tool_call_then_error")
+
+
+@pytest.fixture
 def use_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
     """MockExecutor that yields a provider-side TurnCancelled."""
     monkeypatch.setenv("MOCK_EXECUTOR_SCRIPT", "cancelled")
@@ -401,6 +407,33 @@ async def test_executor_error_terminates_with_response_failed(
     # via the RuntimeError wrap in the adapter; the scaffold
     # builds an ErrorDetail with the exception's str().
     assert "mock error" in error_detail["message"]
+
+
+async def test_executor_error_after_tool_request_includes_progress_diagnostic(
+    use_tool_call_then_error: None,
+    manager: HarnessProcessManager,
+) -> None:
+    """Adapter failures include early-output progress diagnostics."""
+    conv_id = "conv_tool_then_error"
+    client = await manager.get_client(conv_id, _TEST_HARNESS_NAME)
+    events: list[_ParsedSSEEvent] = []
+    async with client.stream(
+        "POST", f"/v1/sessions/{conv_id}/events", json=_start_turn_body()
+    ) as response:
+        async for event in _stream_iter(response):
+            events.append(event)
+
+    assert events[-1].event == "response.failed"
+    output_items = [e for e in events if e.event == "response.output_item.done"]
+    assert any(item.data["item"].get("call_id") == "call_stalled_1" for item in output_items)
+    error_detail = events[-1].data["response"]["error"]
+    assert error_detail is not None
+    message = error_detail["message"]
+    assert "mock stalled after tool request" in message
+    assert "early output item progress before durable visible output" in message
+    assert "tool_call_request_seen=True" in message
+    assert "tool_call_complete_seen=False" in message
+    assert "text_delta_seen=False" in message
 
 
 async def test_turn_cancelled_terminates_with_response_cancelled(

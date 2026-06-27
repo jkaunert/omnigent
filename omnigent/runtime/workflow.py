@@ -504,6 +504,21 @@ def _origin_of(base_url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def _assert_codex_http_gateway_base_url(base_url: str) -> None:
+    """Reject Codex gateway URLs that stock Codex cannot HTTP-fallback to."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(base_url)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return
+    raise OmnigentError(
+        "Codex gateway provider base_url must use an http:// or https:// URL. "
+        f"Got {base_url!r}; websocket-only or malformed provider URLs cannot be "
+        "made safe around stock Codex's HTTP fallback path.",
+        code=ErrorCode.INVALID_INPUT,
+    )
+
+
 def configure_agent_harness_with_provider(
     env: dict[str, str],
     entry: ProviderEntry,
@@ -719,6 +734,8 @@ def _apply_provider_family(
         the family declares one).
     """
     cfg = _UCODE_HARNESS_CONFIGS[harness_type]
+    if harness_type == "codex":
+        _assert_codex_http_gateway_base_url(family.base_url)
     env[_HARNESS_GATEWAY_FLAG[harness_type]] = "true"
     env[cfg.base_url_key] = family.base_url
     env[cfg.host_key] = _origin_of(family.base_url)

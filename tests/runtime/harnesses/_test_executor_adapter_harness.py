@@ -11,6 +11,8 @@ Four scripts:
 - ``"tool_call"``: a ToolCallRequest, then a ToolCallComplete
   with a result, then a TurnComplete (no further text).
 - ``"error"``: an ExecutorError event.
+- ``"tool_call_then_error"``: a ToolCallRequest followed by an
+  ExecutorError before visible text or tool output completes.
 - ``"cancelled"``: a TurnCancelled event.
 - ``"capture_messages"``: writes the received messages list as
   JSON to the path in ``MOCK_EXECUTOR_CAPTURE_PATH``, then
@@ -149,6 +151,26 @@ def _build_error() -> Executor:
     return executor
 
 
+def _build_tool_call_then_error() -> Executor:
+    """
+    MockExecutor scripted with early output-item progress, then an error.
+
+    :returns: A configured :class:`MockExecutor` instance.
+    """
+    executor = MockExecutor()
+    executor._turns.append(
+        [
+            ToolCallRequest(
+                name="echo_tool",
+                args={"x": 1},
+                metadata={"call_id": "call_stalled_1"},
+            ),
+            ExecutorError(message="mock stalled after tool request"),
+        ]
+    )
+    return executor
+
+
 def _build_cancelled() -> Executor:
     """
     MockExecutor scripted with a provider-side :class:`TurnCancelled`.
@@ -180,6 +202,7 @@ _SCRIPTS: dict[str, Callable[[], Executor]] = {
     "text_only": _build_text_only,
     "tool_call": _build_tool_call,
     "error": _build_error,
+    "tool_call_then_error": _build_tool_call_then_error,
     "cancelled": _build_cancelled,
     "capture_messages": _build_capture_messages,
 }

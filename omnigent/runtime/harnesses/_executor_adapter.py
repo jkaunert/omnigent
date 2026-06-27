@@ -110,6 +110,65 @@ _OBSERVED_TOOL_CALL_STATUS = "in_progress"
 _MCP_TOOL_NAME_PREFIX = "mcp__"
 
 
+class _AdapterTurnProgress:
+    """Compact per-turn progress summary for adapter-level failure diagnostics."""
+
+    def __init__(self, response_id: str) -> None:
+        self.response_id = response_id
+        self.event_count = 0
+        self.last_event: str | None = None
+        self.text_delta_seen = False
+        self.reasoning_delta_seen = False
+        self.tool_call_request_seen = False
+        self.tool_call_complete_seen = False
+        self.turn_complete_seen = False
+        self.final_response_seen = False
+
+    def note_event(self, event: ExecutorEvent) -> None:
+        """Record one inner-executor event before it is translated."""
+        self.event_count += 1
+        self.last_event = type(event).__name__
+        if isinstance(event, TextChunk) and event.text:
+            self.text_delta_seen = True
+        elif isinstance(event, ReasoningChunk) and event.delta:
+            self.reasoning_delta_seen = True
+        elif isinstance(event, ToolCallRequest):
+            self.tool_call_request_seen = True
+        elif isinstance(event, ToolCallComplete):
+            self.tool_call_complete_seen = True
+        elif isinstance(event, TurnComplete):
+            self.turn_complete_seen = True
+            self.final_response_seen = bool(event.response)
+
+    def has_durable_visible_output(self) -> bool:
+        """Return true once the turn produced durable user-visible output."""
+        return self.text_delta_seen or self.final_response_seen or self.tool_call_complete_seen
+
+    def stalled_after_early_output(self) -> bool:
+        """Return true for the adapter-level version of the Codex carry stall."""
+        return self.tool_call_request_seen and not self.has_durable_visible_output()
+
+    def diagnostic(self) -> str:
+        """Return a single-line diagnostic suitable for logs and failure text."""
+        state = (
+            f"adapter_progress response_id={self.response_id} "
+            f"event_count={self.event_count} "
+            f"last_event={self.last_event or 'none'} "
+            f"text_delta_seen={self.text_delta_seen} "
+            f"reasoning_delta_seen={self.reasoning_delta_seen} "
+            f"tool_call_request_seen={self.tool_call_request_seen} "
+            f"tool_call_complete_seen={self.tool_call_complete_seen} "
+            f"turn_complete_seen={self.turn_complete_seen} "
+            f"final_response_seen={self.final_response_seen}"
+        )
+        if self.stalled_after_early_output():
+            return (
+                "adapter progress: turn emitted early output item progress before "
+                f"durable visible output; {state}"
+            )
+        return f"adapter progress: {state}"
+
+
 def _finalize_trace_status(response_id: str) -> None:
     """PATCH the trace status to OK on the MLflow server.
 
@@ -371,6 +430,7 @@ class ExecutorAdapter(HarnessApp):
 
         user_message = _extract_last_user_message(request.input)
         # --- End tracing setup --------------------------------------------
+        progress = _AdapterTurnProgress(ctx.response_id)
 
         # Watcher for mid-turn steering injections. The scaffold
         # routes incoming steering events with
@@ -415,6 +475,7 @@ class ExecutorAdapter(HarnessApp):
                     system_prompt=system_prompt,
                     config=config,
                 ):
+                    progress.note_event(event)
                     if ctx.cancelled.is_set():
                         if tctx is not None and agent_span is not None:
                             from omnigent.runtime.telemetry import record_cancellation
@@ -476,7 +537,12 @@ class ExecutorAdapter(HarnessApp):
                                 error=event.message,
                             )
                             agent_span = None
-                        raise RuntimeError(f"inner executor error: {event.message}")
+                        diagnostic = progress.diagnostic()
+                        _logger.warning(
+                            "inner executor error after adapter progress: %s",
+                            diagnostic,
+                        )
+                        raise RuntimeError(f"inner executor error: {event.message}\n{diagnostic}")
         except BaseException:
             # End agent span on unhandled exceptions so it's not
             # left open (which would leak on the OTel provider).
