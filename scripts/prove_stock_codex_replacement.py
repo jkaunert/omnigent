@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -321,6 +322,23 @@ class LauncherActivationProof:
     probe_output: str
 
 
+@dataclass(frozen=True)
+class PinnedCodexProvisionProof:
+    """Non-mutating proof result for a temporary pinned Codex payload."""
+
+    source_codex_path: Path
+    source_codex_realpath: Path
+    source_codex_version: str
+    source_codex_sha256: str
+    cache_root: Path
+    payload_dir: Path
+    provisioned_codex_path: Path
+    provisioned_manifest_path: Path
+    provisioned_version: str
+    provisioned_sha256: str
+    omnigent_resolved_codex_path: Path
+
+
 class LiveProofTimeoutError(Exception):
     """A single live proof step exceeded its configured wall-clock budget."""
 
@@ -436,6 +454,146 @@ def print_default_path_cutover_fallback_steps(
         "ASSERTION: default-path cutover rehearsal used ambient bundle lookup "
         "and PATH-resolved stock Codex without mutating the Codex fork"
     )
+
+
+def run_pinned_codex_provision_proof(source_codex_path: Path) -> PinnedCodexProvisionProof:
+    """Prove the Codex provisioner installs a verified pinned payload."""
+    source_codex_realpath = source_codex_path.expanduser().resolve()
+    source_digest = sha256_file(source_codex_realpath)
+    source_version = codex_version(source_codex_realpath)
+    repo_root = Path(__file__).resolve().parents[1]
+    provisioner = repo_root / "scripts" / "provision_stock_codex.py"
+    with tempfile.TemporaryDirectory(prefix="omnigent-pinned-codex-provision-proof-") as temp_root:
+        cache_root = Path(temp_root) / "codex-stock"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(provisioner),
+                "--cache-root",
+                str(cache_root),
+                "--source-binary",
+                str(source_codex_path),
+                "--expected-sha256",
+                source_digest,
+                "--json",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if completed.returncode != 0:
+            raise SystemExit(
+                "Pinned stock Codex provisioner failed with exit "
+                f"{completed.returncode}:\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+            )
+        try:
+            provisioned = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(
+                f"Pinned stock Codex provisioner did not emit JSON:\n{completed.stdout}"
+            ) from exc
+        if not isinstance(provisioned, dict):
+            raise SystemExit(
+                f"Pinned stock Codex provisioner JSON is not an object: {provisioned!r}"
+            )
+
+        provisioned_path = Path(_json_string(provisioned, "codexPath")).expanduser().resolve()
+        payload_dir = Path(_json_string(provisioned, "payloadDir")).expanduser().resolve()
+        manifest_path = Path(_json_string(provisioned, "manifestPath")).expanduser().resolve()
+        provisioned_sha = _json_string(provisioned, "sha256")
+        provisioned_version = _json_string(provisioned, "version")
+        if provisioned_sha.lower() != source_digest.lower():
+            raise SystemExit(
+                "Pinned stock Codex provisioner copied an unexpected binary.\n"
+                f"expected_sha256={source_digest}\nactual_sha256={provisioned_sha}"
+            )
+        if provisioned_version != source_version:
+            raise SystemExit(
+                "Pinned stock Codex provisioner recorded an unexpected version.\n"
+                f"expected_version={source_version!r}\nactual_version={provisioned_version!r}"
+            )
+        if not provisioned_path.is_file() or not os.access(provisioned_path, os.X_OK):
+            raise SystemExit(f"Provisioned Codex binary is not executable: {provisioned_path}")
+        if not manifest_path.is_file():
+            raise SystemExit(f"Provisioned Codex manifest is missing: {manifest_path}")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("kind") != "omnigent-stock-codex":
+            raise SystemExit(f"Provisioned Codex manifest kind mismatch: {manifest!r}")
+        if manifest.get("sha256") != provisioned_sha:
+            raise SystemExit(f"Provisioned Codex manifest sha mismatch: {manifest!r}")
+        actual_provisioned_version = codex_version(provisioned_path)
+        if actual_provisioned_version != provisioned_version:
+            raise SystemExit(
+                "Provisioned Codex binary reported a different version.\n"
+                f"manifest_version={provisioned_version!r}\nactual_version={actual_provisioned_version!r}"
+            )
+        with temporary_env({OMNIGENT_STOCK_CODEX_PATH_ENV: str(provisioned_path)}):
+            resolved_raw = _find_codex_cli()
+        if resolved_raw is None:
+            raise SystemExit(f"{OMNIGENT_STOCK_CODEX_PATH_ENV} did not resolve a Codex binary.")
+        resolved_path = Path(resolved_raw).expanduser().resolve()
+        if resolved_path != provisioned_path:
+            raise SystemExit(
+                "Omnigent stock-Codex resolver did not select the provisioned binary.\n"
+                f"expected={provisioned_path}\nactual={resolved_raw}"
+            )
+
+        return PinnedCodexProvisionProof(
+            source_codex_path=source_codex_path,
+            source_codex_realpath=source_codex_realpath,
+            source_codex_version=source_version,
+            source_codex_sha256=source_digest,
+            cache_root=cache_root,
+            payload_dir=payload_dir,
+            provisioned_codex_path=provisioned_path,
+            provisioned_manifest_path=manifest_path,
+            provisioned_version=provisioned_version,
+            provisioned_sha256=provisioned_sha,
+            omnigent_resolved_codex_path=resolved_path,
+        )
+
+
+def print_pinned_codex_provision_proof(proof: PinnedCodexProvisionProof) -> None:
+    """Emit operator evidence for the temporary pinned Codex provision proof."""
+    print("pinned_codex_provision_rehearsal=selected")
+    print(f"pinned_codex_source_path={proof.source_codex_path}")
+    print(f"pinned_codex_source_realpath={proof.source_codex_realpath}")
+    print(f"pinned_codex_source_version={proof.source_codex_version}")
+    print(f"pinned_codex_source_sha256={proof.source_codex_sha256}")
+    print(f"pinned_codex_cache_root={proof.cache_root}")
+    print(f"pinned_codex_payload_dir={proof.payload_dir}")
+    print(f"pinned_codex_path={proof.provisioned_codex_path}")
+    print(f"pinned_codex_version={proof.provisioned_version}")
+    print(f"pinned_codex_sha256={proof.provisioned_sha256}")
+    print(f"pinned_codex_manifest={proof.provisioned_manifest_path}")
+    print(f"pinned_codex_env={OMNIGENT_STOCK_CODEX_PATH_ENV}={proof.provisioned_codex_path}")
+    print(f"pinned_codex_omnigent_resolved_codex_path={proof.omnigent_resolved_codex_path}")
+    print("pinned_codex_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: pinned stock-Codex provisioning records source path, realpath, "
+        "version, sha256, and environment contract before use"
+    )
+    print(
+        "ASSERTION: Omnigent resolves the provisioned binary through "
+        f"{OMNIGENT_STOCK_CODEX_PATH_ENV} without relying on ambient codex PATH lookup"
+    )
+
+
+def sha256_file(path: Path) -> str:
+    """Return the SHA-256 digest for a proof input file."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _json_string(data: dict[str, Any], key: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value:
+        raise SystemExit(f"Pinned stock Codex provisioner JSON missing string field {key!r}.")
+    return value
 
 
 def run_launcher_activation_proof() -> LauncherActivationProof:
@@ -3600,6 +3758,7 @@ def parse_args() -> argparse.Namespace:
             "apple-workflow-smoke",
             "cutover-ready",
             "default-path-cutover",
+            "pinned-codex-provision",
             "launcher-activation",
             "all",
         ),
@@ -3633,6 +3792,8 @@ def parse_args() -> argparse.Namespace:
             "intentionally excludes known-blocked MCP sosumi/run paths. "
             "'default-path-cutover' runs the same replacement-ready aggregate "
             "using ambient default bundle lookup and PATH-resolved stock Codex. "
+            "'pinned-codex-provision' proves the stock-Codex provisioner can "
+            "install and verify a pinned binary in an isolated cache. "
             "'launcher-activation' proves a temporary codex shim can shadow "
             "PATH, delegate through uvx to omnigent codex without recursion, "
             "and roll back without mutating launcher defaults."
@@ -3691,6 +3852,16 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     requested_proof = "tool-plane" if args.proof == "mcp-tools" else args.proof
+    if requested_proof == "pinned-codex-provision":
+        if args.apple_bundle is not None:
+            raise SystemExit("pinned-codex-provision does not use --apple-bundle; omit it.")
+        if args.allow_fork_codex:
+            raise SystemExit("pinned-codex-provision cannot allow a Codex-fork binary.")
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_pinned_codex_provision_proof(run_pinned_codex_provision_proof(codex_path))
+        return 0
+
     if requested_proof == "launcher-activation":
         if args.apple_bundle is not None:
             raise SystemExit("launcher-activation does not use --apple-bundle; omit it.")

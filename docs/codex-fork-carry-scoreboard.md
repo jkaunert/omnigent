@@ -57,9 +57,13 @@ rehearsal are now green for the current host with stock Codex `0.142.2`. The
 clean-profile gate used isolated `HOME`/cache/XDG dirs, explicit Apple bundle
 input, and preserved real `CODEX_HOME` for authentication. The default-path gate
 used ambient Apple bundle lookup, `PATH` stock-Codex resolution, and documented
-fallback steps without mutating launcher defaults. The isolated
-`launcher-activation` proof is also green for temporary PATH shadowing, pinned
-stock-Codex selection through `OMNIGENT_STOCK_CODEX_PATH`, delegation through
+fallback steps without mutating launcher defaults. The
+`pinned-codex-provision` proof is green for provisioning a local or downloaded
+source binary into an Omnigent-owned `codex-stock/<version>/codex` cache with
+manifest provenance, SHA-256 verification, `.codex-fork` source rejection, and
+`OMNIGENT_STOCK_CODEX_PATH` resolver proof. The isolated `launcher-activation`
+proof is also green for temporary PATH shadowing, pinned stock-Codex selection
+through `OMNIGENT_STOCK_CODEX_PATH`, delegation through
 `uvx --from <repo> omnigent codex` without recursive Codex lookup, and rollback
 to the original `/opt/homebrew/bin/codex` PATH result. The next gate should stay
 in product operations:
@@ -67,9 +71,10 @@ in product operations:
 - prove clean Codex-auth onboarding if first-run auth is in scope;
 - broaden the Apple workflow smoke to release/readiness/review only if product
   cutover requires that higher-fidelity path; or
-- explicitly decide whether to install a real pinned Codex binary and mutate a
-  persistent launcher, shell alias, or production default to point at Omnigent,
-  then document the rollback command for that specific mutation.
+- explicitly decide the Codex binary source, whether to install a real pinned
+  Codex payload, whether to mutate a persistent launcher, shell alias, or
+  production default to point at Omnigent, and the rollback command for that
+  specific mutation.
 
 If ChatGPT mobile/app-server remote resume compatibility becomes product scope
 later, reopen that as a new Omnigent-side remote-resume proof instead of

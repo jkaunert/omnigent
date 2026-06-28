@@ -107,13 +107,15 @@ The current spike proves the first narrow adapter behavior:
 | XcodeBuildMCP tap interaction through a CLI adapter | `replacement-ready` for bounded iOS simulator tap on a discovered button ref after deterministic app-state reset | `omnigent.adapters.xcodebuild_cli.XcodeBuildCliAdapterPolicy` now installs a generated `xcodebuildmcp_simulator_tap` Python dynamic tool for the first tap boundary. The tool strips ambient `XCODEBUILDMCP_AXE_PATH`, maps an explicit `OMNIGENT_XCODEBUILDMCP_AXE_PATH`, uses a per-call isolated XcodeBuildMCP socket, performs an initial `xcodebuildmcp simulator build-and-run --output json` to discover the simulator and bundle id, clears persisted app state with command-scoped `xcrun simctl uninstall`, launches a fresh install, captures a semantic snapshot, types `http://localhost:6767/gesture-proof` into the discovered text field, selects only the discovered `tap` action on the `Connect` button, taps it, then waits for a settled post-tap snapshot whose text field has normalized back to `http://localhost:6767`. `DEVELOPER_DIR=/Applications/Xcode-27.0.0-Beta.2.app/Contents/Developer uvx --from . python scripts/prove_stock_codex_replacement.py --proof apple-xcodebuild-cli-tap --codex-path /opt/homebrew/bin/codex --live-proof-timeout 480 --xcodebuildmcp-axe-path ~/.cache/omnigent/axe/payloads/9051a6e13fdd8e0789f734a11fc1e71f48def916/axe` proved stock Codex `0.142.2` invoked that generated tool through normal Omnigent `dynamicTools`; persisted session `conv_a7d66fc64df148edbe616855fe0de7fd` included function call `call_DCsJXv24ga2bZYGrUaKz3Nef`, output containing `"preResetBuildStatus": "SUCCEEDED"`, `"resetStatus": "SUCCEEDED"`, `"buildStatus": "SUCCEEDED"`, `"typeTextStatus": "SUCCEEDED"`, `"tapStatus": "SUCCEEDED"`, `"settledStatus": "SUCCEEDED"`, `"bundleId": "ai.omnigent.ios"`, `afterTapTarget` with `http://localhost:6767`, and `afterTapScreenHash: "13s4ko7"`; the model replied `XCODEBUILDMCP_CLI_TAP_OK`. This proves one bounded tap interaction through the CLI adapter, not drag, multi-step navigation, debugger attach, device execution, streaming log follow, XcodeBuildMCP MCP parity, or Xcode IDE bridge tools. |
 | Representative Apple workflow smoke through Omnigent plus stock Codex | `replacement-ready` for a routed workflow that uses Apple docs plus read-only Xcode discovery in one stock-Codex session | `scripts/prove_stock_codex_replacement.py --proof apple-workflow-smoke --codex-path /opt/homebrew/bin/codex --live-proof-timeout 240` proved stock Codex `0.142.2` began with the deterministic Apple route block, invoked Omnigent's generated `fetch_apple_docs` tool for `https://developer.apple.com/documentation/swift/string`, then invoked read-only `XcodeBuildMCP__discover_projs` against the Omnigent checkout. Persisted session `conv_6a8bb2b3fa6c4dc182d79ed961581e13` included Apple-docs call `call_YhQNwu4vF4gs4nDZJcTRbNfp` with output containing `title: String`, source URL, and timestamp `2026-06-27T22:39:20.021Z`, plus XcodeBuildMCP call `call_0CgVXm1tP9O2Tcua92bYpovU` with output finding `ap-web/ios/Omnigent.xcodeproj`; the model replied `APPLE_WORKFLOW_SMOKE_OK`. The proof rejects build, run, test, launch, simulator boot/open, and device tools. This proves one representative routed workflow surface, not full release-readiness, branch-diff review, clean-auth onboarding, default-path cutover, or broader XcodeBuildMCP workflow parity. |
 | Default-path cutover rehearsal | `replacement-ready` for current-host ambient bundle lookup plus `PATH` stock-Codex resolution | `scripts/prove_stock_codex_replacement.py --proof default-path-cutover --live-proof-timeout 600` proved the same bounded replacement-ready aggregate as `cutover-ready` while rejecting explicit `--apple-bundle`, explicit `--codex-path`, and `--allow-fork-codex`. The successful run resolved the Apple workflow bundle through `$HOME/.codex-fork plugin cache`, resolved Codex from `PATH` to `/opt/homebrew/Caskroom/codex/0.142.2/codex-aarch64-apple-darwin`, reported `codex-cli 0.142.2`, printed fallback steps, and completed graph, router matrix, tool-plane, Apple memory MCP, Apple-docs CLI, XcodeBuildMCP CLI build/install/launch, and read-only XcodeBuildMCP discovery. Persisted evidence included tool-plane session `conv_43ac1aa5b2b54c6c9481e19f487b56e8`/call `call_s1JJto0zLnIntw6SWuOVVBIP`, memory session `conv_339991bb4daf457f9641c74087ba50e4`/call `call_X1378jE22OgPHISMZqrQnoEc`, Apple-docs session `conv_84b4d6ad9dc24d54a5af699a423361d2`/call `call_wOIBY2DurAKNFAOizWVMZ2K0` with timestamp `2026-06-27T23:48:47.569Z`, XcodeBuildMCP CLI run session `conv_516d0163660449f9bb26a89565f8a992`/call `call_qAavmde4rpb8om5WSu2QEYe2`, and read-only Xcode discovery session `conv_82c10dfceea1443abcabf22d23a8e9d6`/call `call_T6mZb5QP9aJnmWMTkokcWKLG`. An earlier `--live-proof-timeout 420` attempt timed out once at the final read-only Xcode discovery surface after preceding surfaces passed; a standalone discovery rerun then passed in 165.2s, and the full 600-second default-path rerun passed. This proves the current-host default lookup and fallback contract, not clean `CODEX_HOME` auth onboarding, cross-machine portability, or any actual mutation of launcher defaults. |
-| Isolated Codex launcher activation rehearsal | `replacement-ready` for temporary PATH shadowing, pinned stock-Codex delegation, no-recursion lookup, and rollback | `scripts/prove_stock_codex_replacement.py --proof launcher-activation` creates a temporary versioned pinned target under `omnigent/codex-stock/<version>/codex` by copying the current stock Codex binary, creates a temporary `codex` shim, prepends only that temp shim directory to `PATH` inside the proof process, and proves `codex` resolves to the shim during activation. The shim exports `OMNIGENT_STOCK_CODEX_PATH=<pinned target>` before delegation, and Omnigent's central Codex resolver selects that pinned binary instead of the shadowed `codex` command. The proof still verifies the sanitized PATH no longer points at the shim and can resolve the original stock Codex at `/opt/homebrew/bin/codex`, whose realpath was `/opt/homebrew/Caskroom/codex/0.142.2/codex-aarch64-apple-darwin`; it also verifies the delegate shape `/Users/joshuakaunert/.local/bin/uvx --from /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit omnigent codex`. After the scoped activation, `PATH` lookup restores to `/opt/homebrew/bin/codex`. This proves a rollback-first launcher shape can avoid recursive `codex` lookup and can target a managed pinned stock-Codex binary, not a persistent shell alias, app launcher, production-default mutation, downloader/provenance installer, or live Codex TUI launch. |
+| Pinned stock-Codex provisioning | `replacement-ready` for source-binary provisioning into a deterministic Omnigent-owned cache layout | `scripts/provision_stock_codex.py` provisions a stock Codex binary from `PATH` or `--source-binary` into `<cache-root>/<version>/codex`, records `manifest.json` provenance with source path, source realpath, version, SHA-256, platform, install time, and `OMNIGENT_STOCK_CODEX_PATH`, rejects `.codex-fork` sources by default, and fails closed when an existing payload is stale unless `--force` is explicit. `uvx --from . python scripts/prove_stock_codex_replacement.py --proof pinned-codex-provision` proved the isolated temp-cache path against stock Codex `0.142.2`, source `/opt/homebrew/Caskroom/codex/0.142.2/codex-aarch64-apple-darwin`, SHA-256 `31ad44ac440cd7a6dd907c773817800db9c9a7e9c13d3bab7309319e2cd08fa9`, and verified Omnigent resolves the provisioned binary through `OMNIGENT_STOCK_CODEX_PATH` instead of ambient `codex` lookup. This proves the pinned local/downloaded-binary install contract, not an official remote download/update channel, clean-auth onboarding, cross-machine portability, persistent launcher activation, or production-default mutation. |
+| Isolated Codex launcher activation rehearsal | `replacement-ready` for temporary PATH shadowing, pinned stock-Codex delegation, no-recursion lookup, and rollback | `scripts/prove_stock_codex_replacement.py --proof launcher-activation` creates a temporary versioned pinned target under `omnigent/codex-stock/<version>/codex` by copying the current stock Codex binary, creates a temporary `codex` shim, prepends only that temp shim directory to `PATH` inside the proof process, and proves `codex` resolves to the shim during activation. The shim exports `OMNIGENT_STOCK_CODEX_PATH=<pinned target>` before delegation, and Omnigent's central Codex resolver selects that pinned binary instead of the shadowed `codex` command. The proof still verifies the sanitized PATH no longer points at the shim and can resolve the original stock Codex at `/opt/homebrew/bin/codex`, whose realpath was `/opt/homebrew/Caskroom/codex/0.142.2/codex-aarch64-apple-darwin`; it also verifies the delegate shape `/Users/joshuakaunert/.local/bin/uvx --from /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit omnigent codex`. After the scoped activation, `PATH` lookup restores to `/opt/homebrew/bin/codex`. This proves a rollback-first launcher shape can avoid recursive `codex` lookup and can target a managed pinned stock-Codex binary, not a persistent shell alias, app launcher, production-default mutation, persistent provisioner execution, remote downloader/update channel, or live Codex TUI launch. |
 
 This proves the scoped carry-parity claims above plus current-host clean-profile
-and default-path rehearsals plus isolated pinned launcher activation, but not
-full operational cutover. Clean `CODEX_HOME` auth onboarding, cross-machine
-portability, downloader provenance, and actual persistent launcher or
-production-default mutation remain separate decisions.
+and default-path rehearsals, isolated pinned stock-Codex provisioning, and
+isolated pinned launcher activation, but not full operational cutover. Clean
+`CODEX_HOME` auth onboarding, cross-machine portability, an official remote
+download/update channel, and actual persistent launcher or production-default
+mutation remain separate decisions.
 
 ## Proof Commands
 
@@ -373,6 +375,35 @@ workflow bundle through the ambient default lookup path and resolve stock Codex
 from `PATH`. The proof prints fallback steps and does not mutate `PATH`,
 `CODEX_HOME`, Xcode selection, the Codex fork, or launcher defaults.
 
+Pinned stock-Codex provision rehearsal:
+
+```bash
+uvx --from . python scripts/prove_stock_codex_replacement.py \
+  --proof pinned-codex-provision
+```
+
+The `pinned-codex-provision` proof fails closed if `--apple-bundle` or
+`--allow-fork-codex` are supplied. It resolves stock Codex from `PATH`, or from
+`--codex-path` when testing a specific downloaded binary, provisions that binary
+into a temporary deterministic `codex-stock/<version>/codex` cache, verifies
+the source SHA-256, provisioned binary, manifest provenance, and
+`OMNIGENT_STOCK_CODEX_PATH` resolver behavior, then removes the temporary cache.
+It does not mutate persistent launcher defaults.
+
+Persistent source-binary provisioning is available only when an operator
+explicitly decides to install a pinned binary:
+
+```bash
+uvx --from . python scripts/provision_stock_codex.py \
+  --source-binary /path/to/codex \
+  --expected-sha256 <sha256> \
+  --json
+```
+
+The default persistent cache root is `~/.local/omnigent/codex-stock`. This
+installs the managed binary and manifest only; pointing a real launcher, shell
+alias, app, or production default at it is a separate cutover mutation.
+
 Isolated Codex launcher activation rehearsal:
 
 ```bash
@@ -388,8 +419,8 @@ shim, prepends only that temp bin directory to `PATH` in the proof process,
 exports `OMNIGENT_STOCK_CODEX_PATH=<pinned target>` from the shim, verifies
 Omnigent resolves the pinned binary instead of the shadowed `codex`, and then
 verifies `PATH` lookup returns to the original stock Codex path. It does not
-install a real shim, download Codex, edit shell startup files, mutate app
-launchers, or launch the live Codex TUI.
+install a real shim, run the persistent provisioner, download Codex, edit shell
+startup files, mutate app launchers, or launch the live Codex TUI.
 
 Clean-profile cutover-ready rehearsal:
 
@@ -536,6 +567,21 @@ surfaces passed. A standalone `apple-mcp-xcodebuild` rerun then passed in
 `call_5zS4Ehoowx603hJRfsZx5sXK`; the full default-path rerun with a 600-second
 per-step budget passed. This closes current-host default-path rehearsal without
 mutating launcher defaults, not clean-auth onboarding or cross-machine cutover.
+
+Current pinned stock-Codex provision status on 2026-06-28: `--proof
+pinned-codex-provision` passed without persistent install or launcher mutation.
+The run used source
+`/opt/homebrew/Caskroom/codex/0.142.2/codex-aarch64-apple-darwin`, reported
+`codex-cli 0.142.2`, verified SHA-256
+`31ad44ac440cd7a6dd907c773817800db9c9a7e9c13d3bab7309319e2cd08fa9`,
+provisioned a temporary cache at
+`omnigent-pinned-codex-provision-proof-*/codex-stock/0.142.2/codex`, wrote a
+manifest, exported
+`OMNIGENT_STOCK_CODEX_PATH=<temporary cache>/codex-stock/0.142.2/codex`, and
+proved Omnigent resolved that provisioned binary rather than relying on
+ambient `codex` lookup. This closes the local or downloaded source-binary
+pinning contract, not an official remote download/update channel or persistent
+launcher/default mutation.
 
 Current isolated pinned launcher activation status on 2026-06-28: `--proof
 launcher-activation` passed without persistent filesystem or launcher mutation.
@@ -739,13 +785,16 @@ Run these in order unless a later gate becomes cheaper due to new evidence.
 
 8. Persistent pinned launcher/default mutation decision
    - The default-path rehearsal is green for current-host ambient bundle lookup
-     and `PATH` stock-Codex resolution. The isolated launcher activation proof
-     is also green for temporary PATH shadowing, pinned stock-Codex selection
-     through `OMNIGENT_STOCK_CODEX_PATH`, delegation through
+     and `PATH` stock-Codex resolution. The pinned provisioner is green for
+     local or downloaded source-binary pinning into an Omnigent-owned cache.
+     The isolated launcher activation proof is also green for temporary PATH
+     shadowing, pinned stock-Codex selection through
+     `OMNIGENT_STOCK_CODEX_PATH`, delegation through
      `uvx --from <repo> omnigent codex`, and rollback. A later operational gate
-     should explicitly decide whether to install a real pinned Codex binary,
-     point a real launcher, shell alias, or production default at Omnigent, and
-     record the rollback command for that specific persistent mutation.
+     should explicitly decide the Codex binary source, whether to install a
+     real pinned payload, whether to point a real launcher, shell alias, or
+     production default at Omnigent, and the rollback command for that specific
+     persistent mutation.
 
 ## Non-Actions
 
