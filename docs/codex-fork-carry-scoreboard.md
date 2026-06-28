@@ -70,10 +70,12 @@ stock-Codex selection through `OMNIGENT_STOCK_CODEX_PATH`, delegation through
 to the original `/opt/homebrew/bin/codex` PATH result. The current host now also
 has `/opt/homebrew/bin/codex` installed as the managed Omnigent launcher, with
 the original Homebrew symlink backed up at
-`/opt/homebrew/bin/codex.omnigent-backup-20260628T060846Z`. `codex --version`,
+`/opt/homebrew/bin/codex.omnigent-backup-20260628T091032Z`. The recorded
+rollback command was exercised once, restored the Homebrew symlink and removed
+the manifest, then the managed launcher was reinstalled. `codex --version`,
 `codex --omnigent-launcher-probe`, Omnigent resolver detection, and the default
-graph proof passed through that launcher. The next gate should stay in product
-operations:
+graph proof passed through that launcher after reinstall. The next gate should
+stay in product operations:
 
 - prove clean Codex-auth onboarding if first-run auth is in scope;
 - broaden the Apple workflow smoke to release/readiness/review only if product
