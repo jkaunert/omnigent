@@ -16,6 +16,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -214,6 +215,8 @@ DEFAULT_PATH_CUTOVER_FALLBACK_STEPS = (
     "If temporary cleanup is interrupted, remove only omnigent-stock-codex-proof-* temp trees "
     "after preserving any needed logs.",
 )
+LAUNCHER_ACTIVATION_SENTINEL = "OMNIGENT_CODEX_LAUNCHER_ACTIVATION_OK"
+LAUNCHER_ACTIVATION_PROBE_ARG = "--omnigent-launcher-probe"
 T = TypeVar("T")
 
 
@@ -298,6 +301,20 @@ class SessionRun:
     session_id: str
     text: str
     items: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class LauncherActivationProof:
+    """Non-mutating proof result for a temporary Codex launcher shim."""
+
+    baseline_codex_path: Path
+    baseline_codex_realpath: Path
+    activated_codex_path: Path
+    restored_codex_path: Path
+    shim_path: Path
+    uvx_path: Path
+    sanitized_path: str
+    probe_output: str
 
 
 class LiveProofTimeoutError(Exception):
@@ -415,6 +432,208 @@ def print_default_path_cutover_fallback_steps(
         "ASSERTION: default-path cutover rehearsal used ambient bundle lookup "
         "and PATH-resolved stock Codex without mutating the Codex fork"
     )
+
+
+def run_launcher_activation_proof() -> LauncherActivationProof:
+    """Prove a temporary ``codex`` shim can activate and roll back cleanly."""
+    baseline_raw = shutil.which("codex")
+    if not baseline_raw:
+        raise SystemExit("Could not find codex on PATH for launcher activation proof.")
+    baseline_path = Path(baseline_raw)
+    baseline_realpath = baseline_path.expanduser().resolve()
+    assert_stock_codex_path(baseline_realpath, allow_fork_codex=False)
+
+    uvx_raw = shutil.which("uvx")
+    if not uvx_raw:
+        raise SystemExit("Could not find uvx on PATH for launcher activation proof.")
+    uvx_path = Path(uvx_raw).expanduser().resolve()
+    if not uvx_path.is_file():
+        raise SystemExit(f"uvx binary not found: {uvx_path}")
+
+    repo_root = Path(__file__).resolve().parents[1]
+    original_path = os.environ.get("PATH", "")
+    with tempfile.TemporaryDirectory(prefix="omnigent-codex-launcher-proof-") as temp_root:
+        shim_dir = Path(temp_root) / "bin"
+        shim_dir.mkdir()
+        shim_path = shim_dir / "codex"
+        sanitized_path = _path_without_directory(original_path, shim_dir)
+        _write_launcher_activation_shim(
+            shim_path,
+            repo_root=repo_root,
+            uvx_path=uvx_path,
+            expected_codex_path=baseline_path,
+            expected_codex_realpath=baseline_realpath,
+            sanitized_path=sanitized_path,
+        )
+
+        activated_path_value = f"{shim_dir}{os.pathsep}{original_path}"
+        with temporary_env({"PATH": activated_path_value}):
+            activated_raw = shutil.which("codex")
+            if activated_raw is None:
+                raise SystemExit("Temporary launcher activation removed codex from PATH.")
+            activated_path = Path(activated_raw).expanduser().resolve()
+            if activated_path != shim_path.resolve():
+                raise SystemExit(
+                    "Temporary launcher activation did not select the shim.\n"
+                    f"expected={shim_path}\nactual={activated_raw}"
+                )
+            completed = subprocess.run(
+                ["codex", LAUNCHER_ACTIVATION_PROBE_ARG],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            probe_output = (completed.stdout or "") + (completed.stderr or "")
+            if completed.returncode != 0:
+                raise SystemExit(
+                    "Temporary launcher activation probe failed with exit "
+                    f"{completed.returncode}:\n{probe_output}"
+                )
+            _validate_launcher_activation_probe_output(
+                probe_output,
+                expected_codex_path=baseline_path,
+            )
+
+        restored_raw = shutil.which("codex")
+        if restored_raw is None:
+            raise SystemExit("Launcher activation rollback removed codex from PATH.")
+        restored_path = Path(restored_raw)
+        if restored_path != baseline_path:
+            raise SystemExit(
+                "Launcher activation rollback did not restore the original PATH lookup.\n"
+                f"expected={baseline_path}\nactual={restored_path}"
+            )
+
+        return LauncherActivationProof(
+            baseline_codex_path=baseline_path,
+            baseline_codex_realpath=baseline_realpath,
+            activated_codex_path=activated_path,
+            restored_codex_path=restored_path,
+            shim_path=shim_path,
+            uvx_path=uvx_path,
+            sanitized_path=sanitized_path,
+            probe_output=probe_output.strip(),
+        )
+
+
+def print_launcher_activation_proof(proof: LauncherActivationProof) -> None:
+    """Emit operator evidence for the temporary launcher activation proof."""
+    print("launcher_activation_rehearsal=selected")
+    print(f"launcher_activation_baseline_codex_path={proof.baseline_codex_path}")
+    print(f"launcher_activation_baseline_codex_realpath={proof.baseline_codex_realpath}")
+    print(f"launcher_activation_activated_codex_path={proof.activated_codex_path}")
+    print(f"launcher_activation_restored_codex_path={proof.restored_codex_path}")
+    print(f"launcher_activation_shim_path={proof.shim_path}")
+    print(f"launcher_activation_uvx_path={proof.uvx_path}")
+    print(
+        "launcher_activation_delegate_preview="
+        f"{proof.uvx_path} --from {Path(__file__).resolve().parents[1]} omnigent codex"
+    )
+    print("launcher_activation_rollback=remove the shim directory from PATH")
+    print(f"launcher_activation_probe_output={proof.probe_output!r}")
+    print(
+        "ASSERTION: temporary PATH activation selected the Omnigent launcher shim "
+        "without mutating shell profiles or launcher defaults"
+    )
+    print(
+        "ASSERTION: the shim removed itself from PATH before delegation, so "
+        "Omnigent's internal codex lookup resolves the underlying stock Codex"
+    )
+    print("ASSERTION: PATH lookup was restored after the isolated activation scope")
+
+
+def _path_without_directory(path_value: str, directory: Path) -> str:
+    """Return ``path_value`` with any entries resolving to ``directory`` removed."""
+    directory_resolved = directory.expanduser().resolve()
+    parts: list[str] = []
+    for raw_part in path_value.split(os.pathsep):
+        if not raw_part:
+            continue
+        try:
+            if Path(raw_part).expanduser().resolve() == directory_resolved:
+                continue
+        except OSError:
+            pass
+        parts.append(raw_part)
+    return os.pathsep.join(parts)
+
+
+def _write_launcher_activation_shim(
+    shim_path: Path,
+    *,
+    repo_root: Path,
+    uvx_path: Path,
+    expected_codex_path: Path,
+    expected_codex_realpath: Path,
+    sanitized_path: str,
+) -> None:
+    """Write the temporary ``codex`` launcher shim used by the proof."""
+    quoted_sanitized_path = shlex.quote(sanitized_path)
+    quoted_expected_codex_path = shlex.quote(str(expected_codex_path))
+    quoted_expected_codex_realpath = shlex.quote(str(expected_codex_realpath))
+    quoted_uvx_path = shlex.quote(str(uvx_path))
+    quoted_repo_root = shlex.quote(str(repo_root))
+    quoted_probe_arg = shlex.quote(LAUNCHER_ACTIVATION_PROBE_ARG)
+    quoted_sentinel = shlex.quote(LAUNCHER_ACTIVATION_SENTINEL)
+    shim_path.write_text(
+        f"""#!/bin/sh
+set -eu
+
+SANITIZED_PATH={quoted_sanitized_path}
+EXPECTED_CODEX_PATH={quoted_expected_codex_path}
+EXPECTED_CODEX_REALPATH={quoted_expected_codex_realpath}
+UVX_PATH={quoted_uvx_path}
+REPO_ROOT={quoted_repo_root}
+PROBE_ARG={quoted_probe_arg}
+SENTINEL={quoted_sentinel}
+
+if [ "${{1:-}}" = "$PROBE_ARG" ]; then
+  resolved="$(PATH="$SANITIZED_PATH" command -v codex || true)"
+  if [ "$resolved" != "$EXPECTED_CODEX_PATH" ]; then
+    printf 'launcher_activation_error=underlying codex mismatch\\n' >&2
+    printf 'expected_underlying_codex_path=%s\\n' "$EXPECTED_CODEX_PATH" >&2
+    printf 'resolved_underlying_codex_path=%s\\n' "$resolved" >&2
+    exit 2
+  fi
+  if [ ! -x "$UVX_PATH" ]; then
+    printf 'launcher_activation_error=uvx missing: %s\\n' "$UVX_PATH" >&2
+    exit 3
+  fi
+  printf '%s\\n' "$SENTINEL"
+  printf 'shim_path=%s\\n' "$0"
+  printf 'delegates_to=%s --from %s omnigent codex\\n' "$UVX_PATH" "$REPO_ROOT"
+  printf 'resolved_underlying_codex_path=%s\\n' "$resolved"
+  printf 'expected_underlying_codex_path=%s\\n' "$EXPECTED_CODEX_PATH"
+  printf 'expected_underlying_codex_realpath=%s\\n' "$EXPECTED_CODEX_REALPATH"
+  exit 0
+fi
+
+PATH="$SANITIZED_PATH"
+export PATH
+exec "$UVX_PATH" --from "$REPO_ROOT" omnigent codex "$@"
+""",
+        encoding="utf-8",
+    )
+    shim_path.chmod(0o755)
+
+
+def _validate_launcher_activation_probe_output(
+    output: str,
+    *,
+    expected_codex_path: Path,
+) -> None:
+    """Validate the temporary shim probe emitted the no-recursion evidence."""
+    if LAUNCHER_ACTIVATION_SENTINEL not in output:
+        raise SystemExit(f"Launcher activation probe missed sentinel:\n{output}")
+    expected_line = f"resolved_underlying_codex_path={expected_codex_path}"
+    if expected_line not in output:
+        raise SystemExit(
+            "Launcher activation probe did not resolve the underlying stock Codex.\n"
+            f"Expected line: {expected_line}\nOutput:\n{output}"
+        )
+    if "delegates_to=" not in output:
+        raise SystemExit(f"Launcher activation probe missed delegation preview:\n{output}")
 
 
 def run_live_proof_step(
@@ -3304,6 +3523,7 @@ def parse_args() -> argparse.Namespace:
             "apple-workflow-smoke",
             "cutover-ready",
             "default-path-cutover",
+            "launcher-activation",
             "all",
         ),
         default="graph",
@@ -3335,7 +3555,10 @@ def parse_args() -> argparse.Namespace:
             "'cutover-ready' runs the replacement-ready aggregate and "
             "intentionally excludes known-blocked MCP sosumi/run paths. "
             "'default-path-cutover' runs the same replacement-ready aggregate "
-            "using ambient default bundle lookup and PATH-resolved stock Codex."
+            "using ambient default bundle lookup and PATH-resolved stock Codex. "
+            "'launcher-activation' proves a temporary codex shim can shadow "
+            "PATH, delegate through uvx to omnigent codex without recursion, "
+            "and roll back without mutating launcher defaults."
         ),
     )
     parser.add_argument(
@@ -3391,6 +3614,18 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     requested_proof = "tool-plane" if args.proof == "mcp-tools" else args.proof
+    if requested_proof == "launcher-activation":
+        if args.apple_bundle is not None:
+            raise SystemExit("launcher-activation does not use --apple-bundle; omit it.")
+        if args.codex_path is not None:
+            raise SystemExit(
+                "launcher-activation must prove PATH-resolved stock Codex; omit --codex-path."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit("launcher-activation cannot allow a Codex-fork binary.")
+        print_launcher_activation_proof(run_launcher_activation_proof())
+        return 0
+
     default_path_cutover = requested_proof == "default-path-cutover"
     if default_path_cutover:
         if args.apple_bundle is not None:
