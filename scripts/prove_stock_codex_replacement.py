@@ -70,6 +70,7 @@ from omnigent.chat import (
     _wait_for_server,
     run_prompt,
 )
+from omnigent.inner.codex_executor import OMNIGENT_STOCK_CODEX_PATH_ENV, _find_codex_cli
 
 PLUGIN_NAME = "apple-appdev-workflow"
 SELECTED_SKILL = "apple-app-orchestrator"
@@ -309,6 +310,9 @@ class LauncherActivationProof:
 
     baseline_codex_path: Path
     baseline_codex_realpath: Path
+    pinned_codex_path: Path
+    pinned_codex_version: str
+    omnigent_resolved_codex_path: Path
     activated_codex_path: Path
     restored_codex_path: Path
     shim_path: Path
@@ -456,6 +460,12 @@ def run_launcher_activation_proof() -> LauncherActivationProof:
         shim_dir = Path(temp_root) / "bin"
         shim_dir.mkdir()
         shim_path = shim_dir / "codex"
+        version_dir = _codex_version_dir_name(codex_version(baseline_realpath))
+        pinned_codex_path = Path(temp_root) / "omnigent" / "codex-stock" / version_dir / "codex"
+        pinned_codex_path.parent.mkdir(parents=True)
+        shutil.copy2(baseline_realpath, pinned_codex_path)
+        pinned_codex_path.chmod(0o755)
+        pinned_codex_version = codex_version(pinned_codex_path)
         sanitized_path = _path_without_directory(original_path, shim_dir)
         _write_launcher_activation_shim(
             shim_path,
@@ -463,11 +473,18 @@ def run_launcher_activation_proof() -> LauncherActivationProof:
             uvx_path=uvx_path,
             expected_codex_path=baseline_path,
             expected_codex_realpath=baseline_realpath,
+            pinned_codex_path=pinned_codex_path,
+            pinned_codex_version=pinned_codex_version,
             sanitized_path=sanitized_path,
         )
 
         activated_path_value = f"{shim_dir}{os.pathsep}{original_path}"
-        with temporary_env({"PATH": activated_path_value}):
+        with temporary_env(
+            {
+                "PATH": activated_path_value,
+                OMNIGENT_STOCK_CODEX_PATH_ENV: str(pinned_codex_path),
+            }
+        ):
             activated_raw = shutil.which("codex")
             if activated_raw is None:
                 raise SystemExit("Temporary launcher activation removed codex from PATH.")
@@ -476,6 +493,17 @@ def run_launcher_activation_proof() -> LauncherActivationProof:
                 raise SystemExit(
                     "Temporary launcher activation did not select the shim.\n"
                     f"expected={shim_path}\nactual={activated_raw}"
+                )
+            omnigent_resolved_raw = _find_codex_cli()
+            if omnigent_resolved_raw is None:
+                raise SystemExit(
+                    f"{OMNIGENT_STOCK_CODEX_PATH_ENV} did not resolve a Codex binary."
+                )
+            omnigent_resolved_path = Path(omnigent_resolved_raw).expanduser().resolve()
+            if omnigent_resolved_path != pinned_codex_path.resolve():
+                raise SystemExit(
+                    "Omnigent stock-Codex resolver did not select the pinned binary.\n"
+                    f"expected={pinned_codex_path}\nactual={omnigent_resolved_raw}"
                 )
             completed = subprocess.run(
                 ["codex", LAUNCHER_ACTIVATION_PROBE_ARG],
@@ -508,6 +536,9 @@ def run_launcher_activation_proof() -> LauncherActivationProof:
         return LauncherActivationProof(
             baseline_codex_path=baseline_path,
             baseline_codex_realpath=baseline_realpath,
+            pinned_codex_path=pinned_codex_path,
+            pinned_codex_version=pinned_codex_version,
+            omnigent_resolved_codex_path=omnigent_resolved_path,
             activated_codex_path=activated_path,
             restored_codex_path=restored_path,
             shim_path=shim_path,
@@ -522,6 +553,12 @@ def print_launcher_activation_proof(proof: LauncherActivationProof) -> None:
     print("launcher_activation_rehearsal=selected")
     print(f"launcher_activation_baseline_codex_path={proof.baseline_codex_path}")
     print(f"launcher_activation_baseline_codex_realpath={proof.baseline_codex_realpath}")
+    print(f"launcher_activation_pinned_codex_path={proof.pinned_codex_path}")
+    print(f"launcher_activation_pinned_codex_version={proof.pinned_codex_version}")
+    print(
+        f"launcher_activation_pinned_env={OMNIGENT_STOCK_CODEX_PATH_ENV}={proof.pinned_codex_path}"
+    )
+    print(f"launcher_activation_omnigent_resolved_codex_path={proof.omnigent_resolved_codex_path}")
     print(f"launcher_activation_activated_codex_path={proof.activated_codex_path}")
     print(f"launcher_activation_restored_codex_path={proof.restored_codex_path}")
     print(f"launcher_activation_shim_path={proof.shim_path}")
@@ -537,10 +574,18 @@ def print_launcher_activation_proof(proof: LauncherActivationProof) -> None:
         "without mutating shell profiles or launcher defaults"
     )
     print(
-        "ASSERTION: the shim removed itself from PATH before delegation, so "
-        "Omnigent's internal codex lookup resolves the underlying stock Codex"
+        "ASSERTION: the shim exports an explicit pinned stock-Codex path, so "
+        "Omnigent resolves the managed binary instead of the shadowed codex command"
     )
     print("ASSERTION: PATH lookup was restored after the isolated activation scope")
+
+
+def _codex_version_dir_name(version_text: str) -> str:
+    """Return a filesystem-safe version directory name from ``codex --version``."""
+    match = re.search(r"(\d+(?:\.\d+)+(?:[-.A-Za-z0-9]+)?)", version_text)
+    if match is not None:
+        return match.group(1)
+    return "unknown"
 
 
 def _path_without_directory(path_value: str, directory: Path) -> str:
@@ -566,16 +611,24 @@ def _write_launcher_activation_shim(
     uvx_path: Path,
     expected_codex_path: Path,
     expected_codex_realpath: Path,
+    pinned_codex_path: Path,
+    pinned_codex_version: str,
     sanitized_path: str,
 ) -> None:
     """Write the temporary ``codex`` launcher shim used by the proof."""
     quoted_sanitized_path = shlex.quote(sanitized_path)
     quoted_expected_codex_path = shlex.quote(str(expected_codex_path))
     quoted_expected_codex_realpath = shlex.quote(str(expected_codex_realpath))
+    quoted_pinned_codex_path = shlex.quote(str(pinned_codex_path))
+    quoted_pinned_codex_version = shlex.quote(pinned_codex_version)
+    quoted_pinned_env_key = shlex.quote(OMNIGENT_STOCK_CODEX_PATH_ENV)
     quoted_uvx_path = shlex.quote(str(uvx_path))
     quoted_repo_root = shlex.quote(str(repo_root))
     quoted_probe_arg = shlex.quote(LAUNCHER_ACTIVATION_PROBE_ARG)
     quoted_sentinel = shlex.quote(LAUNCHER_ACTIVATION_SENTINEL)
+    quoted_resolver_probe = shlex.quote(
+        "from omnigent.inner.codex_executor import _find_codex_cli; print(_find_codex_cli() or '')"
+    )
     shim_path.write_text(
         f"""#!/bin/sh
 set -eu
@@ -583,10 +636,14 @@ set -eu
 SANITIZED_PATH={quoted_sanitized_path}
 EXPECTED_CODEX_PATH={quoted_expected_codex_path}
 EXPECTED_CODEX_REALPATH={quoted_expected_codex_realpath}
+PINNED_CODEX_PATH={quoted_pinned_codex_path}
+PINNED_CODEX_VERSION={quoted_pinned_codex_version}
+PINNED_ENV_KEY={quoted_pinned_env_key}
 UVX_PATH={quoted_uvx_path}
 REPO_ROOT={quoted_repo_root}
 PROBE_ARG={quoted_probe_arg}
 SENTINEL={quoted_sentinel}
+RESOLVER_PROBE={quoted_resolver_probe}
 
 if [ "${{1:-}}" = "$PROBE_ARG" ]; then
   resolved="$(PATH="$SANITIZED_PATH" command -v codex || true)"
@@ -600,9 +657,26 @@ if [ "${{1:-}}" = "$PROBE_ARG" ]; then
     printf 'launcher_activation_error=uvx missing: %s\\n' "$UVX_PATH" >&2
     exit 3
   fi
+  if [ ! -x "$PINNED_CODEX_PATH" ]; then
+    printf 'launcher_activation_error=pinned codex missing: %s\\n' "$PINNED_CODEX_PATH" >&2
+    exit 4
+  fi
+  omnigent_resolved="$(
+    env PATH="$SANITIZED_PATH" "$PINNED_ENV_KEY=$PINNED_CODEX_PATH" \\
+      "$UVX_PATH" --from "$REPO_ROOT" python -c "$RESOLVER_PROBE"
+  )"
+  if [ "$omnigent_resolved" != "$PINNED_CODEX_PATH" ]; then
+    printf 'launcher_activation_error=omnigent resolver mismatch\\n' >&2
+    printf 'expected_pinned_codex_path=%s\\n' "$PINNED_CODEX_PATH" >&2
+    printf 'omnigent_resolved_codex_path=%s\\n' "$omnigent_resolved" >&2
+    exit 5
+  fi
   printf '%s\\n' "$SENTINEL"
   printf 'shim_path=%s\\n' "$0"
   printf 'delegates_to=%s --from %s omnigent codex\\n' "$UVX_PATH" "$REPO_ROOT"
+  printf 'pinned_env=%s=%s\\n' "$PINNED_ENV_KEY" "$PINNED_CODEX_PATH"
+  printf 'pinned_codex_version=%s\\n' "$PINNED_CODEX_VERSION"
+  printf 'omnigent_resolved_codex_path=%s\\n' "$omnigent_resolved"
   printf 'resolved_underlying_codex_path=%s\\n' "$resolved"
   printf 'expected_underlying_codex_path=%s\\n' "$EXPECTED_CODEX_PATH"
   printf 'expected_underlying_codex_realpath=%s\\n' "$EXPECTED_CODEX_REALPATH"
@@ -611,6 +685,7 @@ fi
 
 PATH="$SANITIZED_PATH"
 export PATH
+export "$PINNED_ENV_KEY=$PINNED_CODEX_PATH"
 exec "$UVX_PATH" --from "$REPO_ROOT" omnigent codex "$@"
 """,
         encoding="utf-8",
@@ -626,14 +701,16 @@ def _validate_launcher_activation_probe_output(
     """Validate the temporary shim probe emitted the no-recursion evidence."""
     if LAUNCHER_ACTIVATION_SENTINEL not in output:
         raise SystemExit(f"Launcher activation probe missed sentinel:\n{output}")
-    expected_line = f"resolved_underlying_codex_path={expected_codex_path}"
-    if expected_line not in output:
+    expected_underlying_line = f"resolved_underlying_codex_path={expected_codex_path}"
+    if expected_underlying_line not in output:
         raise SystemExit(
             "Launcher activation probe did not resolve the underlying stock Codex.\n"
-            f"Expected line: {expected_line}\nOutput:\n{output}"
+            f"Expected line: {expected_underlying_line}\nOutput:\n{output}"
         )
     if "delegates_to=" not in output:
         raise SystemExit(f"Launcher activation probe missed delegation preview:\n{output}")
+    if "omnigent_resolved_codex_path=" not in output:
+        raise SystemExit(f"Launcher activation probe missed Omnigent resolver evidence:\n{output}")
 
 
 def run_live_proof_step(

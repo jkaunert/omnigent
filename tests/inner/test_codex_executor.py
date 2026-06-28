@@ -14,12 +14,14 @@ import pytest
 
 from omnigent.inner.codex_executor import (
     _TURN_EVENT_WARN_SECONDS,
+    OMNIGENT_STOCK_CODEX_PATH_ENV,
     CodexExecutor,
     _build_initial_prompt,
     _codex_cli_version,
     _CodexAppServerSession,
     _databricks_codex_config_overrides,
     _dynamic_tool_result_payload,
+    _find_codex_cli,
     _prompt_for_turn,
     _to_codex_input_items,
 )
@@ -42,6 +44,33 @@ def _run(coro):
     finally:
         loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
+
+
+def test_find_codex_cli_prefers_configured_stock_codex_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An Omnigent-managed pinned Codex binary beats ambient PATH lookup."""
+    codex_path = tmp_path / "codex-stock" / "0.142.2" / "codex"
+    codex_path.parent.mkdir(parents=True)
+    codex_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    codex_path.chmod(0o755)
+    monkeypatch.setenv(OMNIGENT_STOCK_CODEX_PATH_ENV, str(codex_path))
+    monkeypatch.setattr("omnigent.inner.codex_executor.shutil.which", lambda _name: "/bin/codex")
+
+    assert _find_codex_cli() == str(codex_path)
+
+
+def test_find_codex_cli_fails_closed_for_invalid_configured_stock_codex_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A stale configured stock-Codex path must not fall through to PATH."""
+    missing = tmp_path / "missing" / "codex"
+    monkeypatch.setenv(OMNIGENT_STOCK_CODEX_PATH_ENV, str(missing))
+    monkeypatch.setattr("omnigent.inner.codex_executor.shutil.which", lambda _name: "/bin/codex")
+
+    assert _find_codex_cli() is None
 
 
 @dataclass

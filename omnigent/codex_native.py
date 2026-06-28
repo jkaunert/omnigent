@@ -66,6 +66,7 @@ from omnigent.host.daemon_launch import (
     wait_for_host_online,
     wait_for_runner_online,
 )
+from omnigent.inner.codex_executor import _find_codex_cli
 from omnigent.native_terminal import (
     DAEMON_HOST_ONLINE_TIMEOUT_S as _DAEMON_HOST_ONLINE_TIMEOUT_S,
 )
@@ -187,9 +188,10 @@ def _codex_auth_unavailable_reason() -> str | None:
     """
     Return why local Codex is unavailable, or ``None`` when available.
 
-    The check is synchronous, side-effect free, and local-only: it only checks
-    the ``codex`` binary and the resolved local auth source. It never runs
-    ``codex login``, shells out to a status command, or performs a network probe.
+    The check is synchronous, side-effect free, and local-only: it checks the
+    configured Omnigent stock-Codex path or ``codex`` binary and the resolved
+    local auth source. It never runs ``codex login``, shells out to a status
+    command, or performs a network probe.
 
     :returns: ``"binary-missing"`` when the CLI is absent, ``"needs-auth"``
         when the CLI exists but ``auth.json`` is missing, malformed, or carries
@@ -197,7 +199,7 @@ def _codex_auth_unavailable_reason() -> str | None:
         *validity* (revoked/expired refresh) is not judged locally — see
         :func:`_codex_auth_json_has_available_credential`.
     """
-    if shutil.which(_DEFAULT_CODEX_COMMAND) is None:
+    if _find_codex_cli() is None:
         return _CODEX_AUTH_UNAVAILABLE_BINARY_MISSING
     source = _resolve_codex_auth_source()
     if not _codex_auth_json_has_available_credential(source.auth_path):

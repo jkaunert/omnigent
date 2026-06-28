@@ -105,6 +105,7 @@ _OPENAI_CODEX_DEFAULT_MODEL = "gpt-5.4-mini"
 # to resolve a concrete model. Used only when constructing the codex config
 # from ~/.databrickscfg credentials with no spec/override model.
 _DATABRICKS_CODEX_DEFAULT_MODEL = "databricks-gpt-5-5"
+OMNIGENT_STOCK_CODEX_PATH_ENV = "OMNIGENT_STOCK_CODEX_PATH"
 
 # Files symlinked from the real CODEX_HOME into the per-session temp home.
 # Symlinks (not copies) so credential refreshes in the real home propagate
@@ -283,6 +284,12 @@ def _kill_process_tree(process: _Process | None) -> None:
 
 
 def _find_codex_cli() -> str | None:
+    configured = os.environ.get(OMNIGENT_STOCK_CODEX_PATH_ENV, "").strip()
+    if configured:
+        path = Path(configured).expanduser()
+        if path.is_absolute() and path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+        return None
     return shutil.which("codex")
 
 
