@@ -106,6 +106,8 @@ _OPENAI_CODEX_DEFAULT_MODEL = "gpt-5.4-mini"
 # from ~/.databrickscfg credentials with no spec/override model.
 _DATABRICKS_CODEX_DEFAULT_MODEL = "databricks-gpt-5-5"
 OMNIGENT_STOCK_CODEX_PATH_ENV = "OMNIGENT_STOCK_CODEX_PATH"
+OMNIGENT_MANAGED_CODEX_LAUNCHER_MARKER = "omnigent-managed-codex-launcher-v1"
+OMNIGENT_CODEX_LAUNCHER_MANIFEST_PREFIX = "# omnigent-launcher-manifest:"
 
 # Files symlinked from the real CODEX_HOME into the per-session temp home.
 # Symlinks (not copies) so credential refreshes in the real home propagate
@@ -290,7 +292,53 @@ def _find_codex_cli() -> str | None:
         if path.is_absolute() and path.is_file() and os.access(path, os.X_OK):
             return str(path)
         return None
-    return shutil.which("codex")
+    path = shutil.which("codex")
+    if not path:
+        return None
+    resolved = _resolve_managed_codex_launcher(Path(path))
+    return str(resolved) if resolved is not None else None
+
+
+def _resolve_managed_codex_launcher(path: Path) -> Path | None:
+    """Return the pinned stock Codex path for an Omnigent-managed launcher.
+
+    A persistent launcher can intentionally shadow the ambient ``codex``
+    command. Omnigent's inner executor must never treat that launcher as the
+    stock binary or it can recurse back into ``omnigent codex``. Managed
+    launchers therefore carry a marker plus manifest pointer; if either is
+    stale, fail closed instead of falling through to the launcher path.
+    """
+    try:
+        if not path.is_file():
+            return None
+        with path.open("rb") as handle:
+            text = handle.read(4096).decode("utf-8", errors="ignore")
+    except OSError:
+        return None
+    if OMNIGENT_MANAGED_CODEX_LAUNCHER_MARKER not in text:
+        return path
+    manifest_path: Path | None = None
+    for line in text.splitlines()[:10]:
+        if line.startswith(OMNIGENT_CODEX_LAUNCHER_MANIFEST_PREFIX):
+            manifest_path = Path(
+                line.removeprefix(OMNIGENT_CODEX_LAUNCHER_MANIFEST_PREFIX).strip()
+            ).expanduser()
+            break
+    if manifest_path is None or not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    pinned_raw = manifest.get("pinnedCodexPath")
+    if not isinstance(pinned_raw, str) or not pinned_raw:
+        return None
+    pinned_path = Path(pinned_raw).expanduser()
+    if pinned_path.is_file() and os.access(pinned_path, os.X_OK):
+        return pinned_path
+    return None
 
 
 async def _codex_cli_version(codex_path: str) -> tuple[int, int, int] | None:

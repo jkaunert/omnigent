@@ -109,13 +109,14 @@ The current spike proves the first narrow adapter behavior:
 | Default-path cutover rehearsal | `replacement-ready` for current-host ambient bundle lookup plus `PATH` stock-Codex resolution | `scripts/prove_stock_codex_replacement.py --proof default-path-cutover --live-proof-timeout 600` proved the same bounded replacement-ready aggregate as `cutover-ready` while rejecting explicit `--apple-bundle`, explicit `--codex-path`, and `--allow-fork-codex`. The successful run resolved the Apple workflow bundle through `$HOME/.codex-fork plugin cache`, resolved Codex from `PATH` to `/opt/homebrew/Caskroom/codex/0.142.2/codex-aarch64-apple-darwin`, reported `codex-cli 0.142.2`, printed fallback steps, and completed graph, router matrix, tool-plane, Apple memory MCP, Apple-docs CLI, XcodeBuildMCP CLI build/install/launch, and read-only XcodeBuildMCP discovery. Persisted evidence included tool-plane session `conv_43ac1aa5b2b54c6c9481e19f487b56e8`/call `call_s1JJto0zLnIntw6SWuOVVBIP`, memory session `conv_339991bb4daf457f9641c74087ba50e4`/call `call_X1378jE22OgPHISMZqrQnoEc`, Apple-docs session `conv_84b4d6ad9dc24d54a5af699a423361d2`/call `call_wOIBY2DurAKNFAOizWVMZ2K0` with timestamp `2026-06-27T23:48:47.569Z`, XcodeBuildMCP CLI run session `conv_516d0163660449f9bb26a89565f8a992`/call `call_qAavmde4rpb8om5WSu2QEYe2`, and read-only Xcode discovery session `conv_82c10dfceea1443abcabf22d23a8e9d6`/call `call_T6mZb5QP9aJnmWMTkokcWKLG`. An earlier `--live-proof-timeout 420` attempt timed out once at the final read-only Xcode discovery surface after preceding surfaces passed; a standalone discovery rerun then passed in 165.2s, and the full 600-second default-path rerun passed. This proves the current-host default lookup and fallback contract, not clean `CODEX_HOME` auth onboarding, cross-machine portability, or any actual mutation of launcher defaults. |
 | Pinned stock-Codex provisioning | `replacement-ready` for source-binary provisioning into a deterministic Omnigent-owned cache layout | `scripts/provision_stock_codex.py` provisions a stock Codex binary from `PATH` or `--source-binary` into `<cache-root>/<version>/codex`, records `manifest.json` provenance with source path, source realpath, version, SHA-256, platform, install time, and `OMNIGENT_STOCK_CODEX_PATH`, rejects `.codex-fork` sources by default, and fails closed when an existing payload is stale unless `--force` is explicit. `uvx --from . python scripts/prove_stock_codex_replacement.py --proof pinned-codex-provision` proved the isolated temp-cache path against stock Codex `0.142.2`, source `/opt/homebrew/Caskroom/codex/0.142.2/codex-aarch64-apple-darwin`, SHA-256 `31ad44ac440cd7a6dd907c773817800db9c9a7e9c13d3bab7309319e2cd08fa9`, and verified Omnigent resolves the provisioned binary through `OMNIGENT_STOCK_CODEX_PATH` instead of ambient `codex` lookup. This proves the pinned local/downloaded-binary install contract, not an official remote download/update channel, clean-auth onboarding, cross-machine portability, persistent launcher activation, or production-default mutation. |
 | Isolated Codex launcher activation rehearsal | `replacement-ready` for temporary PATH shadowing, pinned stock-Codex delegation, no-recursion lookup, and rollback | `scripts/prove_stock_codex_replacement.py --proof launcher-activation` creates a temporary versioned pinned target under `omnigent/codex-stock/<version>/codex` by copying the current stock Codex binary, creates a temporary `codex` shim, prepends only that temp shim directory to `PATH` inside the proof process, and proves `codex` resolves to the shim during activation. The shim exports `OMNIGENT_STOCK_CODEX_PATH=<pinned target>` before delegation, and Omnigent's central Codex resolver selects that pinned binary instead of the shadowed `codex` command. The proof still verifies the sanitized PATH no longer points at the shim and can resolve the original stock Codex at `/opt/homebrew/bin/codex`, whose realpath was `/opt/homebrew/Caskroom/codex/0.142.2/codex-aarch64-apple-darwin`; it also verifies the delegate shape `/Users/joshuakaunert/.local/bin/uvx --from /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit omnigent codex`. After the scoped activation, `PATH` lookup restores to `/opt/homebrew/bin/codex`. This proves a rollback-first launcher shape can avoid recursive `codex` lookup and can target a managed pinned stock-Codex binary, not a persistent shell alias, app launcher, production-default mutation, persistent provisioner execution, remote downloader/update channel, or live Codex TUI launch. |
+| Persistent Omnigent `codex` launcher/default | `replacement-ready` for the current-host Homebrew-bin default with rollback | `scripts/install_omnigent_codex_launcher.py` installs a managed launcher at the selected `codex` path, writes a manifest, preserves `codex --version` by delegating it to the pinned stock binary, probes with `--omnigent-launcher-probe`, exports `OMNIGENT_STOCK_CODEX_PATH` before normal delegation to `uvx --from <repo> omnigent codex`, backs up an existing unmanaged target, and uninstalls only when the target carries the Omnigent marker. `omnigent.inner.codex_executor._find_codex_cli()` detects the managed launcher marker and manifest so inner Omnigent sessions resolve to the pinned stock binary instead of recursing into the launcher. On 2026-06-28, `/opt/homebrew/bin/codex` was replaced by the managed launcher, the original Homebrew symlink was preserved at `/opt/homebrew/bin/codex.omnigent-backup-20260628T060846Z`, `codex --version` returned `codex-cli 0.142.2`, `codex --omnigent-launcher-probe` returned `OMNIGENT_CODEX_PERSISTENT_LAUNCHER_OK`, and `scripts/prove_stock_codex_replacement.py --proof graph --live-proof-timeout 180` with no explicit `--codex-path` resolved to `/Users/joshuakaunert/.local/omnigent/codex-stock/0.142.2/codex` and passed in 32.4s. Rollback command: `uvx --from /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit python /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit/scripts/install_omnigent_codex_launcher.py --uninstall --launcher-path /opt/homebrew/bin/codex --manifest-path /Users/joshuakaunert/.local/omnigent/launchers/codex.json`. This proves current-host default mutation and rollback metadata, not a remote download/update channel, clean-auth onboarding, cross-machine portability, or app-bundle launcher mutation. |
 
 This proves the scoped carry-parity claims above plus current-host clean-profile
-and default-path rehearsals, isolated pinned stock-Codex provisioning, and
-isolated pinned launcher activation, but not full operational cutover. Clean
-`CODEX_HOME` auth onboarding, cross-machine portability, an official remote
-download/update channel, and actual persistent launcher or production-default
-mutation remain separate decisions.
+and default-path rehearsals, isolated pinned stock-Codex provisioning, isolated
+pinned launcher activation, and current-host persistent `codex` default
+activation. Clean `CODEX_HOME` auth onboarding, cross-machine portability, an
+official remote download/update channel, and app-bundle launcher mutation
+remain separate decisions.
 
 ## Proof Commands
 
@@ -404,6 +405,32 @@ The default persistent cache root is `~/.local/omnigent/codex-stock`. This
 installs the managed binary and manifest only; pointing a real launcher, shell
 alias, app, or production default at it is a separate cutover mutation.
 
+Persistent Omnigent `codex` launcher install:
+
+```bash
+uvx --from . python scripts/install_omnigent_codex_launcher.py \
+  --install \
+  --launcher-path /opt/homebrew/bin/codex \
+  --pinned-codex-path /Users/joshuakaunert/.local/omnigent/codex-stock/0.142.2/codex \
+  --backup-existing \
+  --require-path-selected \
+  --json
+```
+
+Rollback:
+
+```bash
+uvx --from /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit \
+  python /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit/scripts/install_omnigent_codex_launcher.py \
+  --uninstall \
+  --launcher-path /opt/homebrew/bin/codex \
+  --manifest-path /Users/joshuakaunert/.local/omnigent/launchers/codex.json
+```
+
+The installer refuses to overwrite unmanaged targets unless `--backup-existing`
+is supplied. The uninstall path refuses to remove unmanaged launchers and
+restores the recorded backup if one exists.
+
 Isolated Codex launcher activation rehearsal:
 
 ```bash
@@ -604,6 +631,29 @@ transcript began with the deterministic Apple route block and returned
 `GRAPH_OK` after reading the bundled Apple reference. This installed the
 managed payload only; it did not mutate shell startup files, launcher defaults,
 app bundles, or the ambient `codex` command.
+
+Current persistent Omnigent `codex` launcher status on 2026-06-28: the
+operator-approved launcher/default gate replaced `/opt/homebrew/bin/codex`,
+which was the first `codex` on `PATH`, with an Omnigent-managed launcher. The
+original Homebrew symlink was preserved at
+`/opt/homebrew/bin/codex.omnigent-backup-20260628T060846Z`, pointing to
+`/opt/homebrew/Caskroom/codex/0.142.2/codex-aarch64-apple-darwin`. The launcher
+manifest at `/Users/joshuakaunert/.local/omnigent/launchers/codex.json`
+records `kind: omnigent-codex-launcher`, launcher path, backup path, repo root,
+`uvx` path, pinned Codex path, pinned Codex version, and
+`OMNIGENT_STOCK_CODEX_PATH`. Validation proved `which codex` selects
+`/opt/homebrew/bin/codex`, `codex --version` returns `codex-cli 0.142.2`,
+`codex --omnigent-launcher-probe` returns
+`OMNIGENT_CODEX_PERSISTENT_LAUNCHER_OK`, and Omnigent's inner resolver maps the
+managed launcher back to
+`/Users/joshuakaunert/.local/omnigent/codex-stock/0.142.2/codex`. The default
+graph proof then passed with no explicit `--codex-path`: it reported
+`codex_path=/Users/joshuakaunert/.local/omnigent/codex-stock/0.142.2/codex`,
+started the normal Omnigent `run_prompt()` session/runner path, emitted the
+deterministic Apple route block, and returned `GRAPH_OK` in 32.4s. This closes
+the current-host CLI default activation, not app bundle mutation, clean-auth
+onboarding, cross-machine portability, or an official remote download/update
+channel.
 
 Current isolated pinned launcher activation status on 2026-06-28: `--proof
 launcher-activation` passed without persistent filesystem or launcher mutation.
@@ -814,11 +864,12 @@ Run these in order unless a later gate becomes cheaper due to new evidence.
      activation proof is also green for temporary PATH shadowing, pinned
      stock-Codex selection through
      `OMNIGENT_STOCK_CODEX_PATH`, delegation through
-     `uvx --from <repo> omnigent codex`, and rollback. A later operational gate
-     should explicitly decide whether to point a real launcher, shell alias, or
-     production default at Omnigent, and the rollback command for that specific
-     persistent mutation. A separate remote-download/update channel remains
-     optional product scope.
+     `uvx --from <repo> omnigent codex`, and rollback. The current host now also
+     has `/opt/homebrew/bin/codex` pointed at the managed Omnigent launcher with
+     rollback metadata. Remaining product decisions are whether to mutate app
+     bundle launchers or other user-facing entrypoints, whether clean-auth
+     onboarding is required, and whether to build an official remote
+     download/update channel.
 
 ## Non-Actions
 

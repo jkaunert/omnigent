@@ -67,16 +67,22 @@ managed stock Codex `0.142.2` payload persistently installed at
 `launcher-activation` proof is also green for temporary PATH shadowing, pinned
 stock-Codex selection through `OMNIGENT_STOCK_CODEX_PATH`, delegation through
 `uvx --from <repo> omnigent codex` without recursive Codex lookup, and rollback
-to the original `/opt/homebrew/bin/codex` PATH result. The next gate should stay
-in product operations:
+to the original `/opt/homebrew/bin/codex` PATH result. The current host now also
+has `/opt/homebrew/bin/codex` installed as the managed Omnigent launcher, with
+the original Homebrew symlink backed up at
+`/opt/homebrew/bin/codex.omnigent-backup-20260628T060846Z`. `codex --version`,
+`codex --omnigent-launcher-probe`, Omnigent resolver detection, and the default
+graph proof passed through that launcher. The next gate should stay in product
+operations:
 
 - prove clean Codex-auth onboarding if first-run auth is in scope;
 - broaden the Apple workflow smoke to release/readiness/review only if product
   cutover requires that higher-fidelity path; or
-- explicitly decide whether to mutate a persistent launcher, shell alias, or
-  production default to point at Omnigent, and the rollback command for that
-  specific mutation. An official remote download/update channel remains a
-  separate product-scope decision.
+- decide whether to mutate app bundle launchers or other user-facing
+  entrypoints beyond the CLI;
+- decide whether first-run clean-auth onboarding is product scope; or
+- define an official remote download/update channel if we do not want to rely
+  on a locally supplied stock Codex binary.
 
 If ChatGPT mobile/app-server remote resume compatibility becomes product scope
 later, reopen that as a new Omnigent-side remote-resume proof instead of

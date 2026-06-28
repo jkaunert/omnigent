@@ -14,6 +14,8 @@ import pytest
 
 from omnigent.inner.codex_executor import (
     _TURN_EVENT_WARN_SECONDS,
+    OMNIGENT_CODEX_LAUNCHER_MANIFEST_PREFIX,
+    OMNIGENT_MANAGED_CODEX_LAUNCHER_MARKER,
     OMNIGENT_STOCK_CODEX_PATH_ENV,
     CodexExecutor,
     _build_initial_prompt,
@@ -69,6 +71,75 @@ def test_find_codex_cli_fails_closed_for_invalid_configured_stock_codex_path(
     missing = tmp_path / "missing" / "codex"
     monkeypatch.setenv(OMNIGENT_STOCK_CODEX_PATH_ENV, str(missing))
     monkeypatch.setattr("omnigent.inner.codex_executor.shutil.which", lambda _name: "/bin/codex")
+
+    assert _find_codex_cli() is None
+
+
+def test_find_codex_cli_resolves_managed_launcher_to_pinned_stock_codex(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A persistent Omnigent launcher on PATH resolves to its pinned stock binary."""
+    pinned_codex_path = tmp_path / "codex-stock" / "0.142.2" / "codex"
+    pinned_codex_path.parent.mkdir(parents=True)
+    pinned_codex_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    pinned_codex_path.chmod(0o755)
+    manifest_path = tmp_path / "launcher.json"
+    manifest_path.write_text(
+        json.dumps({"pinnedCodexPath": str(pinned_codex_path)}),
+        encoding="utf-8",
+    )
+    launcher_path = tmp_path / "bin" / "codex"
+    launcher_path.parent.mkdir()
+    launcher_path.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"# {OMNIGENT_MANAGED_CODEX_LAUNCHER_MARKER}",
+                f"{OMNIGENT_CODEX_LAUNCHER_MANIFEST_PREFIX} {manifest_path}",
+                "exit 0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    launcher_path.chmod(0o755)
+    monkeypatch.delenv(OMNIGENT_STOCK_CODEX_PATH_ENV, raising=False)
+    monkeypatch.setattr(
+        "omnigent.inner.codex_executor.shutil.which",
+        lambda _name: str(launcher_path),
+    )
+
+    assert _find_codex_cli() == str(pinned_codex_path)
+
+
+def test_find_codex_cli_fails_closed_for_stale_managed_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A managed launcher without a valid pinned payload must not recurse."""
+    manifest_path = tmp_path / "launcher.json"
+    manifest_path.write_text(
+        json.dumps({"pinnedCodexPath": str(tmp_path / "missing" / "codex")}),
+        encoding="utf-8",
+    )
+    launcher_path = tmp_path / "codex"
+    launcher_path.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"# {OMNIGENT_MANAGED_CODEX_LAUNCHER_MARKER}",
+                f"{OMNIGENT_CODEX_LAUNCHER_MANIFEST_PREFIX} {manifest_path}",
+                "exit 0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    launcher_path.chmod(0o755)
+    monkeypatch.delenv(OMNIGENT_STOCK_CODEX_PATH_ENV, raising=False)
+    monkeypatch.setattr(
+        "omnigent.inner.codex_executor.shutil.which",
+        lambda _name: str(launcher_path),
+    )
 
     assert _find_codex_cli() is None
 

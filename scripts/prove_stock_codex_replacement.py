@@ -71,7 +71,11 @@ from omnigent.chat import (
     _wait_for_server,
     run_prompt,
 )
-from omnigent.inner.codex_executor import OMNIGENT_STOCK_CODEX_PATH_ENV, _find_codex_cli
+from omnigent.inner.codex_executor import (
+    OMNIGENT_STOCK_CODEX_PATH_ENV,
+    _find_codex_cli,
+    _resolve_managed_codex_launcher,
+)
 
 PLUGIN_NAME = "apple-appdev-workflow"
 SELECTED_SKILL = "apple-app-orchestrator"
@@ -398,10 +402,14 @@ def resolve_default_bundle() -> Path:
 
 def resolve_codex_path(value: str | None) -> Path:
     """Resolve the stock Codex binary path and fail closed on fork runtimes."""
-    raw = value or shutil.which("codex")
+    raw = value or _find_codex_cli()
     if not raw:
         raise SystemExit("Could not find codex on PATH. Pass --codex-path.")
-    path = Path(raw).expanduser().resolve()
+    candidate = Path(raw).expanduser()
+    managed_or_stock = _resolve_managed_codex_launcher(candidate)
+    if managed_or_stock is None:
+        raise SystemExit(f"Codex binary not found or managed launcher is stale: {candidate}")
+    path = managed_or_stock.resolve()
     if not path.is_file():
         raise SystemExit(f"Codex binary not found: {path}")
     return path
