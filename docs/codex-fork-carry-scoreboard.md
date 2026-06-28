@@ -61,9 +61,11 @@ fallback steps without mutating launcher defaults. The
 `pinned-codex-provision` proof is green for provisioning a local or downloaded
 source binary into an Omnigent-owned `codex-stock/<version>/codex` cache with
 manifest provenance, SHA-256 verification, `.codex-fork` source rejection, and
-`OMNIGENT_STOCK_CODEX_PATH` resolver proof. The isolated `launcher-activation`
-proof is also green for temporary PATH shadowing, pinned stock-Codex selection
-through `OMNIGENT_STOCK_CODEX_PATH`, delegation through
+`OMNIGENT_STOCK_CODEX_PATH` resolver proof. The current host now has that
+managed stock Codex `0.142.2` payload persistently installed at
+`~/.local/omnigent/codex-stock/0.142.2/codex`. The isolated
+`launcher-activation` proof is also green for temporary PATH shadowing, pinned
+stock-Codex selection through `OMNIGENT_STOCK_CODEX_PATH`, delegation through
 `uvx --from <repo> omnigent codex` without recursive Codex lookup, and rollback
 to the original `/opt/homebrew/bin/codex` PATH result. The next gate should stay
 in product operations:
@@ -71,10 +73,10 @@ in product operations:
 - prove clean Codex-auth onboarding if first-run auth is in scope;
 - broaden the Apple workflow smoke to release/readiness/review only if product
   cutover requires that higher-fidelity path; or
-- explicitly decide the Codex binary source, whether to install a real pinned
-  Codex payload, whether to mutate a persistent launcher, shell alias, or
+- explicitly decide whether to mutate a persistent launcher, shell alias, or
   production default to point at Omnigent, and the rollback command for that
-  specific mutation.
+  specific mutation. An official remote download/update channel remains a
+  separate product-scope decision.
 
 If ChatGPT mobile/app-server remote resume compatibility becomes product scope
 later, reopen that as a new Omnigent-side remote-resume proof instead of

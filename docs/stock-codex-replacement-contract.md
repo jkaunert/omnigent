@@ -583,6 +583,28 @@ ambient `codex` lookup. This closes the local or downloaded source-binary
 pinning contract, not an official remote download/update channel or persistent
 launcher/default mutation.
 
+Current persistent pinned stock-Codex payload status on 2026-06-28: the
+operator-approved persistent provision gate installed stock Codex `0.142.2`
+into
+`/Users/joshuakaunert/.local/omnigent/codex-stock/0.142.2/codex` using source
+`/opt/homebrew/bin/codex`, source realpath
+`/opt/homebrew/Caskroom/codex/0.142.2/codex-aarch64-apple-darwin`, and expected
+SHA-256 `31ad44ac440cd7a6dd907c773817800db9c9a7e9c13d3bab7309319e2cd08fa9`.
+The persistent manifest at
+`/Users/joshuakaunert/.local/omnigent/codex-stock/0.142.2/manifest.json`
+records `kind: omnigent-stock-codex`, `version: codex-cli 0.142.2`, source
+path, source realpath, SHA-256, platform, install time, and
+`OMNIGENT_STOCK_CODEX_PATH`. Validation proved the installed binary reports
+`codex-cli 0.142.2`, the installed SHA-256 matches the source, and Omnigent's
+resolver selects the persistent payload when
+`OMNIGENT_STOCK_CODEX_PATH=/Users/joshuakaunert/.local/omnigent/codex-stock/0.142.2/codex`
+is set. A live graph proof using that payload as `--codex-path` then passed in
+40.4s through the normal Omnigent `run_prompt()` session/runner path: the
+transcript began with the deterministic Apple route block and returned
+`GRAPH_OK` after reading the bundled Apple reference. This installed the
+managed payload only; it did not mutate shell startup files, launcher defaults,
+app bundles, or the ambient `codex` command.
+
 Current isolated pinned launcher activation status on 2026-06-28: `--proof
 launcher-activation` passed without persistent filesystem or launcher mutation.
 The run used baseline `PATH` lookup `/opt/homebrew/bin/codex`, realpath
@@ -597,8 +619,8 @@ Codex at `/opt/homebrew/bin/codex` rather than the shim, and reported delegate
 preview `/Users/joshuakaunert/.local/bin/uvx --from /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit omnigent codex`.
 After the scoped proof, `codex` lookup restored to `/opt/homebrew/bin/codex`.
 This closes the no-recursion, pinned-target, and rollback rehearsal for a
-launcher shim, not actual persistent launcher activation or downloaded-binary
-provenance.
+launcher shim, not actual persistent launcher activation or a remote
+download/update channel.
 
 Legacy aggregate status on 2026-06-25: `graph`, `tool-plane`, and
 `apple-mcp-memory` passed under `--proof all`; `apple-mcp-sosumi` timed out at
@@ -786,15 +808,17 @@ Run these in order unless a later gate becomes cheaper due to new evidence.
 8. Persistent pinned launcher/default mutation decision
    - The default-path rehearsal is green for current-host ambient bundle lookup
      and `PATH` stock-Codex resolution. The pinned provisioner is green for
-     local or downloaded source-binary pinning into an Omnigent-owned cache.
-     The isolated launcher activation proof is also green for temporary PATH
-     shadowing, pinned stock-Codex selection through
+     local or downloaded source-binary pinning into an Omnigent-owned cache,
+     and the current host now has a persistent managed Codex payload installed
+     at `~/.local/omnigent/codex-stock/0.142.2/codex`. The isolated launcher
+     activation proof is also green for temporary PATH shadowing, pinned
+     stock-Codex selection through
      `OMNIGENT_STOCK_CODEX_PATH`, delegation through
      `uvx --from <repo> omnigent codex`, and rollback. A later operational gate
-     should explicitly decide the Codex binary source, whether to install a
-     real pinned payload, whether to point a real launcher, shell alias, or
+     should explicitly decide whether to point a real launcher, shell alias, or
      production default at Omnigent, and the rollback command for that specific
-     persistent mutation.
+     persistent mutation. A separate remote-download/update channel remains
+     optional product scope.
 
 ## Non-Actions
 
