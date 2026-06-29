@@ -74,8 +74,12 @@ the original Homebrew symlink backed up at
 rollback command was exercised once, restored the Homebrew symlink and removed
 the manifest, then the managed launcher was reinstalled. `codex --version`,
 `codex --omnigent-launcher-probe`, Omnigent resolver detection, and the default
-graph proof passed through that launcher after reinstall. The next gate should
-stay in product operations:
+graph proof passed through that launcher after reinstall. On 2026-06-29, the
+full `default-path-cutover` aggregate also passed with no explicit
+`--codex-path`, resolving through the managed launcher to the pinned stock
+payload and proving graph, router matrix, tool-plane, Apple memory MCP,
+Apple-docs CLI, XcodeBuildMCP CLI build/install/launch, and read-only
+XcodeBuildMCP discovery. The next gate should stay in product operations:
 
 - prove clean Codex-auth onboarding if first-run auth is in scope;
 - broaden the Apple workflow smoke to release/readiness/review only if product

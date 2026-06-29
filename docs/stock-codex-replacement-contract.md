@@ -668,6 +668,50 @@ resolver, manifest, and default graph proof all passed after reinstall. This
 proves rollback is executable on the current host and that reactivation returns
 the host to the managed default.
 
+Current managed-default aggregate status on 2026-06-29:
+`scripts/prove_stock_codex_replacement.py --proof default-path-cutover
+--live-proof-timeout 600` passed with no explicit `--apple-bundle`, no explicit
+`--codex-path`, and the active `/opt/homebrew/bin/codex` Omnigent-managed
+launcher selected on `PATH`. The proof resolved Codex to the pinned stock
+payload at `/Users/joshuakaunert/.local/omnigent/codex-stock/0.142.2/codex`,
+reported `codex-cli 0.142.2`, selected the Apple workflow bundle from
+`$HOME/.codex-fork plugin cache`, and printed the default-path fallback steps.
+Live proof results:
+
+- `graph` passed in 29.4s with `GRAPH_OK`.
+- `router-matrix` passed in 142.4s with sessions
+  `conv_7313405b44ae44f88e02edd0abae97e0`,
+  `conv_213c8c3de0b5423bbcfed527665a6eda`,
+  `conv_14d2e9e042314d3db894de5bb0bcb9da`,
+  `conv_1e2224c1e1824d48ba66e99b57c17bf2`,
+  `conv_32870ac52562438f861d879e7822cf29`,
+  `conv_18eae751720e489bb650af5fad9e300d`, and
+  `conv_6884711762f84878b01671650a368fc8`.
+- `tool-plane` passed in 29.5s with session
+  `conv_bdbb7e7ecaf5475187778d0bf49cb256` and call
+  `call_nvBrXWjPJdpDobcOWpUN2daG`.
+- `apple-mcp-memory` passed in 23.0s with session
+  `conv_19a436d1c5d1455ab03681d0cf73a718` and call
+  `call_uldfV7n4T8m7upwGacoCeORL`.
+- `apple-docs-cli` passed in 36.8s with session
+  `conv_35e838abc77944e7b7334d3ab7bf1df9`, call
+  `call_nG8NOtXLHfRRid0Nx0GE8BIs`, and timestamp
+  `2026-06-29T21:12:27.412Z`.
+- `apple-xcodebuild-cli-run` passed in 76.3s with session
+  `conv_a4b8fc1553ff4687857a4ab4c389d895` and call
+  `call_HfxWtv0B2FHS4rQ45CknJtQf`.
+- `apple-mcp-xcodebuild` passed in 70.0s with session
+  `conv_b46a5fc618d84925b91fb60cada9540d` and call
+  `call_NFWibtAzzE5FYnJ4jem89SqV`.
+
+This closes the broad current-host managed-default aggregate: ambient bundle
+lookup, managed launcher resolution, graph, router-selection matrix, dynamic
+tool plane, Apple memory MCP, Apple-docs CLI adapter, XcodeBuildMCP CLI
+build/install/launch, and read-only XcodeBuildMCP discovery all passed through
+the installed Omnigent `codex` default. It does not prove app-bundle launcher
+mutation, clean first-run Codex auth onboarding, cross-machine portability, or
+an official remote download/update channel.
+
 Current isolated pinned launcher activation status on 2026-06-28: `--proof
 launcher-activation` passed without persistent filesystem or launcher mutation.
 The run used baseline `PATH` lookup `/opt/homebrew/bin/codex`, realpath
@@ -879,10 +923,11 @@ Run these in order unless a later gate becomes cheaper due to new evidence.
      `OMNIGENT_STOCK_CODEX_PATH`, delegation through
      `uvx --from <repo> omnigent codex`, and rollback. The current host now also
      has `/opt/homebrew/bin/codex` pointed at the managed Omnigent launcher with
-     rollback metadata. Remaining product decisions are whether to mutate app
-     bundle launchers or other user-facing entrypoints, whether clean-auth
-     onboarding is required, and whether to build an official remote
-     download/update channel.
+     rollback metadata, and the full managed-default aggregate is green through
+     that launcher. Remaining product decisions are whether to mutate app bundle
+     launchers or other user-facing entrypoints, whether clean-auth onboarding
+     is required, and whether to build an official remote download/update
+     channel.
 
 ## Non-Actions
 
