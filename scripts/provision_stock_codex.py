@@ -11,11 +11,14 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.error import URLError
 from urllib.parse import unquote, urlparse
+from urllib.request import Request, urlopen
 
 from omnigent.inner.codex_executor import OMNIGENT_STOCK_CODEX_PATH_ENV
 
@@ -34,6 +37,8 @@ class StockCodexChannelArtifact:
     source: str
     source_field: str
     platform: str | None
+    archive_format: str | None = None
+    archive_executable: str | None = None
 
     @property
     def version_slug(self) -> str:
@@ -50,7 +55,23 @@ class StockCodexChannelArtifact:
         }
         if self.platform is not None:
             data["platform"] = self.platform
+        if self.archive_format is not None:
+            data["archiveFormat"] = self.archive_format
+        if self.archive_executable is not None:
+            data["archiveExecutable"] = self.archive_executable
         return data
+
+
+@dataclass(frozen=True)
+class StagedChannelArtifact:
+    """A channel artifact staged as an executable Codex binary."""
+
+    staged_path: Path
+    source_path: str
+    source_realpath: str
+    artifact_sha256: str
+    binary_sha256: str
+    version: str
 
 
 @dataclass(frozen=True)
@@ -63,8 +84,8 @@ class ProvisionedStockCodex:
     version: str
     version_slug: str
     sha256: str
-    source_path: Path | None
-    source_realpath: Path | None
+    source_path: str | None
+    source_realpath: str | None
     source_kind: str | None = None
     channel_manifest_path: Path | None = None
     channel_artifact: dict[str, object] | None = None
@@ -78,10 +99,8 @@ class ProvisionedStockCodex:
             "version": self.version,
             "versionSlug": self.version_slug,
             "sha256": self.sha256,
-            "sourcePath": str(self.source_path) if self.source_path is not None else None,
-            "sourceRealpath": (
-                str(self.source_realpath) if self.source_realpath is not None else None
-            ),
+            "sourcePath": self.source_path,
+            "sourceRealpath": self.source_realpath,
             "sourceKind": self.source_kind,
             "channelManifestPath": (
                 str(self.channel_manifest_path) if self.channel_manifest_path is not None else None
@@ -250,8 +269,8 @@ def verify_payload(
         version=version,
         version_slug=slug,
         sha256=digest,
-        source_path=Path(source_path) if isinstance(source_path, str) and source_path else None,
-        source_realpath=Path(source_realpath)
+        source_path=source_path if isinstance(source_path, str) and source_path else None,
+        source_realpath=source_realpath
         if isinstance(source_realpath, str) and source_realpath
         else None,
         source_kind=source_kind,
@@ -269,8 +288,8 @@ def copy_codex_payload(
     version: str,
     digest: str,
     source_kind: str = "source-binary",
-    manifest_source_path: Path | None = None,
-    manifest_source_realpath: Path | None = None,
+    manifest_source_path: str | Path | None = None,
+    manifest_source_realpath: str | Path | None = None,
     channel_manifest_path: Path | None = None,
     channel_artifact: StockCodexChannelArtifact | None = None,
 ) -> None:
@@ -363,12 +382,26 @@ def _channel_artifact_from_dict(
     artifact_platform = raw.get("platform")
     if artifact_platform is not None and not isinstance(artifact_platform, str):
         raise ProvisioningError(f"Channel artifact {index} has invalid platform")
+    archive_format = raw.get("archiveFormat")
+    if archive_format is not None and archive_format != "tar.gz":
+        raise ProvisioningError(
+            f"Channel artifact {index} has unsupported archiveFormat: {archive_format!r}"
+        )
+    archive_executable = raw.get("archiveExecutable")
+    if archive_executable is not None and not isinstance(archive_executable, str):
+        raise ProvisioningError(f"Channel artifact {index} has invalid archiveExecutable")
+    if archive_format is not None and not archive_executable:
+        raise ProvisioningError(
+            f"Channel artifact {index} archiveFormat requires archiveExecutable"
+        )
     return StockCodexChannelArtifact(
         version=version,
         sha256=digest.lower(),
         source=source,
         source_field=source_field,
         platform=artifact_platform,
+        archive_format=archive_format,
+        archive_executable=archive_executable,
     )
 
 
@@ -458,10 +491,126 @@ def resolve_channel_artifact_path(
         return Path(unquote(parsed.path)).expanduser()
     if parsed.scheme in {"http", "https"}:
         raise ProvisioningError(
-            "Remote channel downloads are not implemented in this bounded proof slice; "
-            "use a local path or file:// artifact."
+            "Remote channel downloads require --allow-remote-channel-download."
         )
     raise ProvisioningError(f"Unsupported channel artifact URL: {artifact.source}")
+
+
+def download_channel_artifact(
+    artifact: StockCodexChannelArtifact,
+    *,
+    destination: Path,
+    allow_remote_channel_download: bool,
+) -> StagedChannelArtifact:
+    """Download a remote channel artifact into *destination* and verify its SHA-256."""
+    parsed = urlparse(artifact.source)
+    if parsed.scheme not in {"http", "https"}:
+        raise ProvisioningError(f"Unsupported remote artifact URL: {artifact.source}")
+    if not allow_remote_channel_download:
+        raise ProvisioningError(
+            "Remote channel downloads require --allow-remote-channel-download."
+        )
+    request = Request(
+        artifact.source,
+        headers={"User-Agent": "omnigent-stock-codex-provisioner"},
+    )
+    try:
+        with urlopen(request, timeout=120) as response, destination.open("wb") as handle:
+            shutil.copyfileobj(response, handle)
+    except (OSError, TimeoutError, URLError) as exc:
+        raise ProvisioningError(f"Could not download channel artifact: {exc}") from exc
+    artifact_digest = sha256_file(destination)
+    if artifact_digest.lower() != artifact.sha256.lower():
+        raise ProvisioningError(
+            f"Channel artifact sha256 mismatch: expected={artifact.sha256} "
+            f"actual={artifact_digest}"
+        )
+    return materialize_channel_artifact(
+        artifact,
+        source_path=destination,
+        source_path_label=artifact.source,
+        source_realpath_label=artifact.source,
+        artifact_sha256=artifact_digest,
+        stage_dir=destination.parent,
+    )
+
+
+def _safe_tar_member(member: tarfile.TarInfo) -> bool:
+    member_path = Path(member.name)
+    return member.isfile() and not member_path.is_absolute() and ".." not in member_path.parts
+
+
+def extract_channel_archive(
+    archive_path: Path,
+    *,
+    executable_name: str,
+    stage_dir: Path,
+) -> Path:
+    """Extract one executable from a verified channel ``tar.gz`` archive."""
+    try:
+        with tarfile.open(archive_path, "r:gz") as archive:
+            matches = [
+                member
+                for member in archive.getmembers()
+                if _safe_tar_member(member) and Path(member.name).name == executable_name
+            ]
+            if len(matches) != 1:
+                raise ProvisioningError(
+                    f"Expected exactly one {executable_name!r} in archive; found {len(matches)}"
+                )
+            extracted = archive.extractfile(matches[0])
+            if extracted is None:
+                raise ProvisioningError(
+                    f"Could not extract {executable_name!r} from channel archive"
+                )
+            staged_path = stage_dir / "codex"
+            with extracted, staged_path.open("wb") as handle:
+                shutil.copyfileobj(extracted, handle)
+    except tarfile.TarError as exc:
+        raise ProvisioningError(f"Channel artifact archive is invalid: {exc}") from exc
+    staged_path.chmod(0o755)
+    return staged_path
+
+
+def materialize_channel_artifact(
+    artifact: StockCodexChannelArtifact,
+    *,
+    source_path: Path,
+    source_path_label: str,
+    source_realpath_label: str,
+    artifact_sha256: str,
+    stage_dir: Path,
+) -> StagedChannelArtifact:
+    """Turn a verified channel artifact file into a staged ``codex`` executable."""
+    if artifact.archive_format is None:
+        staged_path = stage_dir / "codex"
+        shutil.copy2(source_path, staged_path)
+        staged_path.chmod(0o755)
+    elif artifact.archive_format == "tar.gz" and artifact.archive_executable is not None:
+        staged_path = extract_channel_archive(
+            source_path,
+            executable_name=artifact.archive_executable,
+            stage_dir=stage_dir,
+        )
+    else:
+        raise ProvisioningError(
+            f"Unsupported channel artifact archive format: {artifact.archive_format!r}"
+        )
+    binary_digest = sha256_file(staged_path)
+    staged_version = codex_version(staged_path)
+    if staged_version != artifact.version:
+        raise ProvisioningError(
+            f"Channel artifact version mismatch: expected={artifact.version!r} "
+            f"actual={staged_version!r}"
+        )
+    return StagedChannelArtifact(
+        staged_path=staged_path,
+        source_path=source_path_label,
+        source_realpath=source_realpath_label,
+        artifact_sha256=artifact_sha256,
+        binary_sha256=binary_digest,
+        version=staged_version,
+    )
 
 
 def stage_channel_artifact(
@@ -470,12 +619,17 @@ def stage_channel_artifact(
     channel_manifest: Path,
     stage_dir: Path,
     allow_fork_codex: bool,
-) -> tuple[Path, Path, Path, str, str]:
+    allow_remote_channel_download: bool,
+) -> StagedChannelArtifact:
     """Copy a selected channel artifact into a temporary verified staging path."""
-    source_path = resolve_channel_artifact_path(
-        artifact,
-        channel_manifest=channel_manifest,
-    )
+    parsed = urlparse(artifact.source)
+    if parsed.scheme in {"http", "https"}:
+        return download_channel_artifact(
+            artifact,
+            destination=stage_dir / "artifact",
+            allow_remote_channel_download=allow_remote_channel_download,
+        )
+    source_path = resolve_channel_artifact_path(artifact, channel_manifest=channel_manifest)
     if not source_path.is_file():
         raise ProvisioningError(f"Channel artifact not found: {source_path}")
     source_realpath = source_path.resolve()
@@ -489,22 +643,14 @@ def stage_channel_artifact(
             f"Channel artifact sha256 mismatch: expected={artifact.sha256} actual={source_digest}"
         )
     stage_dir.mkdir(parents=True, exist_ok=True)
-    staged_path = stage_dir / "codex"
-    shutil.copy2(source_realpath, staged_path)
-    staged_path.chmod(0o755)
-    staged_digest = sha256_file(staged_path)
-    if staged_digest.lower() != artifact.sha256.lower():
-        raise ProvisioningError(
-            f"Staged channel artifact sha256 mismatch: expected={artifact.sha256} "
-            f"actual={staged_digest}"
-        )
-    staged_version = codex_version(staged_path)
-    if staged_version != artifact.version:
-        raise ProvisioningError(
-            f"Channel artifact version mismatch: expected={artifact.version!r} "
-            f"actual={staged_version!r}"
-        )
-    return staged_path, source_path, source_realpath, staged_digest, staged_version
+    return materialize_channel_artifact(
+        artifact,
+        source_path=source_realpath,
+        source_path_label=str(source_path),
+        source_realpath_label=str(source_realpath),
+        artifact_sha256=source_digest,
+        stage_dir=stage_dir,
+    )
 
 
 def provision_stock_codex(
@@ -551,6 +697,7 @@ def provision_stock_codex_from_channel(
     expected_sha256: str | None,
     force: bool,
     allow_fork_codex: bool,
+    allow_remote_channel_download: bool,
 ) -> ProvisionedStockCodex:
     """Provision or reuse a verified stock Codex payload from a channel manifest."""
     channel_manifest = channel_manifest.expanduser()
@@ -565,18 +712,19 @@ def provision_stock_codex_from_channel(
             f"actual={artifact.sha256}"
         )
     with tempfile.TemporaryDirectory(prefix="omnigent-stock-codex-channel-") as temp_root:
-        staged_path, source_path, source_realpath, digest, version = stage_channel_artifact(
+        staged = stage_channel_artifact(
             artifact,
             channel_manifest=channel_manifest,
             stage_dir=Path(temp_root),
             allow_fork_codex=allow_fork_codex,
+            allow_remote_channel_download=allow_remote_channel_download,
         )
-        payload_dir = payload_dir_for(cache_root, version)
+        payload_dir = payload_dir_for(cache_root, staged.version)
         if payload_dir.exists() and not force:
             try:
                 return verify_payload(
                     payload_dir,
-                    expected_sha256=digest,
+                    expected_sha256=staged.binary_sha256,
                     expected_source_kind="channel",
                 )
             except ProvisioningError as exc:
@@ -585,19 +733,19 @@ def provision_stock_codex_from_channel(
                     "Rerun with --force to replace it."
                 ) from exc
         copy_codex_payload(
-            source_binary=staged_path,
+            source_binary=staged.staged_path,
             destination_payload_dir=payload_dir,
-            version=version,
-            digest=digest,
+            version=staged.version,
+            digest=staged.binary_sha256,
             source_kind="channel",
-            manifest_source_path=source_path,
-            manifest_source_realpath=source_realpath,
+            manifest_source_path=staged.source_path,
+            manifest_source_realpath=staged.source_realpath,
             channel_manifest_path=channel_manifest,
             channel_artifact=artifact,
         )
         return verify_payload(
             payload_dir,
-            expected_sha256=digest,
+            expected_sha256=staged.binary_sha256,
             expected_source_kind="channel",
         )
 
@@ -644,6 +792,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Allow a .codex-fork source binary for diagnostics. Not a stock proof.",
     )
+    parser.add_argument(
+        "--allow-remote-channel-download",
+        action="store_true",
+        help="Allow http(s) artifacts in --channel-manifest after SHA-256 verification.",
+    )
     output = parser.add_mutually_exclusive_group()
     output.add_argument(
         "--print-path",
@@ -671,11 +824,16 @@ def main(argv: list[str] | None = None) -> int:
                 expected_sha256=args.expected_sha256,
                 force=args.force,
                 allow_fork_codex=args.allow_fork_codex,
+                allow_remote_channel_download=args.allow_remote_channel_download,
             )
         else:
             if args.channel_version is not None or args.channel_platform is not None:
                 raise ProvisioningError(
                     "--channel-version and --channel-platform require --channel-manifest"
+                )
+            if args.allow_remote_channel_download:
+                raise ProvisioningError(
+                    "--allow-remote-channel-download requires --channel-manifest"
                 )
             provisioned = provision_stock_codex(
                 cache_root=args.cache_root,

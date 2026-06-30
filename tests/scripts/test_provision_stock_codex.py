@@ -5,6 +5,10 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import tarfile
+import threading
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +50,35 @@ printf 'fake codex\\n'
     )
     path.chmod(0o755)
     return path
+
+
+class _QuietHandler(SimpleHTTPRequestHandler):
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+def _serve_directory(directory: Path) -> tuple[ThreadingHTTPServer, str]:
+    handler = partial(_QuietHandler, directory=str(directory))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    return server, f"http://{host}:{port}"
+
+
+def _write_codex_tarball(
+    archive_path: Path,
+    *,
+    member_name: str = "codex-aarch64-apple-darwin",
+    version: str = "codex-cli 0.142.2",
+) -> Path:
+    source_binary = _write_codex_binary(
+        archive_path.parent / "archive-source" / member_name,
+        version=version,
+    )
+    with tarfile.open(archive_path, "w:gz") as archive:
+        archive.add(source_binary, arcname=member_name)
+    return archive_path
 
 
 def test_provision_stock_codex_copies_source_to_version_cache(tmp_path: Path) -> None:
@@ -195,6 +228,7 @@ def test_provision_stock_codex_from_channel_manifest(tmp_path: Path) -> None:
         expected_sha256=source_sha,
         force=False,
         allow_fork_codex=False,
+        allow_remote_channel_download=False,
     )
 
     assert provisioned.version == "codex-cli 0.142.2"
@@ -214,7 +248,7 @@ def test_provision_stock_codex_from_channel_manifest(tmp_path: Path) -> None:
     assert manifest["channelManifestPath"] == str(channel_manifest)
 
 
-def test_channel_manifest_rejects_remote_urls_until_downloader_exists(tmp_path: Path) -> None:
+def test_channel_manifest_requires_opt_in_for_remote_urls(tmp_path: Path) -> None:
     channel_manifest = tmp_path / "channel.json"
     channel_manifest.write_text(
         json.dumps(
@@ -235,7 +269,7 @@ def test_channel_manifest_rejects_remote_urls_until_downloader_exists(tmp_path: 
         encoding="utf-8",
     )
 
-    with pytest.raises(_MOD.ProvisioningError, match="Remote channel downloads"):
+    with pytest.raises(_MOD.ProvisioningError, match="allow-remote-channel-download"):
         _MOD.provision_stock_codex_from_channel(
             cache_root=tmp_path / "cache",
             channel_manifest=channel_manifest,
@@ -244,7 +278,68 @@ def test_channel_manifest_rejects_remote_urls_until_downloader_exists(tmp_path: 
             expected_sha256=None,
             force=False,
             allow_fork_codex=False,
+            allow_remote_channel_download=False,
         )
+
+
+def test_provision_stock_codex_from_remote_archive_channel_manifest(tmp_path: Path) -> None:
+    archive_path = _write_codex_tarball(tmp_path / "codex.tar.gz")
+    archive_sha = _MOD.sha256_file(archive_path)
+    server, base_url = _serve_directory(tmp_path)
+    try:
+        channel_manifest = tmp_path / "channel.json"
+        channel_manifest.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": _MOD.CHANNEL_MANIFEST_KIND,
+                    "latest": "0.142.2",
+                    "artifacts": [
+                        {
+                            "version": "codex-cli 0.142.2",
+                            "platform": _MOD.current_channel_platform(),
+                            "url": f"{base_url}/codex.tar.gz",
+                            "sha256": archive_sha,
+                            "archiveFormat": "tar.gz",
+                            "archiveExecutable": "codex-aarch64-apple-darwin",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        provisioned = _MOD.provision_stock_codex_from_channel(
+            cache_root=tmp_path / "cache",
+            channel_manifest=channel_manifest,
+            channel_version=None,
+            channel_platform=None,
+            expected_sha256=archive_sha,
+            force=False,
+            allow_fork_codex=False,
+            allow_remote_channel_download=True,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert provisioned.version == "codex-cli 0.142.2"
+    assert provisioned.source_kind == "channel"
+    assert provisioned.sha256 == _MOD.sha256_file(provisioned.codex_path)
+    assert provisioned.channel_artifact == {
+        "archiveExecutable": "codex-aarch64-apple-darwin",
+        "archiveFormat": "tar.gz",
+        "platform": _MOD.current_channel_platform(),
+        "sha256": archive_sha,
+        "url": f"{base_url}/codex.tar.gz",
+        "version": "codex-cli 0.142.2",
+        "versionSlug": "0.142.2",
+    }
+    manifest = json.loads(provisioned.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["sourcePath"] == f"{base_url}/codex.tar.gz"
+    assert manifest["sourceRealpath"] == f"{base_url}/codex.tar.gz"
+    assert manifest["channelArtifact"]["sha256"] == archive_sha
+    assert manifest["sha256"] == provisioned.sha256
 
 
 def test_channel_manifest_sha_mismatch_fails_before_install(tmp_path: Path) -> None:
@@ -278,6 +373,7 @@ def test_channel_manifest_sha_mismatch_fails_before_install(tmp_path: Path) -> N
             expected_sha256=None,
             force=False,
             allow_fork_codex=False,
+            allow_remote_channel_download=False,
         )
     assert not (tmp_path / "cache").exists()
 
@@ -335,5 +431,16 @@ def test_main_rejects_channel_options_without_channel_manifest(
 
     assert rc == 1
     assert "--channel-version and --channel-platform require --channel-manifest" in (
+        capsys.readouterr().err
+    )
+
+
+def test_main_rejects_remote_download_flag_without_channel_manifest(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = _MOD.main(["--allow-remote-channel-download"])
+
+    assert rc == 1
+    assert "--allow-remote-channel-download requires --channel-manifest" in (
         capsys.readouterr().err
     )

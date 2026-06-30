@@ -28,6 +28,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
+from urllib.parse import urlparse
 
 from omnigent_client import OmnigentClient
 
@@ -353,6 +354,28 @@ class StockCodexChannelProof:
     source_codex_sha256: str
     channel_manifest_path: Path
     channel_artifact_path: Path
+    cache_root: Path
+    payload_dir: Path
+    provisioned_codex_path: Path
+    provisioned_manifest_path: Path
+    provisioned_version: str
+    provisioned_sha256: str
+    provisioned_source_kind: str
+    omnigent_resolved_codex_path: Path
+
+
+@dataclass(frozen=True)
+class StockCodexHomebrewRemoteChannelProof:
+    """Non-mutating proof result for the Homebrew/OpenAI remote Codex channel."""
+
+    cask_token: str
+    cask_tap: str
+    cask_homepage: str
+    cask_version: str
+    cask_url: str
+    cask_sha256: str
+    archive_executable: str
+    channel_manifest_path: Path
     cache_root: Path
     payload_dir: Path
     provisioned_codex_path: Path
@@ -786,8 +809,300 @@ def print_stock_codex_channel_proof(proof: StockCodexChannelProof) -> None:
         "verify sha256 and version, stage it, and install a channel-provenance payload"
     )
     print(
-        "ASSERTION: remote http(s) download transport remains intentionally unimplemented "
-        "in this proof slice"
+        "ASSERTION: this proof remains local-file-only; remote http(s) "
+        "download transport is covered by stock-codex-homebrew-remote-channel"
+    )
+
+
+def run_stock_codex_homebrew_remote_channel_proof() -> StockCodexHomebrewRemoteChannelProof:
+    """Prove the stock Codex channel can use Homebrew cask GitHub release metadata."""
+    cask = _read_homebrew_codex_cask()
+    cask_url = _json_string(cask, "url")
+    cask_sha256 = _json_string(cask, "sha256").lower()
+    cask_version = _json_string(cask, "version")
+    cask_token = _json_string(cask, "token")
+    cask_tap = _json_string(cask, "tap")
+    cask_homepage = _json_string(cask, "homepage")
+    archive_executable = _homebrew_codex_binary_name(cask)
+    _validate_homebrew_codex_cask_metadata(
+        token=cask_token,
+        homepage=cask_homepage,
+        url=cask_url,
+        sha256=cask_sha256,
+    )
+    expected_version = f"codex-cli {cask_version}"
+    repo_root = Path(__file__).resolve().parents[1]
+    provisioner = repo_root / "scripts" / "provision_stock_codex.py"
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-homebrew-channel-proof-"
+    ) as temp_root:
+        root = Path(temp_root)
+        channel_manifest_path = root / "channel.json"
+        channel_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-channel",
+                    "latest": expected_version,
+                    "artifacts": [
+                        {
+                            "version": expected_version,
+                            "url": cask_url,
+                            "sha256": cask_sha256,
+                            "archiveFormat": "tar.gz",
+                            "archiveExecutable": archive_executable,
+                        }
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        cache_root = root / "codex-stock"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(provisioner),
+                "--cache-root",
+                str(cache_root),
+                "--channel-manifest",
+                str(channel_manifest_path),
+                "--expected-sha256",
+                cask_sha256,
+                "--allow-remote-channel-download",
+                "--json",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+        if completed.returncode != 0:
+            raise SystemExit(
+                "Stock Codex Homebrew remote channel provisioner failed with exit "
+                f"{completed.returncode}:\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+            )
+        try:
+            provisioned = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(
+                "Stock Codex Homebrew remote channel provisioner did not emit JSON:\n"
+                f"{completed.stdout}"
+            ) from exc
+        if not isinstance(provisioned, dict):
+            raise SystemExit(
+                "Stock Codex Homebrew remote channel provisioner JSON is not an object: "
+                f"{provisioned!r}"
+            )
+
+        provisioned_path = Path(_json_string(provisioned, "codexPath")).expanduser().resolve()
+        payload_dir = Path(_json_string(provisioned, "payloadDir")).expanduser().resolve()
+        manifest_path = Path(_json_string(provisioned, "manifestPath")).expanduser().resolve()
+        provisioned_sha = _json_string(provisioned, "sha256")
+        provisioned_version = _json_string(provisioned, "version")
+        provisioned_source_kind = _json_string(provisioned, "sourceKind")
+        channel_artifact = provisioned.get("channelArtifact")
+        if not isinstance(channel_artifact, dict):
+            raise SystemExit(
+                "Stock Codex Homebrew remote channel provisioner omitted channel artifact: "
+                f"{provisioned!r}"
+            )
+        expected_channel_artifact = {
+            "archiveExecutable": archive_executable,
+            "archiveFormat": "tar.gz",
+            "sha256": cask_sha256,
+            "url": cask_url,
+            "version": expected_version,
+            "versionSlug": cask_version,
+        }
+        if channel_artifact != expected_channel_artifact:
+            raise SystemExit(
+                "Stock Codex Homebrew remote channel provisioner recorded unexpected "
+                f"artifact:\nexpected={expected_channel_artifact!r}\nactual={channel_artifact!r}"
+            )
+        if provisioned_source_kind != "channel":
+            raise SystemExit(
+                f"Stock Codex Homebrew remote channel source kind mismatch: {provisioned!r}"
+            )
+        if provisioned_version != expected_version:
+            raise SystemExit(
+                "Stock Codex Homebrew remote channel recorded an unexpected version.\n"
+                f"expected_version={expected_version!r}\nactual_version={provisioned_version!r}"
+            )
+        if not provisioned_path.is_file() or not os.access(provisioned_path, os.X_OK):
+            raise SystemExit(
+                f"Homebrew-channel-provisioned Codex is not executable: {provisioned_path}"
+            )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("kind") != "omnigent-stock-codex":
+            raise SystemExit(f"Homebrew-channel-provisioned manifest kind mismatch: {manifest!r}")
+        if manifest.get("sourceKind") != "channel":
+            raise SystemExit(
+                f"Homebrew-channel-provisioned manifest source mismatch: {manifest!r}"
+            )
+        if manifest.get("sourcePath") != cask_url or manifest.get("sourceRealpath") != cask_url:
+            raise SystemExit(
+                f"Homebrew-channel-provisioned manifest source URL mismatch: {manifest!r}"
+            )
+        if manifest.get("sha256") != provisioned_sha:
+            raise SystemExit(f"Homebrew-channel-provisioned manifest sha mismatch: {manifest!r}")
+        actual_provisioned_version = codex_version(provisioned_path)
+        if actual_provisioned_version != provisioned_version:
+            raise SystemExit(
+                "Homebrew-channel-provisioned Codex binary reported a different version.\n"
+                f"manifest_version={provisioned_version!r}\nactual_version={actual_provisioned_version!r}"
+            )
+        with temporary_env({OMNIGENT_STOCK_CODEX_PATH_ENV: str(provisioned_path)}):
+            resolved_raw = _find_codex_cli()
+        if resolved_raw is None:
+            raise SystemExit(f"{OMNIGENT_STOCK_CODEX_PATH_ENV} did not resolve a Codex binary.")
+        resolved_path = Path(resolved_raw).expanduser().resolve()
+        if resolved_path != provisioned_path:
+            raise SystemExit(
+                "Omnigent stock-Codex resolver did not select the Homebrew "
+                "remote-channel-provisioned binary.\n"
+                f"expected={provisioned_path}\nactual={resolved_raw}"
+            )
+
+        return StockCodexHomebrewRemoteChannelProof(
+            cask_token=cask_token,
+            cask_tap=cask_tap,
+            cask_homepage=cask_homepage,
+            cask_version=cask_version,
+            cask_url=cask_url,
+            cask_sha256=cask_sha256,
+            archive_executable=archive_executable,
+            channel_manifest_path=channel_manifest_path,
+            cache_root=cache_root,
+            payload_dir=payload_dir,
+            provisioned_codex_path=provisioned_path,
+            provisioned_manifest_path=manifest_path,
+            provisioned_version=provisioned_version,
+            provisioned_sha256=provisioned_sha,
+            provisioned_source_kind=provisioned_source_kind,
+            omnigent_resolved_codex_path=resolved_path,
+        )
+
+
+def _read_homebrew_codex_cask() -> dict[str, Any]:
+    """Return the current local Homebrew cask metadata for Codex."""
+    completed = subprocess.run(
+        ["brew", "info", "--cask", "--json=v2", "codex"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1"},
+    )
+    if completed.returncode != 0:
+        raise SystemExit(
+            "Could not read Homebrew Codex cask metadata with auto-update disabled.\n"
+            f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Homebrew cask metadata was not JSON:\n{completed.stdout}") from exc
+    if not isinstance(payload, dict):
+        raise SystemExit(f"Homebrew cask metadata was not an object: {payload!r}")
+    casks = payload.get("casks")
+    if not isinstance(casks, list):
+        raise SystemExit(f"Homebrew cask metadata omitted casks list: {payload!r}")
+    matches = [cask for cask in casks if isinstance(cask, dict) and cask.get("token") == "codex"]
+    if len(matches) != 1:
+        raise SystemExit(f"Expected one Homebrew codex cask, found {len(matches)}")
+    return matches[0]
+
+
+def _homebrew_codex_binary_name(cask: dict[str, Any]) -> str:
+    """Return the Codex binary member declared by the Homebrew cask."""
+    artifacts = cask.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise SystemExit(f"Homebrew Codex cask omitted artifacts: {cask!r}")
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        binary = artifact.get("binary")
+        if not isinstance(binary, list) or not binary:
+            continue
+        source_name = binary[0]
+        target = (
+            binary[1].get("target") if len(binary) > 1 and isinstance(binary[1], dict) else None
+        )
+        if isinstance(source_name, str) and target == "codex":
+            return source_name
+    raise SystemExit(f"Homebrew Codex cask did not declare a codex binary artifact: {cask!r}")
+
+
+def _validate_homebrew_codex_cask_metadata(
+    *,
+    token: str,
+    homepage: str,
+    url: str,
+    sha256: str,
+) -> None:
+    """Fail closed unless the cask points to the expected stock Codex release source."""
+    if token != "codex":
+        raise SystemExit(f"Unexpected Homebrew cask token: {token!r}")
+    if homepage != "https://github.com/openai/codex":
+        raise SystemExit(f"Unexpected Homebrew Codex homepage: {homepage!r}")
+    if len(sha256) != 64 or any(char not in "0123456789abcdef" for char in sha256):
+        raise SystemExit(f"Unexpected Homebrew Codex sha256: {sha256!r}")
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.netloc != "github.com":
+        raise SystemExit(f"Homebrew Codex URL is not an HTTPS GitHub URL: {url}")
+    if not parsed.path.startswith("/openai/codex/releases/download/"):
+        raise SystemExit(f"Homebrew Codex URL is not an OpenAI Codex release URL: {url}")
+    if not parsed.path.endswith(".tar.gz"):
+        raise SystemExit(f"Homebrew Codex URL is not a tar.gz archive: {url}")
+
+
+def print_stock_codex_homebrew_remote_channel_proof(
+    proof: StockCodexHomebrewRemoteChannelProof,
+) -> None:
+    """Emit operator evidence for the Homebrew/OpenAI remote channel proof."""
+    print("stock_codex_homebrew_remote_channel_rehearsal=selected")
+    print(f"stock_codex_homebrew_cask_token={proof.cask_token}")
+    print(f"stock_codex_homebrew_cask_tap={proof.cask_tap}")
+    print(f"stock_codex_homebrew_cask_homepage={proof.cask_homepage}")
+    print(f"stock_codex_homebrew_cask_version={proof.cask_version}")
+    print(f"stock_codex_homebrew_cask_url={proof.cask_url}")
+    print(f"stock_codex_homebrew_cask_sha256={proof.cask_sha256}")
+    print("stock_codex_homebrew_archive_format=tar.gz")
+    print(f"stock_codex_homebrew_archive_executable={proof.archive_executable}")
+    print(f"stock_codex_homebrew_channel_manifest={proof.channel_manifest_path}")
+    print("stock_codex_homebrew_channel_artifact_transport=https")
+    print(f"stock_codex_homebrew_cache_root={proof.cache_root}")
+    print(f"stock_codex_homebrew_payload_dir={proof.payload_dir}")
+    print(f"stock_codex_homebrew_path={proof.provisioned_codex_path}")
+    print(f"stock_codex_homebrew_version={proof.provisioned_version}")
+    print(f"stock_codex_homebrew_binary_sha256={proof.provisioned_sha256}")
+    print(f"stock_codex_homebrew_source_kind={proof.provisioned_source_kind}")
+    print(f"stock_codex_homebrew_payload_manifest={proof.provisioned_manifest_path}")
+    print(
+        f"stock_codex_homebrew_env={OMNIGENT_STOCK_CODEX_PATH_ENV}={proof.provisioned_codex_path}"
+    )
+    print(
+        f"stock_codex_homebrew_omnigent_resolved_codex_path={proof.omnigent_resolved_codex_path}"
+    )
+    print("stock_codex_homebrew_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "stock_codex_homebrew_trust_boundary=homebrew_cask_sha256_plus_openai_github_release_url"
+    )
+    print(
+        "ASSERTION: Homebrew Codex cask metadata selected an OpenAI GitHub "
+        "release archive and the provisioner verified the archive SHA-256 before extraction"
+    )
+    print(
+        "ASSERTION: the provisioner extracted the declared archive executable, "
+        "verified codex --version, installed a channel-provenance payload, and "
+        "proved Omnigent resolver selection through OMNIGENT_STOCK_CODEX_PATH"
+    )
+    print(
+        "ASSERTION: this proof used a temporary cache and did not mutate "
+        "persistent launcher defaults, CODEX_HOME, or the Codex fork"
     )
 
 
@@ -3971,6 +4286,7 @@ def parse_args() -> argparse.Namespace:
             "default-path-cutover",
             "pinned-codex-provision",
             "stock-codex-channel",
+            "stock-codex-homebrew-remote-channel",
             "launcher-activation",
             "all",
         ),
@@ -4009,6 +4325,9 @@ def parse_args() -> argparse.Namespace:
             "'stock-codex-channel' proves a file-backed channel manifest can "
             "select, stage, verify, and install a pinned stock-Codex payload "
             "with channel provenance in an isolated cache. "
+            "'stock-codex-homebrew-remote-channel' proves Homebrew Codex cask "
+            "metadata can feed the opt-in OpenAI GitHub release archive "
+            "download path in an isolated cache. "
             "'launcher-activation' proves a temporary codex shim can shadow "
             "PATH, delegate through uvx to omnigent codex without recursion, "
             "and roll back without mutating launcher defaults."
@@ -4085,6 +4404,25 @@ def main() -> int:
         codex_path = resolve_codex_path(args.codex_path)
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_stock_codex_channel_proof(run_stock_codex_channel_proof(codex_path))
+        return 0
+
+    if requested_proof == "stock-codex-homebrew-remote-channel":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-homebrew-remote-channel does not use --apple-bundle; omit it."
+            )
+        if args.codex_path is not None:
+            raise SystemExit(
+                "stock-codex-homebrew-remote-channel reads Homebrew cask metadata; "
+                "omit --codex-path."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-homebrew-remote-channel cannot allow a Codex-fork binary."
+            )
+        print_stock_codex_homebrew_remote_channel_proof(
+            run_stock_codex_homebrew_remote_channel_proof()
+        )
         return 0
 
     if requested_proof == "launcher-activation":

@@ -66,9 +66,14 @@ managed stock Codex `0.142.2` payload persistently installed at
 `~/.local/omnigent/codex-stock/0.142.2/codex`. The `stock-codex-channel` proof
 is also green for a local/file-backed channel manifest that selects a stock
 Codex artifact, verifies SHA-256 and version, stages it, installs it with
-`sourceKind: channel` provenance, and proves Omnigent resolver selection; it
-intentionally leaves remote `http(s)` download and production trust-source
-selection for a later gate. The isolated
+`sourceKind: channel` provenance, and proves Omnigent resolver selection. The
+`stock-codex-homebrew-remote-channel` proof is green for reading current
+Homebrew Codex cask metadata with auto-update disabled, requiring the
+`github.com/openai/codex` release URL shape, downloading the cask archive into a
+temporary cache through the explicit remote-download opt-in, verifying cask
+archive SHA-256, extracting the declared archive executable, verifying
+`codex-cli 0.142.2`, installing the extracted binary with channel provenance,
+and proving Omnigent resolver selection. The isolated
 `launcher-activation` proof is also green for temporary PATH shadowing, pinned
 stock-Codex selection through `OMNIGENT_STOCK_CODEX_PATH`, delegation through
 `uvx --from <repo> omnigent codex` without recursive Codex lookup, and rollback
@@ -94,13 +99,13 @@ resolver maps the launcher back to the pinned stock binary. The next gate
 should stay in product operations:
 
 - prove clean Codex-auth onboarding if first-run auth is in scope;
-- broaden the Apple workflow smoke to release/readiness/review only if product
-  cutover requires that higher-fidelity path; or
 - decide whether to mutate app bundle launchers or other user-facing
   entrypoints beyond the CLI;
-- decide whether first-run clean-auth onboarding is product scope; or
-- choose the official remote metadata/download/signature source that will feed
-  the now-proven channel manifest contract.
+- decide whether the temporary Homebrew/GitHub remote proof should become a
+  persistent updater/install command, and what independent signature or
+  notarization policy is required; or
+- broaden the Apple workflow smoke to release/readiness/review only if product
+  cutover requires that higher-fidelity path.
 
 If ChatGPT mobile/app-server remote resume compatibility becomes product scope
 later, reopen that as a new Omnigent-side remote-resume proof instead of
