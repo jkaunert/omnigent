@@ -63,7 +63,12 @@ source binary into an Omnigent-owned `codex-stock/<version>/codex` cache with
 manifest provenance, SHA-256 verification, `.codex-fork` source rejection, and
 `OMNIGENT_STOCK_CODEX_PATH` resolver proof. The current host now has that
 managed stock Codex `0.142.2` payload persistently installed at
-`~/.local/omnigent/codex-stock/0.142.2/codex`. The isolated
+`~/.local/omnigent/codex-stock/0.142.2/codex`. The `stock-codex-channel` proof
+is also green for a local/file-backed channel manifest that selects a stock
+Codex artifact, verifies SHA-256 and version, stages it, installs it with
+`sourceKind: channel` provenance, and proves Omnigent resolver selection; it
+intentionally leaves remote `http(s)` download and production trust-source
+selection for a later gate. The isolated
 `launcher-activation` proof is also green for temporary PATH shadowing, pinned
 stock-Codex selection through `OMNIGENT_STOCK_CODEX_PATH`, delegation through
 `uvx --from <repo> omnigent codex` without recursive Codex lookup, and rollback
@@ -94,8 +99,8 @@ should stay in product operations:
 - decide whether to mutate app bundle launchers or other user-facing
   entrypoints beyond the CLI;
 - decide whether first-run clean-auth onboarding is product scope; or
-- define an official remote download/update channel if we do not want to rely
-  on a locally supplied stock Codex binary.
+- choose the official remote metadata/download/signature source that will feed
+  the now-proven channel manifest contract.
 
 If ChatGPT mobile/app-server remote resume compatibility becomes product scope
 later, reopen that as a new Omnigent-side remote-resume proof instead of

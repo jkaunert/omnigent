@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -161,3 +162,178 @@ def test_resolve_source_codex_rejects_codex_fork_path(tmp_path: Path) -> None:
         _MOD.resolve_source_codex(source_binary, allow_fork_codex=False)
 
     assert _MOD.resolve_source_codex(source_binary, allow_fork_codex=True) == source_binary
+
+
+def test_provision_stock_codex_from_channel_manifest(tmp_path: Path) -> None:
+    source_binary = _write_codex_binary(tmp_path / "artifacts" / "codex")
+    source_sha = _MOD.sha256_file(source_binary)
+    channel_manifest = tmp_path / "channel.json"
+    channel_manifest.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "kind": _MOD.CHANNEL_MANIFEST_KIND,
+                "latest": "0.142.2",
+                "artifacts": [
+                    {
+                        "version": "codex-cli 0.142.2",
+                        "platform": _MOD.current_channel_platform(),
+                        "path": "artifacts/codex",
+                        "sha256": source_sha,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    provisioned = _MOD.provision_stock_codex_from_channel(
+        cache_root=tmp_path / "cache",
+        channel_manifest=channel_manifest,
+        channel_version=None,
+        channel_platform=None,
+        expected_sha256=source_sha,
+        force=False,
+        allow_fork_codex=False,
+    )
+
+    assert provisioned.version == "codex-cli 0.142.2"
+    assert provisioned.source_kind == "channel"
+    assert provisioned.channel_manifest_path == channel_manifest
+    assert provisioned.channel_artifact == {
+        "path": "artifacts/codex",
+        "platform": _MOD.current_channel_platform(),
+        "sha256": source_sha,
+        "version": "codex-cli 0.142.2",
+        "versionSlug": "0.142.2",
+    }
+    manifest = json.loads(provisioned.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["sourceKind"] == "channel"
+    assert manifest["sourcePath"] == str(source_binary)
+    assert manifest["sourceRealpath"] == str(source_binary.resolve())
+    assert manifest["channelManifestPath"] == str(channel_manifest)
+
+
+def test_channel_manifest_rejects_remote_urls_until_downloader_exists(tmp_path: Path) -> None:
+    channel_manifest = tmp_path / "channel.json"
+    channel_manifest.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "kind": _MOD.CHANNEL_MANIFEST_KIND,
+                "latest": "codex-cli 0.142.2",
+                "artifacts": [
+                    {
+                        "version": "codex-cli 0.142.2",
+                        "platform": _MOD.current_channel_platform(),
+                        "url": "https://example.invalid/codex",
+                        "sha256": "0" * 64,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(_MOD.ProvisioningError, match="Remote channel downloads"):
+        _MOD.provision_stock_codex_from_channel(
+            cache_root=tmp_path / "cache",
+            channel_manifest=channel_manifest,
+            channel_version=None,
+            channel_platform=None,
+            expected_sha256=None,
+            force=False,
+            allow_fork_codex=False,
+        )
+
+
+def test_channel_manifest_sha_mismatch_fails_before_install(tmp_path: Path) -> None:
+    source_binary = _write_codex_binary(tmp_path / "artifacts" / "codex")
+    channel_manifest = tmp_path / "channel.json"
+    channel_manifest.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "kind": _MOD.CHANNEL_MANIFEST_KIND,
+                "latest": "codex-cli 0.142.2",
+                "artifacts": [
+                    {
+                        "version": "codex-cli 0.142.2",
+                        "platform": _MOD.current_channel_platform(),
+                        "path": str(source_binary),
+                        "sha256": "0" * 64,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(_MOD.ProvisioningError, match="Channel artifact sha256 mismatch"):
+        _MOD.provision_stock_codex_from_channel(
+            cache_root=tmp_path / "cache",
+            channel_manifest=channel_manifest,
+            channel_version=None,
+            channel_platform=None,
+            expected_sha256=None,
+            force=False,
+            allow_fork_codex=False,
+        )
+    assert not (tmp_path / "cache").exists()
+
+
+def test_channel_manifest_requires_unambiguous_latest(tmp_path: Path) -> None:
+    first = _write_codex_binary(tmp_path / "artifacts" / "codex-1")
+    second = _write_codex_binary(
+        tmp_path / "artifacts" / "codex-2",
+        version="codex-cli 0.143.0",
+    )
+    channel_manifest = tmp_path / "channel.json"
+    channel_manifest.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "kind": _MOD.CHANNEL_MANIFEST_KIND,
+                "artifacts": [
+                    {
+                        "version": "codex-cli 0.142.2",
+                        "platform": _MOD.current_channel_platform(),
+                        "path": str(first),
+                        "sha256": _MOD.sha256_file(first),
+                    },
+                    {
+                        "version": "codex-cli 0.143.0",
+                        "platform": _MOD.current_channel_platform(),
+                        "path": str(second),
+                        "sha256": _MOD.sha256_file(second),
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(_MOD.ProvisioningError, match="multiple platform-matching"):
+        _MOD.select_channel_artifact(
+            channel_manifest=channel_manifest,
+            requested_version=None,
+            requested_platform=None,
+        )
+
+    selected = _MOD.select_channel_artifact(
+        channel_manifest=channel_manifest,
+        requested_version="0.143.0",
+        requested_platform=None,
+    )
+    assert selected.version == "codex-cli 0.143.0"
+
+
+def test_main_rejects_channel_options_without_channel_manifest(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = _MOD.main(["--channel-version", "0.142.2"])
+
+    assert rc == 1
+    assert "--channel-version and --channel-platform require --channel-manifest" in (
+        capsys.readouterr().err
+    )

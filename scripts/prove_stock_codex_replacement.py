@@ -343,6 +343,26 @@ class PinnedCodexProvisionProof:
     omnigent_resolved_codex_path: Path
 
 
+@dataclass(frozen=True)
+class StockCodexChannelProof:
+    """Non-mutating proof result for a file-backed stock Codex channel."""
+
+    source_codex_path: Path
+    source_codex_realpath: Path
+    source_codex_version: str
+    source_codex_sha256: str
+    channel_manifest_path: Path
+    channel_artifact_path: Path
+    cache_root: Path
+    payload_dir: Path
+    provisioned_codex_path: Path
+    provisioned_manifest_path: Path
+    provisioned_version: str
+    provisioned_sha256: str
+    provisioned_source_kind: str
+    omnigent_resolved_codex_path: Path
+
+
 class LiveProofTimeoutError(Exception):
     """A single live proof step exceeded its configured wall-clock budget."""
 
@@ -585,6 +605,189 @@ def print_pinned_codex_provision_proof(proof: PinnedCodexProvisionProof) -> None
     print(
         "ASSERTION: Omnigent resolves the provisioned binary through "
         f"{OMNIGENT_STOCK_CODEX_PATH_ENV} without relying on ambient codex PATH lookup"
+    )
+
+
+def run_stock_codex_channel_proof(source_codex_path: Path) -> StockCodexChannelProof:
+    """Prove a file-backed stock Codex channel provisions a verified payload."""
+    source_codex_realpath = source_codex_path.expanduser().resolve()
+    source_digest = sha256_file(source_codex_realpath)
+    source_version = codex_version(source_codex_realpath)
+    repo_root = Path(__file__).resolve().parents[1]
+    provisioner = repo_root / "scripts" / "provision_stock_codex.py"
+    with tempfile.TemporaryDirectory(prefix="omnigent-stock-codex-channel-proof-") as temp_root:
+        root = Path(temp_root)
+        artifacts_dir = root / "artifacts"
+        artifacts_dir.mkdir()
+        channel_artifact_path = artifacts_dir / "codex"
+        shutil.copy2(source_codex_realpath, channel_artifact_path)
+        channel_artifact_path.chmod(0o755)
+        channel_manifest_path = root / "channel.json"
+        channel_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-channel",
+                    "latest": source_version,
+                    "artifacts": [
+                        {
+                            "version": source_version,
+                            "path": "artifacts/codex",
+                            "sha256": source_digest,
+                        }
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        cache_root = root / "codex-stock"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(provisioner),
+                "--cache-root",
+                str(cache_root),
+                "--channel-manifest",
+                str(channel_manifest_path),
+                "--expected-sha256",
+                source_digest,
+                "--json",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if completed.returncode != 0:
+            raise SystemExit(
+                "Stock Codex channel provisioner failed with exit "
+                f"{completed.returncode}:\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+            )
+        try:
+            provisioned = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(
+                f"Stock Codex channel provisioner did not emit JSON:\n{completed.stdout}"
+            ) from exc
+        if not isinstance(provisioned, dict):
+            raise SystemExit(
+                f"Stock Codex channel provisioner JSON is not an object: {provisioned!r}"
+            )
+
+        provisioned_path = Path(_json_string(provisioned, "codexPath")).expanduser().resolve()
+        payload_dir = Path(_json_string(provisioned, "payloadDir")).expanduser().resolve()
+        manifest_path = Path(_json_string(provisioned, "manifestPath")).expanduser().resolve()
+        provisioned_sha = _json_string(provisioned, "sha256")
+        provisioned_version = _json_string(provisioned, "version")
+        provisioned_source_kind = _json_string(provisioned, "sourceKind")
+        channel_manifest_result = Path(
+            _json_string(provisioned, "channelManifestPath")
+        ).expanduser()
+        channel_artifact = provisioned.get("channelArtifact")
+        if not isinstance(channel_artifact, dict):
+            raise SystemExit(
+                f"Stock Codex channel provisioner omitted channel artifact: {provisioned!r}"
+            )
+        if channel_manifest_result != channel_manifest_path:
+            raise SystemExit(
+                "Stock Codex channel provisioner recorded an unexpected channel manifest.\n"
+                f"expected={channel_manifest_path}\nactual={channel_manifest_result}"
+            )
+        if channel_artifact.get("path") != "artifacts/codex":
+            raise SystemExit(
+                "Stock Codex channel provisioner recorded unexpected artifact: "
+                f"{channel_artifact!r}"
+            )
+        if provisioned_source_kind != "channel":
+            raise SystemExit(
+                f"Stock Codex channel provisioner source kind mismatch: {provisioned!r}"
+            )
+        if provisioned_sha.lower() != source_digest.lower():
+            raise SystemExit(
+                "Stock Codex channel provisioner installed an unexpected binary.\n"
+                f"expected_sha256={source_digest}\nactual_sha256={provisioned_sha}"
+            )
+        if provisioned_version != source_version:
+            raise SystemExit(
+                "Stock Codex channel provisioner recorded an unexpected version.\n"
+                f"expected_version={source_version!r}\nactual_version={provisioned_version!r}"
+            )
+        if not provisioned_path.is_file() or not os.access(provisioned_path, os.X_OK):
+            raise SystemExit(f"Channel-provisioned Codex is not executable: {provisioned_path}")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("kind") != "omnigent-stock-codex":
+            raise SystemExit(f"Channel-provisioned manifest kind mismatch: {manifest!r}")
+        if manifest.get("sourceKind") != "channel":
+            raise SystemExit(f"Channel-provisioned manifest source mismatch: {manifest!r}")
+        if manifest.get("sha256") != provisioned_sha:
+            raise SystemExit(f"Channel-provisioned manifest sha mismatch: {manifest!r}")
+        actual_provisioned_version = codex_version(provisioned_path)
+        if actual_provisioned_version != provisioned_version:
+            raise SystemExit(
+                "Channel-provisioned Codex binary reported a different version.\n"
+                f"manifest_version={provisioned_version!r}\nactual_version={actual_provisioned_version!r}"
+            )
+        with temporary_env({OMNIGENT_STOCK_CODEX_PATH_ENV: str(provisioned_path)}):
+            resolved_raw = _find_codex_cli()
+        if resolved_raw is None:
+            raise SystemExit(f"{OMNIGENT_STOCK_CODEX_PATH_ENV} did not resolve a Codex binary.")
+        resolved_path = Path(resolved_raw).expanduser().resolve()
+        if resolved_path != provisioned_path:
+            raise SystemExit(
+                "Omnigent stock-Codex resolver did not select the channel-provisioned binary.\n"
+                f"expected={provisioned_path}\nactual={resolved_raw}"
+            )
+
+        return StockCodexChannelProof(
+            source_codex_path=source_codex_path,
+            source_codex_realpath=source_codex_realpath,
+            source_codex_version=source_version,
+            source_codex_sha256=source_digest,
+            channel_manifest_path=channel_manifest_path,
+            channel_artifact_path=channel_artifact_path,
+            cache_root=cache_root,
+            payload_dir=payload_dir,
+            provisioned_codex_path=provisioned_path,
+            provisioned_manifest_path=manifest_path,
+            provisioned_version=provisioned_version,
+            provisioned_sha256=provisioned_sha,
+            provisioned_source_kind=provisioned_source_kind,
+            omnigent_resolved_codex_path=resolved_path,
+        )
+
+
+def print_stock_codex_channel_proof(proof: StockCodexChannelProof) -> None:
+    """Emit operator evidence for the file-backed stock Codex channel proof."""
+    print("stock_codex_channel_rehearsal=selected")
+    print(f"stock_codex_channel_source_path={proof.source_codex_path}")
+    print(f"stock_codex_channel_source_realpath={proof.source_codex_realpath}")
+    print(f"stock_codex_channel_source_version={proof.source_codex_version}")
+    print(f"stock_codex_channel_source_sha256={proof.source_codex_sha256}")
+    print(f"stock_codex_channel_manifest={proof.channel_manifest_path}")
+    print(f"stock_codex_channel_artifact={proof.channel_artifact_path}")
+    print("stock_codex_channel_artifact_transport=local-file")
+    print(f"stock_codex_channel_cache_root={proof.cache_root}")
+    print(f"stock_codex_channel_payload_dir={proof.payload_dir}")
+    print(f"stock_codex_channel_path={proof.provisioned_codex_path}")
+    print(f"stock_codex_channel_version={proof.provisioned_version}")
+    print(f"stock_codex_channel_sha256={proof.provisioned_sha256}")
+    print(f"stock_codex_channel_source_kind={proof.provisioned_source_kind}")
+    print(f"stock_codex_channel_payload_manifest={proof.provisioned_manifest_path}")
+    print(
+        f"stock_codex_channel_env={OMNIGENT_STOCK_CODEX_PATH_ENV}={proof.provisioned_codex_path}"
+    )
+    print(f"stock_codex_channel_omnigent_resolved_codex_path={proof.omnigent_resolved_codex_path}")
+    print("stock_codex_channel_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: stock Codex channel manifests can select a local artifact, "
+        "verify sha256 and version, stage it, and install a channel-provenance payload"
+    )
+    print(
+        "ASSERTION: remote http(s) download transport remains intentionally unimplemented "
+        "in this proof slice"
     )
 
 
@@ -3767,6 +3970,7 @@ def parse_args() -> argparse.Namespace:
             "cutover-ready",
             "default-path-cutover",
             "pinned-codex-provision",
+            "stock-codex-channel",
             "launcher-activation",
             "all",
         ),
@@ -3802,6 +4006,9 @@ def parse_args() -> argparse.Namespace:
             "using ambient default bundle lookup and PATH-resolved stock Codex. "
             "'pinned-codex-provision' proves the stock-Codex provisioner can "
             "install and verify a pinned binary in an isolated cache. "
+            "'stock-codex-channel' proves a file-backed channel manifest can "
+            "select, stage, verify, and install a pinned stock-Codex payload "
+            "with channel provenance in an isolated cache. "
             "'launcher-activation' proves a temporary codex shim can shadow "
             "PATH, delegate through uvx to omnigent codex without recursion, "
             "and roll back without mutating launcher defaults."
@@ -3868,6 +4075,16 @@ def main() -> int:
         codex_path = resolve_codex_path(args.codex_path)
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_pinned_codex_provision_proof(run_pinned_codex_provision_proof(codex_path))
+        return 0
+
+    if requested_proof == "stock-codex-channel":
+        if args.apple_bundle is not None:
+            raise SystemExit("stock-codex-channel does not use --apple-bundle; omit it.")
+        if args.allow_fork_codex:
+            raise SystemExit("stock-codex-channel cannot allow a Codex-fork binary.")
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_channel_proof(run_stock_codex_channel_proof(codex_path))
         return 0
 
     if requested_proof == "launcher-activation":
