@@ -431,6 +431,21 @@ The installer refuses to overwrite unmanaged targets unless `--backup-existing`
 is supplied. The uninstall path refuses to remove unmanaged launchers and
 restores the recorded backup if one exists.
 
+Managed launcher read-only doctor:
+
+```bash
+uvx --from . python scripts/doctor_omnigent_codex_launcher.py --json
+```
+
+The doctor does not repair or rewrite host state. It checks that the selected
+`codex` path is the managed launcher, the launcher marker and embedded manifest
+pointer are coherent, the manifest records the expected launcher, repo, `uvx`,
+pinned Codex, environment, and backup paths, the pinned stock binary reports the
+manifested version, `codex --version` delegates to that pinned binary, the
+launcher probe reports the pinned environment and delegate shape, and
+Omnigent's inner resolver maps the managed launcher back to the pinned stock
+Codex payload.
+
 Isolated Codex launcher activation rehearsal:
 
 ```bash
@@ -712,6 +727,23 @@ the installed Omnigent `codex` default. It does not prove app-bundle launcher
 mutation, clean first-run Codex auth onboarding, cross-machine portability, or
 an official remote download/update channel.
 
+Current managed launcher doctor status on 2026-06-30:
+`uvx --from . python scripts/doctor_omnigent_codex_launcher.py --json` passed
+against the live host default. It confirmed `codex` resolves to
+`/opt/homebrew/bin/codex`, that path is still the selected Omnigent-managed
+launcher, the launcher points at
+`/Users/joshuakaunert/.local/omnigent/launchers/codex.json`, the manifest
+records `kind: omnigent-codex-launcher`, the pinned stock Codex payload is
+`/Users/joshuakaunert/.local/omnigent/codex-stock/0.142.2/codex`, the pinned
+version is `codex-cli 0.142.2`, the preserved backup exists at
+`/opt/homebrew/bin/codex.omnigent-backup-20260628T091032Z`, the launcher probe
+returned `OMNIGENT_CODEX_PERSISTENT_LAUNCHER_OK`, `codex --version` returned
+`codex-cli 0.142.2`, and Omnigent's resolver mapped the launcher to the pinned
+stock payload. This is the cheap post-update drift check for the managed CLI
+default; it does not mutate launcher state or prove app bundle launchers,
+clean-auth onboarding, cross-machine portability, or an official remote
+download/update channel.
+
 Current isolated pinned launcher activation status on 2026-06-28: `--proof
 launcher-activation` passed without persistent filesystem or launcher mutation.
 The run used baseline `PATH` lookup `/opt/homebrew/bin/codex`, realpath
@@ -923,11 +955,12 @@ Run these in order unless a later gate becomes cheaper due to new evidence.
      `OMNIGENT_STOCK_CODEX_PATH`, delegation through
      `uvx --from <repo> omnigent codex`, and rollback. The current host now also
      has `/opt/homebrew/bin/codex` pointed at the managed Omnigent launcher with
-     rollback metadata, and the full managed-default aggregate is green through
-     that launcher. Remaining product decisions are whether to mutate app bundle
-     launchers or other user-facing entrypoints, whether clean-auth onboarding
-     is required, and whether to build an official remote download/update
-     channel.
+     rollback metadata, the full managed-default aggregate is green through
+     that launcher, and the read-only launcher doctor is green as the current
+     post-update drift check. Remaining product decisions are whether to mutate
+     app bundle launchers or other user-facing entrypoints, whether clean-auth
+     onboarding is required, and whether to build an official remote
+     download/update channel.
 
 ## Non-Actions
 

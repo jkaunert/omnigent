@@ -79,7 +79,14 @@ full `default-path-cutover` aggregate also passed with no explicit
 `--codex-path`, resolving through the managed launcher to the pinned stock
 payload and proving graph, router matrix, tool-plane, Apple memory MCP,
 Apple-docs CLI, XcodeBuildMCP CLI build/install/launch, and read-only
-XcodeBuildMCP discovery. The next gate should stay in product operations:
+XcodeBuildMCP discovery. On 2026-06-30, the read-only managed launcher doctor
+also passed against the live host default: `codex` still resolves to the
+managed `/opt/homebrew/bin/codex` launcher, the launcher and manifest are
+coherent, the pinned stock payload is still
+`~/.local/omnigent/codex-stock/0.142.2/codex`, the preserved backup exists,
+`codex --version` and the launcher probe delegate correctly, and Omnigent's
+resolver maps the launcher back to the pinned stock binary. The next gate
+should stay in product operations:
 
 - prove clean Codex-auth onboarding if first-run auth is in scope;
 - broaden the Apple workflow smoke to release/readiness/review only if product
