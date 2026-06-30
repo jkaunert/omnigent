@@ -73,7 +73,12 @@ Homebrew Codex cask metadata with auto-update disabled, requiring the
 temporary cache through the explicit remote-download opt-in, verifying cask
 archive SHA-256, extracting the declared archive executable, verifying
 `codex-cli 0.142.2`, installing the extracted binary with channel provenance,
-and proving Omnigent resolver selection. The isolated
+and proving Omnigent resolver selection. The `clean-auth-onboarding` proof is
+green for the local auth boundary: inherited `.codex-fork` `CODEX_HOME` is not
+treated as the replacement-track stock auth source, stock `~/.codex/auth.json`
+is locally available, clean temporary `HOME`/`CODEX_HOME` reports `needs-auth`,
+and a populated temporary `auth.json` reports available without printing
+credential material or running interactive login. The isolated
 `launcher-activation` proof is also green for temporary PATH shadowing, pinned
 stock-Codex selection through `OMNIGENT_STOCK_CODEX_PATH`, delegation through
 `uvx --from <repo> omnigent codex` without recursive Codex lookup, and rollback
@@ -98,12 +103,13 @@ coherent, the pinned stock payload is still
 resolver maps the launcher back to the pinned stock binary. The next gate
 should stay in product operations:
 
-- prove clean Codex-auth onboarding if first-run auth is in scope;
 - decide whether to mutate app bundle launchers or other user-facing
   entrypoints beyond the CLI;
 - decide whether the temporary Homebrew/GitHub remote proof should become a
   persistent updater/install command, and what independent signature or
-  notarization policy is required; or
+  notarization policy is required;
+- decide whether automated browser/device login UX, token freshness validation,
+  or cross-machine credential packaging is product scope; or
 - broaden the Apple workflow smoke to release/readiness/review only if product
   cutover requires that higher-fidelity path.
 

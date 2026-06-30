@@ -32,6 +32,7 @@ from urllib.parse import urlparse
 
 from omnigent_client import OmnigentClient
 
+from omnigent import codex_native
 from omnigent.adapters.apple_docs_cli import (
     APPLE_DOCS_CLI_URL,
     DEFAULT_APPLE_DOCS_CLI_POLICY,
@@ -384,6 +385,22 @@ class StockCodexHomebrewRemoteChannelProof:
     provisioned_sha256: str
     provisioned_source_kind: str
     omnigent_resolved_codex_path: Path
+
+
+@dataclass(frozen=True)
+class CleanAuthOnboardingProof:
+    """Non-mutating proof result for clean Codex auth onboarding boundaries."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    real_auth_path: Path
+    real_auth_source: str
+    real_auth_available: bool
+    clean_home: Path
+    clean_codex_home: Path
+    clean_unavailable_reason: str | None
+    synthetic_codex_home: Path
+    synthetic_available_reason: str | None
 
 
 class LiveProofTimeoutError(Exception):
@@ -1103,6 +1120,133 @@ def print_stock_codex_homebrew_remote_channel_proof(
     print(
         "ASSERTION: this proof used a temporary cache and did not mutate "
         "persistent launcher defaults, CODEX_HOME, or the Codex fork"
+    )
+
+
+def run_clean_auth_onboarding_proof(stock_codex_path: Path) -> CleanAuthOnboardingProof:
+    """Prove clean Codex auth handling without mutating credential state."""
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    real_auth_path, real_auth_source = _stock_replacement_auth_source()
+    real_auth_available = codex_native._codex_auth_json_has_available_credential(real_auth_path)
+    if not real_auth_available:
+        raise SystemExit(
+            "Current real Codex auth source is not available; cannot prove the "
+            "preserved-auth success boundary.\n"
+            f"auth_path={real_auth_path}\n"
+            "Run stock Codex authentication outside this proof, or point CODEX_HOME "
+            "at an authenticated Codex home, then rerun clean-auth-onboarding."
+        )
+
+    with tempfile.TemporaryDirectory(prefix="omnigent-clean-auth-onboarding-proof-") as temp_root:
+        root = Path(temp_root)
+        clean_home = root / "home"
+        clean_codex_home = root / "codex-home-clean"
+        synthetic_codex_home = root / "codex-home-synthetic"
+        clean_home.mkdir()
+        clean_codex_home.mkdir()
+        synthetic_codex_home.mkdir()
+        synthetic_auth_path = synthetic_codex_home / "auth.json"
+        synthetic_auth_path.write_text(
+            json.dumps(
+                {
+                    "auth_mode": "api",
+                    "OPENAI_API_KEY": "sk-test-clean-auth-onboarding-proof",
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        clean_reason = _codex_auth_reason_for_env(
+            home=clean_home,
+            codex_home=clean_codex_home,
+            stock_codex_path=stock_codex_path,
+        )
+        if clean_reason != "needs-auth":
+            raise SystemExit(
+                "Clean Codex auth classification did not require onboarding.\n"
+                f"expected=needs-auth\nactual={clean_reason!r}"
+            )
+
+        synthetic_reason = _codex_auth_reason_for_env(
+            home=clean_home,
+            codex_home=synthetic_codex_home,
+            stock_codex_path=stock_codex_path,
+        )
+        if synthetic_reason is not None:
+            raise SystemExit(
+                "Synthetic Codex auth classification did not report available.\n"
+                f"expected=None\nactual={synthetic_reason!r}"
+            )
+
+        return CleanAuthOnboardingProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=codex_version(stock_codex_path),
+            real_auth_path=real_auth_path,
+            real_auth_source=real_auth_source,
+            real_auth_available=real_auth_available,
+            clean_home=clean_home,
+            clean_codex_home=clean_codex_home,
+            clean_unavailable_reason=clean_reason,
+            synthetic_codex_home=synthetic_codex_home,
+            synthetic_available_reason=synthetic_reason,
+        )
+
+
+def _stock_replacement_auth_source() -> tuple[Path, str]:
+    """Return the Codex auth path to prove for the stock replacement track."""
+    explicit = os.environ.get("CODEX_HOME", "").strip()
+    if explicit:
+        explicit_home = Path(explicit).expanduser()
+        if ".codex-fork" not in explicit_home.parts:
+            return codex_native._resolve_codex_auth_source().auth_path, "explicit-CODEX_HOME"
+    return Path.home() / ".codex" / "auth.json", "stock-default-home"
+
+
+def _codex_auth_reason_for_env(
+    *,
+    home: Path,
+    codex_home: Path,
+    stock_codex_path: Path,
+) -> str | None:
+    """Return the Codex auth classifier result for an isolated env."""
+    with temporary_env(
+        {
+            "HOME": str(home),
+            "CODEX_HOME": str(codex_home),
+            OMNIGENT_STOCK_CODEX_PATH_ENV: str(stock_codex_path),
+        }
+    ):
+        return codex_native._codex_auth_unavailable_reason()
+
+
+def print_clean_auth_onboarding_proof(proof: CleanAuthOnboardingProof) -> None:
+    """Emit operator evidence for the clean Codex auth onboarding proof."""
+    print("clean_auth_onboarding_rehearsal=selected")
+    print(f"clean_auth_stock_codex_path={proof.stock_codex_path}")
+    print(f"clean_auth_stock_codex_version={proof.stock_codex_version}")
+    print(f"clean_auth_real_auth_path={proof.real_auth_path}")
+    print(f"clean_auth_real_auth_source={proof.real_auth_source}")
+    print(f"clean_auth_real_auth_available={proof.real_auth_available}")
+    print(f"clean_auth_clean_home={proof.clean_home}")
+    print(f"clean_auth_clean_codex_home={proof.clean_codex_home}")
+    print(f"clean_auth_clean_unavailable_reason={proof.clean_unavailable_reason}")
+    print(f"clean_auth_synthetic_codex_home={proof.synthetic_codex_home}")
+    print(f"clean_auth_synthetic_available_reason={proof.synthetic_available_reason}")
+    print("clean_auth_cache_lifecycle=temporary_removed_after_proof")
+    print("clean_auth_onboarding_command=CODEX_HOME=<new-or-restored-codex-home> codex login")
+    print(
+        "ASSERTION: a clean HOME and clean CODEX_HOME with a stock Codex binary "
+        "fail closed as needs-auth rather than falling back to the Codex fork"
+    )
+    print(
+        "ASSERTION: a populated Codex auth.json is recognized through CODEX_HOME "
+        "without running Codex login or exposing credential material"
+    )
+    print(
+        "ASSERTION: the current real Codex auth source is available for the "
+        "existing preserved-CODEX_HOME proof path"
     )
 
 
@@ -4287,6 +4431,7 @@ def parse_args() -> argparse.Namespace:
             "pinned-codex-provision",
             "stock-codex-channel",
             "stock-codex-homebrew-remote-channel",
+            "clean-auth-onboarding",
             "launcher-activation",
             "all",
         ),
@@ -4328,6 +4473,9 @@ def parse_args() -> argparse.Namespace:
             "'stock-codex-homebrew-remote-channel' proves Homebrew Codex cask "
             "metadata can feed the opt-in OpenAI GitHub release archive "
             "download path in an isolated cache. "
+            "'clean-auth-onboarding' proves clean CODEX_HOME needs-auth "
+            "classification plus populated auth detection without running "
+            "interactive login. "
             "'launcher-activation' proves a temporary codex shim can shadow "
             "PATH, delegate through uvx to omnigent codex without recursion, "
             "and roll back without mutating launcher defaults."
@@ -4423,6 +4571,16 @@ def main() -> int:
         print_stock_codex_homebrew_remote_channel_proof(
             run_stock_codex_homebrew_remote_channel_proof()
         )
+        return 0
+
+    if requested_proof == "clean-auth-onboarding":
+        if args.apple_bundle is not None:
+            raise SystemExit("clean-auth-onboarding does not use --apple-bundle; omit it.")
+        if args.allow_fork_codex:
+            raise SystemExit("clean-auth-onboarding cannot allow a Codex-fork binary.")
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_clean_auth_onboarding_proof(run_clean_auth_onboarding_proof(codex_path))
         return 0
 
     if requested_proof == "launcher-activation":
