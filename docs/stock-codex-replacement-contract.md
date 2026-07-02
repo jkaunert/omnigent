@@ -111,6 +111,7 @@ The current spike proves the first narrow adapter behavior:
 | Stock-Codex channel manifest provisioning | `replacement-ready` for a local/file-backed update-channel contract | `scripts/provision_stock_codex.py` accepts a mutually exclusive `--channel-manifest` path whose `kind: omnigent-stock-codex-channel` manifest selects an artifact by `latest`, `--channel-version`, and platform, then stages a local path or `file://` artifact, verifies SHA-256 and `codex --version`, installs it into the deterministic `codex-stock/<version>/codex` cache, and records `sourceKind: channel`, channel manifest path, and channel artifact provenance in the installed payload manifest. `uvx --from . python scripts/prove_stock_codex_replacement.py --proof stock-codex-channel` proved this through a temporary local channel manifest and cache against stock Codex `0.142.2`, source `/Users/joshuakaunert/.local/omnigent/codex-stock/0.142.2/codex`, SHA-256 `31ad44ac440cd7a6dd907c773817800db9c9a7e9c13d3bab7309319e2cd08fa9`, `sourceKind=channel`, and `OMNIGENT_STOCK_CODEX_PATH` resolver selection of the channel-provisioned payload. This proves the manifest-driven staging/update primitive for local artifacts; remote transport is covered by the separate Homebrew remote-channel gate. |
 | Stock-Codex Homebrew/GitHub remote channel provisioning | `replacement-ready` for temporary official cask metadata download and archive extraction | `scripts/provision_stock_codex.py` now supports opt-in remote channel artifacts via `--allow-remote-channel-download`, verifies the downloaded artifact SHA-256 before materialization, supports `archiveFormat: tar.gz` with a declared `archiveExecutable`, extracts only a safe matching file into a staged `codex` binary, verifies `codex --version`, installs the binary with channel provenance, and records the remote source URL in the installed payload manifest. `uvx --from . python scripts/prove_stock_codex_replacement.py --proof stock-codex-homebrew-remote-channel` read `HOMEBREW_NO_AUTO_UPDATE=1 brew info --cask --json=v2 codex`, required `homepage=https://github.com/openai/codex`, required an `https://github.com/openai/codex/releases/download/...tar.gz` URL, downloaded `https://github.com/openai/codex/releases/download/rust-v0.142.2/codex-aarch64-apple-darwin.tar.gz`, verified cask archive SHA-256 `264c15a63146176db0314c54728437c97b1121bb2617c426c06925d62b4454b3`, extracted `codex-aarch64-apple-darwin`, verified `codex-cli 0.142.2`, installed a temporary payload with binary SHA-256 `31ad44ac440cd7a6dd907c773817800db9c9a7e9c13d3bab7309319e2cd08fa9`, and proved Omnigent resolver selection through `OMNIGENT_STOCK_CODEX_PATH`. This proves Homebrew cask metadata plus OpenAI GitHub release archive download, SHA verification, safe extraction, version verification, temporary installation, and resolver selection; it does not prove independent signature/notarization policy, automatic update scheduling, persistent installation, clean-auth onboarding, cross-machine portability, or app-bundle launcher mutation. |
 | Clean Codex-auth onboarding boundary | `replacement-ready` for local auth-source classification and stock-home separation | `scripts/prove_stock_codex_replacement.py --proof clean-auth-onboarding` now resolves stock Codex through the managed default, prefers stock `~/.codex/auth.json` when the parent Codex app process inherits `CODEX_HOME=/Users/joshuakaunert/.codex-fork`, verifies the current stock auth source is locally available without printing credential material, then runs an isolated clean `HOME` plus clean `CODEX_HOME` and proves it reports `needs-auth` rather than falling back to the Codex fork. The same proof writes a synthetic temporary API-key-shaped `auth.json`, verifies the classifier recognizes it as available, and removes the temporary profile. The current green run used stock Codex `0.142.2`, stock auth path `/Users/joshuakaunert/.codex/auth.json`, `clean_auth_real_auth_source=stock-default-home`, `clean_auth_clean_unavailable_reason=needs-auth`, and `clean_auth_synthetic_available_reason=None`. This proves the local onboarding boundary, credential-source separation, and failure classification; it does not automate `codex login`, prove browser/device auth UX, validate token freshness against OpenAI servers, package credentials for another machine, or run a live model call under a newly authenticated clean profile. |
+| Temporary macOS app-bundle entrypoint rehearsal | `replacement-ready` for a non-installed `.app` launcher shape | `scripts/prove_stock_codex_replacement.py --proof app-bundle-entrypoint` creates a temporary `Omnigent Codex.app` bundle with a generated `Contents/Info.plist` and executable `Contents/MacOS/omnigent-codex`, validates the plist keys, directly runs the executable probe, and verifies the entrypoint exports `OMNIGENT_STOCK_CODEX_PATH=<stock codex>` before delegating to `uvx --from <repo> omnigent codex`. The current green run used stock Codex `0.142.2`, bundle identifier `ai.omnigent.codex`, executable `omnigent-codex`, and a temporary app bundle that was removed after proof. This proves the user-facing app-entrypoint shape without mutating the stock Codex app, `/Applications`, LaunchServices, Dock/Finder defaults, shell profiles, or persistent launcher state; it does not prove signing, notarization, packaging, Sparkle/update behavior, or production app installation. |
 | Isolated Codex launcher activation rehearsal | `replacement-ready` for temporary PATH shadowing, pinned stock-Codex delegation, no-recursion lookup, and rollback | `scripts/prove_stock_codex_replacement.py --proof launcher-activation` creates a temporary versioned pinned target under `omnigent/codex-stock/<version>/codex` by copying the current stock Codex binary, creates a temporary `codex` shim, prepends only that temp shim directory to `PATH` inside the proof process, and proves `codex` resolves to the shim during activation. The shim exports `OMNIGENT_STOCK_CODEX_PATH=<pinned target>` before delegation, and Omnigent's central Codex resolver selects that pinned binary instead of the shadowed `codex` command. The proof still verifies the sanitized PATH no longer points at the shim and can resolve the original stock Codex at `/opt/homebrew/bin/codex`, whose realpath was `/opt/homebrew/Caskroom/codex/0.142.2/codex-aarch64-apple-darwin`; it also verifies the delegate shape `/Users/joshuakaunert/.local/bin/uvx --from /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit omnigent codex`. After the scoped activation, `PATH` lookup restores to `/opt/homebrew/bin/codex`. This proves a rollback-first launcher shape can avoid recursive `codex` lookup and can target a managed pinned stock-Codex binary, not a persistent shell alias, app launcher, production-default mutation, persistent provisioner execution, remote downloader/update channel, or live Codex TUI launch. |
 | Persistent Omnigent `codex` launcher/default | `replacement-ready` for the current-host Homebrew-bin default with rollback | `scripts/install_omnigent_codex_launcher.py` installs a managed launcher at the selected `codex` path, writes a manifest, preserves `codex --version` by delegating it to the pinned stock binary, probes with `--omnigent-launcher-probe`, exports `OMNIGENT_STOCK_CODEX_PATH` before normal delegation to `uvx --from <repo> omnigent codex`, backs up an existing unmanaged target, and uninstalls only when the target carries the Omnigent marker. `omnigent.inner.codex_executor._find_codex_cli()` detects the managed launcher marker and manifest so inner Omnigent sessions resolve to the pinned stock binary instead of recursing into the launcher. On 2026-06-28, `/opt/homebrew/bin/codex` was replaced by the managed launcher, the original Homebrew symlink was preserved at `/opt/homebrew/bin/codex.omnigent-backup-20260628T091032Z`, `codex --version` returned `codex-cli 0.142.2`, `codex --omnigent-launcher-probe` returned `OMNIGENT_CODEX_PERSISTENT_LAUNCHER_OK`, and `scripts/prove_stock_codex_replacement.py --proof graph --live-proof-timeout 180` with no explicit `--codex-path` resolved to `/Users/joshuakaunert/.local/omnigent/codex-stock/0.142.2/codex` and passed in 33.3s after an actual rollback/reinstall cycle. Rollback command: `uvx --from /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit python /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit/scripts/install_omnigent_codex_launcher.py --uninstall --launcher-path /opt/homebrew/bin/codex --manifest-path /Users/joshuakaunert/.local/omnigent/launchers/codex.json`. This proves current-host default mutation and rollback execution, not a remote download/update channel, clean-auth onboarding, cross-machine portability, or app-bundle launcher mutation. |
 
@@ -118,9 +119,11 @@ This proves the scoped carry-parity claims above plus current-host clean-profile
 and default-path rehearsals, isolated pinned stock-Codex provisioning, isolated
 pinned launcher activation, and current-host persistent `codex` default
 activation plus temporary Homebrew/GitHub remote channel download and the local
-clean-auth onboarding boundary. Cross-machine portability, app-bundle launcher
-mutation, persistent update scheduling, independent signature/notarization
-policy, and automated browser/device login UX remain separate decisions.
+clean-auth onboarding boundary plus temporary macOS app-bundle entrypoint
+rehearsal. Cross-machine portability, persistent app-bundle installation,
+LaunchServices/Dock/Finder default behavior, persistent update scheduling,
+independent signature/notarization policy, and automated browser/device login
+UX remain separate decisions.
 
 ## Proof Commands
 
@@ -525,6 +528,25 @@ verifies `PATH` lookup returns to the original stock Codex path. It does not
 install a real shim, run the persistent provisioner, download Codex, edit shell
 startup files, mutate app launchers, or launch the live Codex TUI.
 
+Temporary macOS app-bundle entrypoint rehearsal:
+
+```bash
+uvx --from . python scripts/prove_stock_codex_replacement.py \
+  --proof app-bundle-entrypoint
+```
+
+The `app-bundle-entrypoint` proof fails closed if `--apple-bundle` or
+`--allow-fork-codex` are supplied. It resolves stock Codex from the managed
+default or an explicit `--codex-path`, creates a temporary `Omnigent Codex.app`
+bundle, writes and validates `Contents/Info.plist`, writes an executable
+`Contents/MacOS/omnigent-codex`, runs that executable directly with a probe
+argument, and verifies the executable exports
+`OMNIGENT_STOCK_CODEX_PATH=<stock codex>` before delegating to
+`uvx --from <repo> omnigent codex`. It does not install into `/Applications`,
+register LaunchServices, mutate Stock Codex.app, change Dock/Finder defaults,
+edit shell startup files, prove signing/notarization, or launch the live Codex
+TUI.
+
 Clean-profile cutover-ready rehearsal:
 
 ```bash
@@ -804,7 +826,8 @@ tool plane, Apple memory MCP, Apple-docs CLI adapter, XcodeBuildMCP CLI
 build/install/launch, and read-only XcodeBuildMCP discovery all passed through
 the installed Omnigent `codex` default. It does not prove app-bundle launcher
 mutation, clean first-run Codex auth onboarding, cross-machine portability, or
-an official remote download/update channel.
+an official remote download/update channel; the temporary app-bundle entrypoint
+rehearsal is tracked as its own non-mutating proof.
 
 Current managed launcher doctor status on 2026-06-30:
 `uvx --from . python scripts/doctor_omnigent_codex_launcher.py --json` passed
@@ -1045,11 +1068,15 @@ Run these in order unless a later gate becomes cheaper due to new evidence.
      proof is also green for manifest selection, staging, SHA/version
      verification, channel-provenance install, and resolver selection. The
      Homebrew/GitHub remote-channel proof is also green for temporary official
-     cask metadata download and archive extraction. Remaining product decisions
-     are whether to mutate app bundle launchers or other user-facing entrypoints,
-     whether the temporary remote-channel proof should become a persistent
-     updater/install command, and what independent signature or notarization
-     policy is required.
+     cask metadata download and archive extraction. The temporary
+     `app-bundle-entrypoint` proof is green for a non-installed
+     `Omnigent Codex.app` bundle shape that delegates through
+     `uvx --from <repo> omnigent codex` with an explicit stock-Codex pin.
+     Remaining product decisions are whether that temporary app-bundle shape
+     should become a signed/notarized persistent app install, whether it should
+     register with LaunchServices or Dock/Finder defaults, whether the temporary
+     remote-channel proof should become a persistent updater/install command,
+     and what independent signature or notarization policy is required.
 
 ## Non-Actions
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,18 @@ def _write_auth(codex_home: Path, payload: object) -> Path:
     auth_path = codex_home / "auth.json"
     auth_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
     return auth_path
+
+
+def _write_uvx_binary(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        """#!/bin/sh
+printf 'fake uvx\\n'
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
 
 
 def test_clean_auth_onboarding_proof_classifies_clean_and_synthetic_auth(
@@ -120,3 +133,47 @@ def test_clean_auth_onboarding_proof_requires_real_auth(
         _MOD.run_clean_auth_onboarding_proof(stock_codex)
 
     assert "Current real Codex auth source is not available" in str(excinfo.value)
+
+
+def test_app_bundle_entrypoint_proof_builds_probeable_temporary_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stock_codex = _write_codex_binary(tmp_path / "bin" / "codex")
+    uvx = _write_uvx_binary(tmp_path / "tools" / "uvx")
+    monkeypatch.setenv(
+        "PATH",
+        f"{uvx.parent}{os.pathsep}{os.environ.get('PATH', '')}",
+    )
+
+    proof = _MOD.run_app_bundle_entrypoint_proof(stock_codex)
+
+    assert proof.app_bundle_path.name == "Omnigent Codex.app"
+    assert proof.executable_path.name == "omnigent-codex"
+    assert proof.info_plist_path.name == "Info.plist"
+    assert proof.bundle_identifier == "ai.omnigent.codex"
+    assert proof.bundle_executable == "omnigent-codex"
+    assert proof.stock_codex_path == stock_codex.resolve()
+    assert proof.stock_codex_version == "codex-cli 0.142.2"
+    assert proof.uvx_path == uvx.resolve()
+    assert _MOD.APP_BUNDLE_ENTRYPOINT_SENTINEL in proof.probe_output
+    assert (
+        f"pinned_env={_MOD.OMNIGENT_STOCK_CODEX_PATH_ENV}={stock_codex.resolve()}"
+        in proof.probe_output
+    )
+    assert f"delegates_to={uvx.resolve()} --from {_REPO_ROOT} omnigent codex" in proof.probe_output
+
+
+def test_app_bundle_entrypoint_proof_requires_uvx(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stock_codex = _write_codex_binary(tmp_path / "bin" / "codex")
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+    monkeypatch.setenv("PATH", str(empty_path))
+
+    with pytest.raises(SystemExit) as excinfo:
+        _MOD.run_app_bundle_entrypoint_proof(stock_codex)
+
+    assert "Could not find uvx on PATH" in str(excinfo.value)

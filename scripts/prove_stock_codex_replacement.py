@@ -16,6 +16,7 @@ import hashlib
 import io
 import json
 import os
+import plistlib
 import re
 import shlex
 import shutil
@@ -225,6 +226,11 @@ DEFAULT_PATH_CUTOVER_FALLBACK_STEPS = (
 )
 LAUNCHER_ACTIVATION_SENTINEL = "OMNIGENT_CODEX_LAUNCHER_ACTIVATION_OK"
 LAUNCHER_ACTIVATION_PROBE_ARG = "--omnigent-launcher-probe"
+APP_BUNDLE_ENTRYPOINT_NAME = "Omnigent Codex"
+APP_BUNDLE_ENTRYPOINT_IDENTIFIER = "ai.omnigent.codex"
+APP_BUNDLE_ENTRYPOINT_EXECUTABLE = "omnigent-codex"
+APP_BUNDLE_ENTRYPOINT_SENTINEL = "OMNIGENT_CODEX_APP_BUNDLE_ENTRYPOINT_OK"
+APP_BUNDLE_ENTRYPOINT_PROBE_ARG = "--omnigent-app-bundle-probe"
 T = TypeVar("T")
 
 
@@ -325,6 +331,22 @@ class LauncherActivationProof:
     shim_path: Path
     uvx_path: Path
     sanitized_path: str
+    probe_output: str
+
+
+@dataclass(frozen=True)
+class AppBundleEntrypointProof:
+    """Non-mutating proof result for a temporary macOS app-bundle entrypoint."""
+
+    app_bundle_path: Path
+    executable_path: Path
+    info_plist_path: Path
+    bundle_identifier: str
+    bundle_executable: str
+    stock_codex_path: Path
+    stock_codex_version: str
+    uvx_path: Path
+    repo_root: Path
     probe_output: str
 
 
@@ -1248,6 +1270,241 @@ def print_clean_auth_onboarding_proof(proof: CleanAuthOnboardingProof) -> None:
         "ASSERTION: the current real Codex auth source is available for the "
         "existing preserved-CODEX_HOME proof path"
     )
+
+
+def run_app_bundle_entrypoint_proof(stock_codex_path: Path) -> AppBundleEntrypointProof:
+    """Prove a temporary macOS app bundle can enter the Omnigent Codex path."""
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    assert_stock_codex_path(stock_codex_path, allow_fork_codex=False)
+    stock_codex_version = codex_version(stock_codex_path)
+
+    uvx_raw = shutil.which("uvx")
+    if not uvx_raw:
+        raise SystemExit("Could not find uvx on PATH for app-bundle entrypoint proof.")
+    uvx_path = Path(uvx_raw).expanduser().resolve()
+    if not uvx_path.is_file() or not os.access(uvx_path, os.X_OK):
+        raise SystemExit(f"uvx binary is not executable: {uvx_path}")
+
+    repo_root = Path(__file__).resolve().parents[1]
+    with tempfile.TemporaryDirectory(prefix="omnigent-codex-app-bundle-proof-") as temp_root:
+        app_bundle_path = (Path(temp_root) / f"{APP_BUNDLE_ENTRYPOINT_NAME}.app").resolve()
+        contents_path = app_bundle_path / "Contents"
+        macos_path = contents_path / "MacOS"
+        macos_path.mkdir(parents=True)
+        info_plist_path = contents_path / "Info.plist"
+        executable_path = (macos_path / APP_BUNDLE_ENTRYPOINT_EXECUTABLE).resolve()
+
+        info = {
+            "CFBundleDisplayName": APP_BUNDLE_ENTRYPOINT_NAME,
+            "CFBundleExecutable": APP_BUNDLE_ENTRYPOINT_EXECUTABLE,
+            "CFBundleIdentifier": APP_BUNDLE_ENTRYPOINT_IDENTIFIER,
+            "CFBundleName": APP_BUNDLE_ENTRYPOINT_NAME,
+            "CFBundlePackageType": "APPL",
+            "CFBundleShortVersionString": "0.1",
+            "CFBundleVersion": "1",
+        }
+        with info_plist_path.open("wb") as handle:
+            plistlib.dump(info, handle, sort_keys=True)
+
+        _write_app_bundle_entrypoint_launcher(
+            executable_path,
+            app_bundle_path=app_bundle_path,
+            repo_root=repo_root,
+            uvx_path=uvx_path,
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+        )
+        _validate_app_bundle_entrypoint_plist(
+            info_plist_path,
+            expected_identifier=APP_BUNDLE_ENTRYPOINT_IDENTIFIER,
+            expected_executable=APP_BUNDLE_ENTRYPOINT_EXECUTABLE,
+        )
+
+        completed = subprocess.run(
+            [str(executable_path), APP_BUNDLE_ENTRYPOINT_PROBE_ARG],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        probe_output = (completed.stdout or "") + (completed.stderr or "")
+        if completed.returncode != 0:
+            raise SystemExit(
+                "Temporary app-bundle entrypoint probe failed with exit "
+                f"{completed.returncode}:\n{probe_output}"
+            )
+        _validate_app_bundle_entrypoint_probe_output(
+            probe_output,
+            app_bundle_path=app_bundle_path,
+            executable_path=executable_path,
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            uvx_path=uvx_path,
+            repo_root=repo_root,
+        )
+
+        return AppBundleEntrypointProof(
+            app_bundle_path=app_bundle_path,
+            executable_path=executable_path,
+            info_plist_path=info_plist_path,
+            bundle_identifier=APP_BUNDLE_ENTRYPOINT_IDENTIFIER,
+            bundle_executable=APP_BUNDLE_ENTRYPOINT_EXECUTABLE,
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            uvx_path=uvx_path,
+            repo_root=repo_root,
+            probe_output=probe_output.strip(),
+        )
+
+
+def print_app_bundle_entrypoint_proof(proof: AppBundleEntrypointProof) -> None:
+    """Emit operator evidence for the temporary app-bundle entrypoint proof."""
+    print("app_bundle_entrypoint_rehearsal=selected")
+    print(f"app_bundle_entrypoint_bundle={proof.app_bundle_path}")
+    print(f"app_bundle_entrypoint_executable={proof.executable_path}")
+    print(f"app_bundle_entrypoint_info_plist={proof.info_plist_path}")
+    print(f"app_bundle_entrypoint_bundle_identifier={proof.bundle_identifier}")
+    print(f"app_bundle_entrypoint_bundle_executable={proof.bundle_executable}")
+    print(f"app_bundle_entrypoint_stock_codex_path={proof.stock_codex_path}")
+    print(f"app_bundle_entrypoint_stock_codex_version={proof.stock_codex_version}")
+    print(
+        f"app_bundle_entrypoint_pinned_env={OMNIGENT_STOCK_CODEX_PATH_ENV}="
+        f"{proof.stock_codex_path}"
+    )
+    print(
+        "app_bundle_entrypoint_delegate_preview="
+        f"{proof.uvx_path} --from {proof.repo_root} omnigent codex"
+    )
+    print(f"app_bundle_entrypoint_probe_output={proof.probe_output!r}")
+    print("app_bundle_entrypoint_cache_lifecycle=temporary_removed_after_proof")
+    print("app_bundle_entrypoint_launchservices_registration=not_attempted")
+    print(
+        "ASSERTION: temporary macOS .app bundle contained a valid Info.plist "
+        "and executable Omnigent Codex entrypoint"
+    )
+    print(
+        "ASSERTION: the app executable exports an explicit stock-Codex path "
+        "before delegating to uvx --from <repo> omnigent codex"
+    )
+    print(
+        "ASSERTION: this proof ran the bundle executable directly and did not "
+        "install into /Applications, register LaunchServices, or mutate Codex.app"
+    )
+
+
+def _write_app_bundle_entrypoint_launcher(
+    executable_path: Path,
+    *,
+    app_bundle_path: Path,
+    repo_root: Path,
+    uvx_path: Path,
+    stock_codex_path: Path,
+    stock_codex_version: str,
+) -> None:
+    """Write the temporary macOS app-bundle executable used by the proof."""
+    quoted_app_bundle_path = shlex.quote(str(app_bundle_path))
+    quoted_repo_root = shlex.quote(str(repo_root))
+    quoted_uvx_path = shlex.quote(str(uvx_path))
+    quoted_stock_codex_path = shlex.quote(str(stock_codex_path))
+    quoted_stock_codex_version = shlex.quote(stock_codex_version)
+    quoted_probe_arg = shlex.quote(APP_BUNDLE_ENTRYPOINT_PROBE_ARG)
+    quoted_sentinel = shlex.quote(APP_BUNDLE_ENTRYPOINT_SENTINEL)
+    executable_path.write_text(
+        f"""#!/bin/sh
+set -eu
+
+APP_BUNDLE_PATH={quoted_app_bundle_path}
+REPO_ROOT={quoted_repo_root}
+UVX_PATH={quoted_uvx_path}
+STOCK_CODEX_PATH={quoted_stock_codex_path}
+STOCK_CODEX_VERSION={quoted_stock_codex_version}
+PROBE_ARG={quoted_probe_arg}
+SENTINEL={quoted_sentinel}
+
+if [ "${{1:-}}" = "$PROBE_ARG" ]; then
+  if [ ! -x "$UVX_PATH" ]; then
+    printf 'app_bundle_entrypoint_error=uvx missing: %s\\n' "$UVX_PATH" >&2
+    exit 2
+  fi
+  if [ ! -x "$STOCK_CODEX_PATH" ]; then
+    printf 'app_bundle_entrypoint_error=stock codex missing: %s\\n' "$STOCK_CODEX_PATH" >&2
+    exit 3
+  fi
+  actual_version="$("$STOCK_CODEX_PATH" --version 2>&1)"
+  if [ "$actual_version" != "$STOCK_CODEX_VERSION" ]; then
+    printf 'app_bundle_entrypoint_error=stock codex version mismatch\\n' >&2
+    printf 'expected_stock_codex_version=%s\\n' "$STOCK_CODEX_VERSION" >&2
+    printf 'actual_stock_codex_version=%s\\n' "$actual_version" >&2
+    exit 4
+  fi
+  printf '%s\\n' "$SENTINEL"
+  printf 'app_bundle_path=%s\\n' "$APP_BUNDLE_PATH"
+  printf 'executable_path=%s\\n' "$0"
+  printf 'delegates_to=%s --from %s omnigent codex\\n' "$UVX_PATH" "$REPO_ROOT"
+  printf 'pinned_env={OMNIGENT_STOCK_CODEX_PATH_ENV}=%s\\n' "$STOCK_CODEX_PATH"
+  printf 'stock_codex_path=%s\\n' "$STOCK_CODEX_PATH"
+  printf 'stock_codex_version=%s\\n' "$STOCK_CODEX_VERSION"
+  exit 0
+fi
+
+{OMNIGENT_STOCK_CODEX_PATH_ENV}="$STOCK_CODEX_PATH"
+export {OMNIGENT_STOCK_CODEX_PATH_ENV}
+exec "$UVX_PATH" --from "$REPO_ROOT" omnigent codex "$@"
+""",
+        encoding="utf-8",
+    )
+    executable_path.chmod(0o755)
+
+
+def _validate_app_bundle_entrypoint_plist(
+    info_plist_path: Path,
+    *,
+    expected_identifier: str,
+    expected_executable: str,
+) -> None:
+    """Validate the generated app bundle plist declares the expected entrypoint."""
+    with info_plist_path.open("rb") as handle:
+        info = plistlib.load(handle)
+    expected = {
+        "CFBundleIdentifier": expected_identifier,
+        "CFBundleExecutable": expected_executable,
+        "CFBundlePackageType": "APPL",
+        "CFBundleName": APP_BUNDLE_ENTRYPOINT_NAME,
+        "CFBundleDisplayName": APP_BUNDLE_ENTRYPOINT_NAME,
+    }
+    mismatches = {
+        key: (value, info.get(key)) for key, value in expected.items() if info.get(key) != value
+    }
+    if mismatches:
+        raise SystemExit(f"Temporary app-bundle Info.plist mismatch: {mismatches!r}")
+
+
+def _validate_app_bundle_entrypoint_probe_output(
+    output: str,
+    *,
+    app_bundle_path: Path,
+    executable_path: Path,
+    stock_codex_path: Path,
+    stock_codex_version: str,
+    uvx_path: Path,
+    repo_root: Path,
+) -> None:
+    """Validate the temporary app executable emitted delegation evidence."""
+    expected_lines = [
+        APP_BUNDLE_ENTRYPOINT_SENTINEL,
+        f"app_bundle_path={app_bundle_path}",
+        f"executable_path={executable_path}",
+        f"delegates_to={uvx_path} --from {repo_root} omnigent codex",
+        f"pinned_env={OMNIGENT_STOCK_CODEX_PATH_ENV}={stock_codex_path}",
+        f"stock_codex_path={stock_codex_path}",
+        f"stock_codex_version={stock_codex_version}",
+    ]
+    missing = [line for line in expected_lines if line not in output.splitlines()]
+    if missing:
+        raise SystemExit(
+            "Temporary app-bundle entrypoint probe missed expected evidence.\n"
+            f"missing={missing!r}\nOutput:\n{output}"
+        )
 
 
 def sha256_file(path: Path) -> str:
@@ -4432,6 +4689,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-channel",
             "stock-codex-homebrew-remote-channel",
             "clean-auth-onboarding",
+            "app-bundle-entrypoint",
             "launcher-activation",
             "all",
         ),
@@ -4476,6 +4734,10 @@ def parse_args() -> argparse.Namespace:
             "'clean-auth-onboarding' proves clean CODEX_HOME needs-auth "
             "classification plus populated auth detection without running "
             "interactive login. "
+            "'app-bundle-entrypoint' proves a temporary macOS .app bundle can "
+            "enter the Omnigent Codex path, pin stock Codex through "
+            "OMNIGENT_STOCK_CODEX_PATH, and delegate through uvx without "
+            "persistent app mutation. "
             "'launcher-activation' proves a temporary codex shim can shadow "
             "PATH, delegate through uvx to omnigent codex without recursion, "
             "and roll back without mutating launcher defaults."
@@ -4581,6 +4843,16 @@ def main() -> int:
         codex_path = resolve_codex_path(args.codex_path)
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_clean_auth_onboarding_proof(run_clean_auth_onboarding_proof(codex_path))
+        return 0
+
+    if requested_proof == "app-bundle-entrypoint":
+        if args.apple_bundle is not None:
+            raise SystemExit("app-bundle-entrypoint does not use --apple-bundle; omit it.")
+        if args.allow_fork_codex:
+            raise SystemExit("app-bundle-entrypoint cannot allow a Codex-fork binary.")
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_app_bundle_entrypoint_proof(run_app_bundle_entrypoint_proof(codex_path))
         return 0
 
     if requested_proof == "launcher-activation":

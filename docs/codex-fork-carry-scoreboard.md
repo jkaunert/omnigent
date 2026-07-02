@@ -79,6 +79,12 @@ treated as the replacement-track stock auth source, stock `~/.codex/auth.json`
 is locally available, clean temporary `HOME`/`CODEX_HOME` reports `needs-auth`,
 and a populated temporary `auth.json` reports available without printing
 credential material or running interactive login. The isolated
+`app-bundle-entrypoint` proof is green for a temporary `Omnigent Codex.app`
+bundle with a valid `Info.plist`, executable `Contents/MacOS/omnigent-codex`,
+explicit `OMNIGENT_STOCK_CODEX_PATH` pin, and delegation through
+`uvx --from <repo> omnigent codex`; it does not install into `/Applications`,
+register LaunchServices, mutate Stock Codex.app, or prove signing/notarization.
+The isolated
 `launcher-activation` proof is also green for temporary PATH shadowing, pinned
 stock-Codex selection through `OMNIGENT_STOCK_CODEX_PATH`, delegation through
 `uvx --from <repo> omnigent codex` without recursive Codex lookup, and rollback
@@ -103,8 +109,8 @@ coherent, the pinned stock payload is still
 resolver maps the launcher back to the pinned stock binary. The next gate
 should stay in product operations:
 
-- decide whether to mutate app bundle launchers or other user-facing
-  entrypoints beyond the CLI;
+- decide whether the temporary app-bundle proof should become a signed,
+  notarized persistent app install with LaunchServices or Dock/Finder defaults;
 - decide whether the temporary Homebrew/GitHub remote proof should become a
   persistent updater/install command, and what independent signature or
   notarization policy is required;
