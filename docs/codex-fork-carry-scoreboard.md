@@ -307,13 +307,16 @@ The next gates should split by product mode:
   explicit `tool_search` fallback;
 - for `stock-codex-compat`, the signed/notarized package gate is green with
   Developer ID Installer signing, Apple notarization, stapling, stapler
-  validation, and Gatekeeper acceptance. The package-manager installer
-  lifecycle gate has a covered mounted-target proof path but is live-blocked in
-  this agent process by macOS admin requirements for `/usr/sbin/installer`; it
-  still needs an admin-authenticated root run to close real install, receipt,
-  doctor, cleanup, and detach evidence. The production stock-Codex channel
-  policy gate is green for official-source validation, clean-cache reuse before
-  network access, fail-closed non-official URL rejection, and resolver selection.
+  validation, and Gatekeeper acceptance, and it can now persist the artifact via
+  `--pkg-output-path`. The package-manager installer lifecycle gate now has a
+  prebuilt-artifact consumer via `--pkg-path`; that path validates package
+  structure, signature, staple, and Gatekeeper evidence before requiring admin
+  installer privileges. It is still live-blocked in this agent process by macOS
+  admin requirements for `/usr/sbin/installer`, so it needs an
+  admin-authenticated root run to close real install, receipt, doctor, cleanup,
+  and detach evidence. The production stock-Codex channel policy gate is green
+  for official-source validation, clean-cache reuse before network access,
+  fail-closed non-official URL rejection, and resolver selection.
   The update doctor gate is green for fail-closed policy requirement, dry-run
   no-mutation behavior, preverified target detection, launcher promotion intent,
   target-ready promotion material, rollback intent, and up-to-date promotion
@@ -321,12 +324,12 @@ The next gates should split by product mode:
   checkout and the pkg-installed runtime: explicit stable-channel remote
   download, SHA verification, safe archive extraction, staged-payload reuse,
   and no-host-cache leakage are proven. Remaining production choices are the
-  admin-authenticated package-manager lifecycle run, updater scheduling,
-  persistent launcher pointer promotion, alpha/pre-release channel policy,
-  independent archive signature policy, and broader UI/device bridge coverage
-  such as screenshot, snapshot, gesture, or device execution if product scope
-  requires them. Raw unwrapped stock Codex Electron/CLI route parity remains
-  blocked;
+  admin-authenticated package-manager lifecycle consumer run, updater
+  scheduling, persistent launcher pointer promotion, alpha/pre-release channel
+  policy, independent archive signature policy, and broader UI/device bridge
+  coverage such as screenshot, snapshot, gesture, or device execution if product
+  scope requires them. Raw unwrapped stock Codex Electron/CLI route parity
+  remains blocked;
 - decide whether automated browser/device login UX, token freshness validation,
   or cross-machine credential packaging is product scope; or
 - broaden the Apple workflow smoke to release/readiness/review only if product

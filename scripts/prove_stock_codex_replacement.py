@@ -9298,15 +9298,20 @@ def _build_signed_notarized_stock_codex_compat_pkg(
     root: Path,
     source_repo_root: Path,
     prerequisites: StockCodexCompatPkgSigningPrerequisites,
+    package_path: Path | None = None,
 ) -> _SignedNotarizedStockCodexCompatPkg:
     """Build, notarize, staple, and Gatekeeper-check one pkg under ``root``."""
     assert prerequisites.sign_identity is not None
     assert prerequisites.notarytool_profile is not None
     assert prerequisites.tool_paths["xcrun"] is not None
     assert prerequisites.tool_paths["spctl"] is not None
-    artifact_dir = root / "artifacts"
-    artifact_dir.mkdir(exist_ok=True)
-    package_path = artifact_dir / "omnigent-stock-codex-compat.pkg"
+    if package_path is None:
+        artifact_dir = root / "artifacts"
+        artifact_dir.mkdir(exist_ok=True)
+        package_path = artifact_dir / "omnigent-stock-codex-compat.pkg"
+    else:
+        package_path = package_path.expanduser().resolve()
+        package_path.parent.mkdir(parents=True, exist_ok=True)
     build_args = [
         "--repo-root",
         str(source_repo_root),
@@ -9408,6 +9413,7 @@ def _build_signed_notarized_stock_codex_compat_pkg(
         ],
         timeout=120,
     )
+    structure = replace(structure, package_sha256=sha256_file(structure.package_path))
     return _SignedNotarizedStockCodexCompatPkg(
         structure=structure,
         notary_submission_id=notary_submission_id,
@@ -9429,6 +9435,116 @@ def _build_signed_notarized_stock_codex_compat_pkg(
             (staple_completed.stdout or "") + (staple_completed.stderr or ""),
             limit=1000,
         ),
+        stapler_validate_output_preview=_preview_text(
+            (stapler_validate_completed.stdout or "")
+            + (stapler_validate_completed.stderr or ""),
+            limit=1000,
+        ),
+        gatekeeper_output_preview=_preview_text(
+            (gatekeeper_completed.stdout or "") + (gatekeeper_completed.stderr or ""),
+            limit=1000,
+        ),
+    )
+
+
+def _load_stock_codex_compat_pkg_builder_module(source_repo_root: Path) -> Any:
+    script_path = source_repo_root / "scripts" / "build_stock_codex_compat_pkg.py"
+    spec = importlib.util.spec_from_file_location(
+        "omnigent_stock_codex_compat_pkg_builder_for_proof",
+        script_path,
+    )
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"Could not load compatibility pkg builder: {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _inspect_stock_codex_compat_pkg_file(
+    package_path: Path,
+    *,
+    expand_dir: Path,
+    source_repo_root: Path,
+    expect_signed: bool,
+) -> StockCodexCompatPkgStructureProof:
+    """Inspect an existing compatibility pkg and return common proof evidence."""
+    package_path = package_path.expanduser().resolve()
+    builder = _load_stock_codex_compat_pkg_builder_module(source_repo_root)
+    try:
+        inspection = builder.inspect_stock_codex_compat_pkg(
+            package_path,
+            expand_dir=expand_dir,
+        )
+    except Exception as exc:
+        raise SystemExit(f"Could not inspect compatibility pkg: {package_path}") from exc
+    source_bundle_sha256 = str(
+        inspection.pkg_manifest.get("sourceBundleSha256")
+        or inspection.bundle_manifest.get("sourceBundleSha256")
+        or ""
+    )
+    payload = {
+        "kind": "omnigent-stock-codex-compat-pkg",
+        "packagePath": str(package_path),
+        "packageSha256": sha256_file(package_path),
+        "sourceBundleSha256": source_bundle_sha256,
+        "packageIdentifier": inspection.package_identifier,
+        "packageVersion": inspection.package_version,
+        "installLocation": inspection.install_location,
+        "installPrefix": str(inspection.install_prefix),
+        "runtimeRoot": str(inspection.runtime_root),
+        "inspection": inspection.as_dict(),
+    }
+    return _validate_stock_codex_compat_pkg_builder_payload(
+        payload,
+        source_repo_root=source_repo_root,
+        expect_signed=expect_signed,
+    )
+
+
+def _validate_prebuilt_signed_notarized_stock_codex_compat_pkg(
+    *,
+    package_path: Path,
+    root: Path,
+    source_repo_root: Path,
+    tool_paths: dict[str, str | None],
+) -> _SignedNotarizedStockCodexCompatPkg:
+    """Validate an already-built pkg without touching signing credentials."""
+    assert tool_paths["xcrun"] is not None
+    assert tool_paths["spctl"] is not None
+    assert tool_paths["stapler"] is not None
+    structure = _inspect_stock_codex_compat_pkg_file(
+        package_path,
+        expand_dir=root / "prebuilt-pkg-expanded",
+        source_repo_root=source_repo_root,
+        expect_signed=True,
+    )
+    stapler_validate_completed = _run_pkg_distribution_command(
+        [
+            str(tool_paths["xcrun"]),
+            "stapler",
+            "validate",
+            str(structure.package_path),
+        ],
+        timeout=300,
+    )
+    gatekeeper_completed = _run_pkg_distribution_command(
+        [
+            str(tool_paths["spctl"]),
+            "-a",
+            "-vv",
+            "-t",
+            "install",
+            str(structure.package_path),
+        ],
+        timeout=120,
+    )
+    return _SignedNotarizedStockCodexCompatPkg(
+        structure=structure,
+        notary_submission_id="prebuilt-package",
+        notary_status="prebuilt-staple-validated",
+        notary_output_preview="prebuilt package; notary submission not performed",
+        staple_output_preview="prebuilt package; stapling not performed",
         stapler_validate_output_preview=_preview_text(
             (stapler_validate_completed.stdout or "")
             + (stapler_validate_completed.stderr or ""),
@@ -9466,9 +9582,15 @@ def run_stock_codex_compat_pkg_signed_notarized_proof(
     sign_identity: str | None,
     signing_keychain: Path | None,
     notarytool_profile: str | None,
+    package_output_path: Path | None = None,
 ) -> StockCodexCompatPkgSignedNotarizedProof:
     """Build, sign, notarize, staple, and Gatekeeper-check the compatibility pkg."""
     source_repo_root = Path(__file__).resolve().parents[1]
+    package_output_path = (
+        package_output_path.expanduser().resolve()
+        if package_output_path is not None
+        else None
+    )
     prerequisites = _stock_codex_compat_pkg_signing_prerequisites(
         sign_identity=sign_identity,
         signing_keychain=signing_keychain,
@@ -9512,6 +9634,7 @@ def run_stock_codex_compat_pkg_signed_notarized_proof(
             root=root,
             source_repo_root=source_repo_root,
             prerequisites=prerequisites,
+            package_path=package_output_path,
         )
         structure = signed_pkg.structure
         return StockCodexCompatPkgSignedNotarizedProof(
@@ -9689,6 +9812,10 @@ def _blocked_stock_codex_compat_pkg_installer_lifecycle_proof(
     missing_prerequisites: tuple[str, ...],
     stock_codex_path: Path | None,
     stock_codex_version: str | None,
+    structure: StockCodexCompatPkgStructureProof | None = None,
+    notary_submission_id: str | None = None,
+    notary_status: str | None = None,
+    gatekeeper_output_preview: str | None = None,
 ) -> StockCodexCompatPkgInstallerLifecycleProof:
     return StockCodexCompatPkgInstallerLifecycleProof(
         status="blocked",
@@ -9700,11 +9827,13 @@ def _blocked_stock_codex_compat_pkg_installer_lifecycle_proof(
         notarytool_profile=prerequisites.notarytool_profile,
         stock_codex_path=stock_codex_path,
         stock_codex_version=stock_codex_version,
-        package_path=None,
-        package_sha256=None,
-        source_bundle_sha256=None,
-        package_identifier=None,
-        package_version=None,
+        package_path=structure.package_path if structure is not None else None,
+        package_sha256=structure.package_sha256 if structure is not None else None,
+        source_bundle_sha256=(
+            structure.source_bundle_sha256 if structure is not None else None
+        ),
+        package_identifier=structure.package_identifier if structure is not None else None,
+        package_version=structure.package_version if structure is not None else None,
         target_image_path=None,
         target_mountpoint=None,
         target_device=None,
@@ -9727,9 +9856,9 @@ def _blocked_stock_codex_compat_pkg_installer_lifecycle_proof(
         cleanup_receipt_forgotten=None,
         cleanup_receipt_absent=None,
         target_detached=None,
-        notary_submission_id=None,
-        notary_status=None,
-        gatekeeper_output_preview=None,
+        notary_submission_id=notary_submission_id,
+        notary_status=notary_status,
+        gatekeeper_output_preview=gatekeeper_output_preview,
     )
 
 
@@ -9739,30 +9868,66 @@ def run_stock_codex_compat_pkg_installer_lifecycle_proof(
     sign_identity: str | None,
     signing_keychain: Path | None,
     notarytool_profile: str | None,
+    package_path: Path | None = None,
 ) -> StockCodexCompatPkgInstallerLifecycleProof:
     """Install a signed/notarized pkg onto a temporary target volume and clean it up."""
     stock_codex_path = stock_codex_path.expanduser().resolve()
+    package_path = package_path.expanduser().resolve() if package_path is not None else None
     assert_stock_codex_path(stock_codex_path, allow_fork_codex=False)
     stock_codex_version = codex_version(stock_codex_path)
     source_repo_root = Path(__file__).resolve().parents[1]
-    prerequisites = _stock_codex_compat_pkg_signing_prerequisites(
-        sign_identity=sign_identity,
-        signing_keychain=signing_keychain,
-        notarytool_profile=notarytool_profile,
+    root_missing = (
+        "installer lifecycle requires root privileges for /usr/sbin/installer; "
+        "run from an admin-authenticated root shell"
     )
-    tool_paths = dict(prerequisites.tool_paths)
+    if package_path is None:
+        prerequisites = _stock_codex_compat_pkg_signing_prerequisites(
+            sign_identity=sign_identity,
+            signing_keychain=signing_keychain,
+            notarytool_profile=notarytool_profile,
+        )
+        tool_paths = dict(prerequisites.tool_paths)
+        missing = list(prerequisites.missing_prerequisites)
+    else:
+        tool_paths = {
+            "pkgbuild": shutil.which("pkgbuild"),
+            "pkgutil": shutil.which("pkgutil"),
+            "xcrun": shutil.which("xcrun"),
+            "spctl": shutil.which("spctl"),
+            "notarytool": None,
+            "stapler": None,
+        }
+        if tool_paths["xcrun"]:
+            tool_paths["notarytool"] = _xcrun_find_tool(
+                str(tool_paths["xcrun"]),
+                "notarytool",
+            )
+            tool_paths["stapler"] = _xcrun_find_tool(str(tool_paths["xcrun"]), "stapler")
+        prerequisites = StockCodexCompatPkgSigningPrerequisites(
+            status="ready",
+            missing_prerequisites=(),
+            tool_paths=tool_paths,
+            sign_identity=None,
+            sign_identity_source="prebuilt-package",
+            signing_keychain=None,
+            developer_id_installer_identities=(),
+            developer_id_application_identities=(),
+            notarytool_profile=None,
+        )
+        missing = []
+        if not package_path.is_file():
+            missing.append(f"missing prebuilt compatibility pkg: {package_path}")
+        for tool_name in ("pkgutil", "xcrun", "spctl", "stapler"):
+            if not tool_paths[tool_name]:
+                missing.append(f"missing tool: {tool_name}")
     tool_paths["installer"] = shutil.which("installer")
     tool_paths["hdiutil"] = shutil.which("hdiutil")
     tool_paths["uvx"] = shutil.which("uvx")
-    missing = list(prerequisites.missing_prerequisites)
     for tool_name in ("installer", "hdiutil", "uvx"):
         if not tool_paths[tool_name]:
             missing.append(f"missing tool: {tool_name}")
-    if not _effective_user_is_root():
-        missing.append(
-            "installer lifecycle requires root privileges for /usr/sbin/installer; "
-            "run from an admin-authenticated root shell"
-        )
+    if package_path is None and not _effective_user_is_root():
+        missing.append(root_missing)
     if missing:
         return _blocked_stock_codex_compat_pkg_installer_lifecycle_proof(
             prerequisites=prerequisites,
@@ -9780,12 +9945,32 @@ def run_stock_codex_compat_pkg_installer_lifecycle_proof(
         prefix="omnigent-stock-codex-compat-pkg-install-lifecycle-"
     ) as temp_root:
         root = Path(temp_root).resolve()
-        signed_pkg = _build_signed_notarized_stock_codex_compat_pkg(
-            root=root,
-            source_repo_root=source_repo_root,
-            prerequisites=prerequisites,
-        )
+        if package_path is None:
+            signed_pkg = _build_signed_notarized_stock_codex_compat_pkg(
+                root=root,
+                source_repo_root=source_repo_root,
+                prerequisites=prerequisites,
+            )
+        else:
+            signed_pkg = _validate_prebuilt_signed_notarized_stock_codex_compat_pkg(
+                package_path=package_path,
+                root=root,
+                source_repo_root=source_repo_root,
+                tool_paths=tool_paths,
+            )
         structure = signed_pkg.structure
+        if package_path is not None and not _effective_user_is_root():
+            return _blocked_stock_codex_compat_pkg_installer_lifecycle_proof(
+                prerequisites=prerequisites,
+                tool_paths=tool_paths,
+                missing_prerequisites=(root_missing,),
+                stock_codex_path=stock_codex_path,
+                stock_codex_version=stock_codex_version,
+                structure=structure,
+                notary_submission_id=signed_pkg.notary_submission_id,
+                notary_status=signed_pkg.notary_status,
+                gatekeeper_output_preview=signed_pkg.gatekeeper_output_preview,
+            )
         target_image_path, target_mountpoint, target_device = (
             _create_stock_codex_compat_pkg_target_volume(
                 root=root,
@@ -17726,13 +17911,14 @@ def parse_args() -> argparse.Namespace:
             "Developer ID Installer identity, submits it through notarytool, "
             "staples it, validates the staple, and checks Gatekeeper; when "
             "credentials are absent it reports a blocked prerequisite state "
-            "instead of a harness failure. "
+            "instead of a harness failure; --pkg-output-path preserves the "
+            "signed/notarized artifact for later admin install validation. "
             "'stock-codex-compat-pkg-installer-lifecycle' builds the same "
-            "signed/notarized pkg, installs it with macOS installer onto a "
-            "temporary mounted target volume, validates receipt metadata and "
-            "the installed runtime doctor, then removes payload and receipt "
-            "state before detaching the image; macOS installer requires "
-            "root/admin privileges for the live install step. "
+            "signed/notarized pkg or consumes --pkg-path, installs it with "
+            "macOS installer onto a temporary mounted target volume, validates "
+            "receipt metadata and the installed runtime doctor, then removes "
+            "payload and receipt state before detaching the image; macOS "
+            "installer requires root/admin privileges for the live install step. "
             "'stock-codex-compat-wrapper-xcodebuild-bridge-adapter' proves "
             "that XcodeBuildMCP simulator build/run can execute through the "
             "same wrapper-owned file bridge while stock Codex stays in "
@@ -17819,6 +18005,27 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Optional keychain path for the pkg signing identity. Defaults to "
             f"{PKG_SIGN_KEYCHAIN_ENV}."
+        ),
+    )
+    parser.add_argument(
+        "--pkg-output-path",
+        type=Path,
+        default=None,
+        help=(
+            "Optional persistent output path for "
+            "stock-codex-compat-pkg-signed-notarized. Use this to produce the "
+            "user-context signed/notarized package consumed later by the "
+            "admin-context installer lifecycle proof."
+        ),
+    )
+    parser.add_argument(
+        "--pkg-path",
+        type=Path,
+        default=None,
+        help=(
+            "Optional prebuilt signed/notarized compatibility pkg consumed by "
+            "stock-codex-compat-pkg-installer-lifecycle. When set, lifecycle "
+            "validation skips signing and notarization credentials."
         ),
     )
     parser.add_argument(
@@ -18328,11 +18535,17 @@ def main() -> int:
                 "stock-codex-compat-pkg-signed-notarized cannot allow a "
                 "Codex-fork binary."
             )
+        if args.pkg_path is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-signed-notarized writes --pkg-output-path; "
+                "it does not consume --pkg-path."
+            )
         print_stock_codex_compat_pkg_signed_notarized_proof(
             run_stock_codex_compat_pkg_signed_notarized_proof(
                 sign_identity=args.pkg_sign_identity,
                 signing_keychain=args.pkg_sign_keychain,
                 notarytool_profile=args.notarytool_profile,
+                package_output_path=args.pkg_output_path,
             )
         )
         return 0
@@ -18348,6 +18561,11 @@ def main() -> int:
                 "stock-codex-compat-pkg-installer-lifecycle cannot allow a "
                 "Codex-fork binary."
             )
+        if args.pkg_output_path is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-installer-lifecycle consumes --pkg-path; "
+                "produce persistent packages with stock-codex-compat-pkg-signed-notarized."
+            )
         codex_path = resolve_codex_path(args.codex_path)
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_stock_codex_compat_pkg_installer_lifecycle_proof(
@@ -18356,6 +18574,7 @@ def main() -> int:
                 sign_identity=args.pkg_sign_identity,
                 signing_keychain=args.pkg_sign_keychain,
                 notarytool_profile=args.notarytool_profile,
+                package_path=args.pkg_path,
             )
         )
         return 0

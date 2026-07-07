@@ -2496,9 +2496,12 @@ def test_stock_codex_compat_pkg_signing_prereqs_explain_application_identity_mis
 
 def test_stock_codex_compat_pkg_signed_notarized_runs_distribution_checks(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     captured_build_args: list[str] = []
     distribution_commands: list[list[str]] = []
+    output_path = tmp_path / "dist" / "signed-notarized.pkg"
+    initial_package_sha = ""
 
     def fake_prerequisites(**kwargs: object) -> Any:
         assert kwargs["sign_identity"] == "Developer ID Installer: Example (ABCDE12345)"
@@ -2525,12 +2528,14 @@ def test_stock_codex_compat_pkg_signed_notarized_runs_distribution_checks(
         )
 
     def fake_builder(args: list[str], *, repo_root: Path) -> dict[str, Any]:
+        nonlocal initial_package_sha
         del repo_root
         captured_build_args.extend(args)
         output_path = Path(args[args.index("--output") + 1])
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"signed pkg fixture")
         package_sha = _MOD.sha256_file(output_path)
+        initial_package_sha = package_sha
         return {
             "kind": "omnigent-stock-codex-compat-pkg",
             "packagePath": str(output_path),
@@ -2589,6 +2594,9 @@ def test_stock_codex_compat_pkg_signed_notarized_runs_distribution_checks(
                 stdout='{"id":"notary-submission-1","status":"Accepted"}',
                 stderr="",
             )
+        if command[1:3] == ["stapler", "staple"]:
+            package = Path(command[-1])
+            package.write_bytes(package.read_bytes() + b"\nstapled")
         return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
 
     monkeypatch.setattr(
@@ -2603,15 +2611,23 @@ def test_stock_codex_compat_pkg_signed_notarized_runs_distribution_checks(
         sign_identity="Developer ID Installer: Example (ABCDE12345)",
         signing_keychain=None,
         notarytool_profile="omnigent-notary",
+        package_output_path=output_path,
     )
 
     assert proof.status == "replacement-ready"
+    assert proof.package_path == output_path.resolve()
+    assert output_path.is_file()
+    assert proof.package_sha256 == _MOD.sha256_file(output_path)
+    assert proof.package_sha256 != initial_package_sha
     assert proof.signed is True
     assert proof.signature_status == "signed by a certificate trusted by macOS"
     assert proof.notary_submission_id == "notary-submission-1"
     assert proof.notary_status == "Accepted"
     assert captured_build_args[captured_build_args.index("--sign-identity") + 1] == (
         "Developer ID Installer: Example (ABCDE12345)"
+    )
+    assert captured_build_args[captured_build_args.index("--output") + 1] == str(
+        output_path.resolve()
     )
     assert distribution_commands[0][1:3] == ["notarytool", "submit"]
     assert "--wait" not in distribution_commands[0]
@@ -2684,6 +2700,118 @@ def test_stock_codex_compat_pkg_installer_lifecycle_blocks_without_root(
         "installer lifecycle requires root privileges for /usr/sbin/installer; "
         "run from an admin-authenticated root shell"
     ) in proof.missing_prerequisites
+
+
+def test_stock_codex_compat_pkg_installer_lifecycle_prebuilt_blocks_after_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = _write_codex_binary(tmp_path / "stock" / "codex")
+    package_path = tmp_path / "artifacts" / "prebuilt.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"prebuilt signed pkg")
+    structure = _MOD.StockCodexCompatPkgStructureProof(
+        package_path=package_path.resolve(),
+        package_sha256=_MOD.sha256_file(package_path),
+        source_bundle_sha256="a" * 64,
+        package_identifier="ai.omnigent.stock-codex-compat",
+        package_version="1.2.3",
+        install_location="/",
+        install_prefix=Path("/Library/Application Support/Omnigent/stock-codex-compat"),
+        runtime_root=Path(
+            "/Library/Application Support/Omnigent/stock-codex-compat/runtime"
+        ),
+        payload_file_count=6,
+        required_payload_files={
+            "Library/Application Support/Omnigent/stock-codex-compat/pkg-manifest.json": True,
+        },
+        script_names=("postinstall",),
+        archive_entries=("Bom", "PackageInfo", "Payload", "Scripts"),
+        signature_status="signed by a developer certificate issued by Apple",
+        signed=True,
+        pkg_manifest_path=tmp_path / "expanded" / "pkg-manifest.json",
+        bundle_manifest_path=tmp_path / "expanded" / "bundle-manifest.json",
+        pkg_contract={"runtime": "machine-level-runtime-only"},
+        bundle_source_root="<omitted-from-pkg>",
+    )
+    distribution_commands: list[list[str]] = []
+
+    def fake_which(name: str) -> str | None:
+        return {
+            "pkgutil": "/usr/sbin/pkgutil",
+            "xcrun": "/usr/bin/xcrun",
+            "spctl": "/usr/sbin/spctl",
+            "installer": "/usr/sbin/installer",
+            "hdiutil": "/usr/bin/hdiutil",
+            "uvx": str(_write_uvx_binary(tmp_path / "tools" / "uvx")),
+        }.get(name)
+
+    def fake_inspect(
+        package_path_arg: Path,
+        *,
+        expand_dir: Path,
+        source_repo_root: Path,
+        expect_signed: bool,
+    ) -> Any:
+        assert package_path_arg == package_path.resolve()
+        assert expand_dir.name == "prebuilt-pkg-expanded"
+        assert source_repo_root == _REPO_ROOT
+        assert expect_signed is True
+        return structure
+
+    def fake_distribution_command(
+        command: list[str],
+        *,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        assert timeout > 0
+        distribution_commands.append(command)
+        if command[1:3] == ["stapler", "validate"]:
+            return subprocess.CompletedProcess(command, 0, stdout="staple ok", stderr="")
+        if command[:5] == ["/usr/sbin/spctl", "-a", "-vv", "-t", "install"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="accepted")
+        raise AssertionError(f"unexpected distribution command: {command!r}")
+
+    def fail_prerequisites(**kwargs: object) -> Any:
+        raise AssertionError(f"signing prerequisites should not run: {kwargs!r}")
+
+    def fail_build(**kwargs: object) -> Any:
+        raise AssertionError(f"build should not run for prebuilt package: {kwargs!r}")
+
+    monkeypatch.setattr(
+        _MOD,
+        "_stock_codex_compat_pkg_signing_prerequisites",
+        fail_prerequisites,
+    )
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+    monkeypatch.setattr(_MOD, "_xcrun_find_tool", lambda _xcrun, tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(_MOD, "_effective_user_is_root", lambda: False)
+    monkeypatch.setattr(_MOD, "_inspect_stock_codex_compat_pkg_file", fake_inspect)
+    monkeypatch.setattr(_MOD, "_run_pkg_distribution_command", fake_distribution_command)
+    monkeypatch.setattr(_MOD, "_build_signed_notarized_stock_codex_compat_pkg", fail_build)
+
+    proof = _MOD.run_stock_codex_compat_pkg_installer_lifecycle_proof(
+        stock_codex,
+        sign_identity=None,
+        signing_keychain=None,
+        notarytool_profile=None,
+        package_path=package_path,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.sign_identity_source == "prebuilt-package"
+    assert proof.package_path == package_path.resolve()
+    assert proof.package_sha256 == structure.package_sha256
+    assert proof.package_identifier == "ai.omnigent.stock-codex-compat"
+    assert proof.notary_submission_id == "prebuilt-package"
+    assert proof.notary_status == "prebuilt-staple-validated"
+    assert proof.gatekeeper_output_preview == "accepted"
+    assert (
+        "installer lifecycle requires root privileges for /usr/sbin/installer; "
+        "run from an admin-authenticated root shell"
+    ) in proof.missing_prerequisites
+    assert distribution_commands[0][1:3] == ["stapler", "validate"]
+    assert distribution_commands[1][:5] == ["/usr/sbin/spctl", "-a", "-vv", "-t", "install"]
 
 
 def test_stock_codex_compat_pkg_installer_lifecycle_uses_mounted_target(
