@@ -36,8 +36,19 @@ separate decisions.
 
 ## Cutover Rule
 
-The Omnigent path is not a full fork replacement until all product-required
-carry groups are classified as one of:
+The Omnigent path is a dual-mode replacement target:
+
+- `omnigent-runtime`: Omnigent is the installed app/CLI entrypoint and stock
+  Codex is the engine underneath it.
+- `stock-codex-compat`: stock Codex Electron or CLI remains the underlying
+  surface, but the install carries the Apple workflow plugin plus the Omnigent
+  meta-harness bridge required for parity. Full parity may require an
+  Omnigent-owned wrapper entrypoint around stock Codex rather than an unwrapped
+  stock launch.
+
+Neither mode authorizes Codex-fork deletion by itself. A mode is not a full fork
+replacement until all product-required carry groups for that mode are classified
+as one of:
 
 - `replacement-ready`
 - `obsolete-if-cutover`
@@ -53,32 +64,27 @@ track.
 ## Next Proof Gate
 
 The clean-profile `cutover-ready` aggregate proof and the default-path cutover
-rehearsal are now green for the current host with stock Codex `0.142.2`. The
+rehearsal are now green for the current host with stock Codex `0.142.5`. The
 clean-profile gate used isolated `HOME`/cache/XDG dirs, explicit Apple bundle
 input, and preserved real `CODEX_HOME` for authentication. The default-path gate
-used ambient Apple bundle lookup, `PATH` stock-Codex resolution, and documented
-fallback steps without mutating launcher defaults. The
-`pinned-codex-provision` proof is green for provisioning a local or downloaded
-source binary into an Omnigent-owned `codex-stock/<version>/codex` cache with
-manifest provenance, SHA-256 verification, `.codex-fork` source rejection, and
-`OMNIGENT_STOCK_CODEX_PATH` resolver proof. The current host now has that
-managed stock Codex `0.142.2` payload persistently installed at
-`~/.local/omnigent/codex-stock/0.142.2/codex`. The `stock-codex-channel` proof
-is also green for a local/file-backed channel manifest that selects a stock
-Codex artifact, verifies SHA-256 and version, stages it, installs it with
-`sourceKind: channel` provenance, and proves Omnigent resolver selection. The
-`stock-codex-homebrew-remote-channel` proof is green for reading current
-Homebrew Codex cask metadata with auto-update disabled, requiring the
-`github.com/openai/codex` release URL shape, downloading the cask archive into a
-temporary cache through the explicit remote-download opt-in, verifying cask
-archive SHA-256, extracting the declared archive executable, verifying
-`codex-cli 0.142.2`, installing the extracted binary with channel provenance,
-and proving Omnigent resolver selection. The `clean-auth-onboarding` proof is
-green for the local auth boundary: inherited `.codex-fork` `CODEX_HOME` is not
-treated as the replacement-track stock auth source, stock `~/.codex/auth.json`
-is locally available, clean temporary `HOME`/`CODEX_HOME` reports `needs-auth`,
-and a populated temporary `auth.json` reports available without printing
-credential material or running interactive login. The isolated
+used ambient Apple bundle lookup, `PATH` stock-Codex resolution through the
+Omnigent-managed launcher, and documented fallback steps without mutating the
+Codex fork. The `pinned-codex-provision`, `stock-codex-channel`, and
+`stock-codex-homebrew-remote-channel` proofs are green for provisioning a stock
+Codex payload into an Omnigent-owned `codex-stock/<version>/codex` cache with
+manifest provenance, SHA-256 verification, channel provenance, and
+`OMNIGENT_STOCK_CODEX_PATH` resolver proof. The current host now has stock Codex
+`0.142.5` persistently installed at
+`~/.local/omnigent/codex-stock/0.142.5/codex`, sourced from the official
+Homebrew/OpenAI GitHub release archive and recorded with `sourceKind: channel`.
+The existing `/opt/homebrew/bin/codex` Omnigent-managed launcher now delegates
+to that `0.142.5` payload while preserving the original Homebrew backup path.
+The `clean-auth-onboarding` proof remains green for the local auth boundary:
+inherited `.codex-fork` `CODEX_HOME` is not treated as the replacement-track
+stock auth source, stock `~/.codex/auth.json` is locally available, clean
+temporary `HOME`/`CODEX_HOME` reports `needs-auth`, and a populated temporary
+`auth.json` reports available without printing credential material or running
+interactive login. The isolated
 `app-bundle-entrypoint` proof is green for a temporary `Omnigent Codex.app`
 bundle with a valid `Info.plist`, executable `Contents/MacOS/omnigent-codex`,
 explicit `OMNIGENT_STOCK_CODEX_PATH` pin, and delegation through
@@ -95,25 +101,186 @@ the original Homebrew symlink backed up at
 rollback command was exercised once, restored the Homebrew symlink and removed
 the manifest, then the managed launcher was reinstalled. `codex --version`,
 `codex --omnigent-launcher-probe`, Omnigent resolver detection, and the default
-graph proof passed through that launcher after reinstall. On 2026-06-29, the
-full `default-path-cutover` aggregate also passed with no explicit
-`--codex-path`, resolving through the managed launcher to the pinned stock
-payload and proving graph, router matrix, tool-plane, Apple memory MCP,
-Apple-docs CLI, XcodeBuildMCP CLI build/install/launch, and read-only
-XcodeBuildMCP discovery. On 2026-06-30, the read-only managed launcher doctor
-also passed against the live host default: `codex` still resolves to the
-managed `/opt/homebrew/bin/codex` launcher, the launcher and manifest are
-coherent, the pinned stock payload is still
-`~/.local/omnigent/codex-stock/0.142.2/codex`, the preserved backup exists,
-`codex --version` and the launcher probe delegate correctly, and Omnigent's
-resolver maps the launcher back to the pinned stock binary. The next gate
-should stay in product operations:
+graph proof passed through that launcher after reinstall. On 2026-07-04, after
+the `0.142.5` refresh, `codex --version` and the launcher probe delegated to
+the refreshed pinned payload, the explicit `cutover-ready` aggregate passed
+with `--codex-path` set to the `0.142.5` payload, and the full
+`default-path-cutover` aggregate passed with no explicit `--codex-path`,
+proving graph, router matrix, tool-plane, Apple memory MCP, Apple-docs CLI,
+XcodeBuildMCP CLI build/install/launch, and read-only XcodeBuildMCP discovery
+through the refreshed default path.
 
-- decide whether the temporary app-bundle proof should become a signed,
-  notarized persistent app install with LaunchServices or Dock/Finder defaults;
-- decide whether the temporary Homebrew/GitHub remote proof should become a
-  persistent updater/install command, and what independent signature or
-  notarization policy is required;
+The next gates should split by product mode:
+
+- for `omnigent-runtime`, turn the temporary app-bundle proof into a signed,
+  notarized persistent Omnigent app install with LaunchServices or Dock/Finder
+  defaults only if those are desired for the primary entrypoint;
+- for `stock-codex-compat`, treat the isolated install/config gate as green:
+  stock Codex can install the Apple workflow plugin from a disposable local
+  marketplace and can read the Omnigent MCP bridge plus Codex policy hooks from
+  a temp `CODEX_HOME`;
+- for `stock-codex-compat`, treat live deterministic route parity as blocked at
+  route injection: a stock Codex `exec` turn can authenticate and return the
+  live sentinel from the isolated profile, but the current policy hook does not
+  prepend `Routing: orchestrator-led` before model output;
+- for `stock-codex-compat`, treat the Omnigent-owned wrapper spike as green for
+  CLI JSONL route injection: `omnigent.stock_codex_compat_wrapper` is now a
+  source-owned module exposed as `omnigent-stock-codex-wrapper`, the wrapped
+  stock Codex process returned the sentinel as its pre-wrapper first message,
+  and the wrapper injected the deterministic Apple route before the visible
+  first agent message;
+- for `stock-codex-compat`, treat the first wrapped tool-event gate as green:
+  `stock-codex-compat-wrapper-command-tool` proves the wrapper preserves one
+  completed stock Codex `command_execution` event, including
+  `cat tool-proof.txt`, `OMNIGENT_TOOL_SENTINEL_42`, exit code `0`, and route
+  injection before the final visible answer;
+- for `stock-codex-compat`, treat the stronger wrapper-owned adapter package
+  gate as green: `stock-codex-compat-wrapper-adapter-tool` proves the wrapper
+  can validate an Omnigent adapter manifest with a closed object schema,
+  prepend the declared adapter bin to stock Codex's `PATH`, record the
+  adapter-bin, manifest, and tool names in wrapper evidence, have stock Codex
+  execute `omnigent-wrapper-adapter-probe --message stock-codex-wrapper-adapter-proof`
+  exactly once, preserve the adapter `command_execution` output sentinel, and
+  still inject route evidence before the final visible answer;
+- for `stock-codex-compat`, treat bounded multi-tool adapter arbitration as
+  green: `stock-codex-compat-wrapper-adapter-arbitration` proves the wrapper
+  can validate a generated two-tool adapter package, record both tool names in
+  wrapper evidence, have stock Codex select the route adapter, reject the
+  release-notes adapter, preserve exactly one selected `command_execution`
+  output sentinel, and still inject route evidence before the final visible
+  answer;
+- for `stock-codex-compat`, treat the first real workflow adapter gate as
+  green with a sandbox caveat: `stock-codex-compat-wrapper-apple-docs-adapter`
+  proves the generated `fetch_apple_docs` adapter package can fetch
+  `https://developer.apple.com/documentation/swift/string` through stock
+  Codex's command tool, preserve exactly one `command_execution` event, and
+  still inject route evidence; `read-only` timed out on `npx`,
+  `workspace-write` still failed direct Sosumi fetch, and the green run required
+  `danger-full-access` in the temporary proof workspace;
+- for `stock-codex-compat`, treat the wrapper-side file-bridge variant as
+  green for low-privilege Apple-docs execution:
+  `stock-codex-compat-wrapper-apple-docs-bridge-adapter` places the generated
+  `fetch_apple_docs` command and bridge directory inside the temporary stock
+  workspace, keeps stock Codex in `workspace-write`, records `adapterBridgeDir`
+  in wrapper evidence, has stock Codex write the bridge request through its
+  command tool, starts the wrapper-owned bridge runtime from the adapter
+  manifest, runs `sosumi fetch` from the adapter-owned bridge handler, and
+  preserves the real Apple-docs output plus route evidence;
+- for `stock-codex-compat`, treat the first XcodeBuildMCP file-bridge adapter as
+  green for low-privilege stock command execution plus wrapper-side simulator
+  build/install/launch: `stock-codex-compat-wrapper-xcodebuild-bridge-adapter`
+  places the generated `xcodebuildmcp_simulator_build_run` command and bridge
+  directory inside the temporary stock workspace, keeps stock Codex in
+  `workspace-write`, records `adapterBridgeDir` in wrapper evidence, has stock
+  Codex write the bridge request through its command tool, and runs
+  `xcodebuildmcp simulator build-and-run` from the wrapper-owned bridge runtime
+  with the full XcodeBuildMCP workflow env enabled;
+- for `stock-codex-compat`, treat the managed compatibility launcher activation
+  gate as green for default-entrypoint wiring:
+  `stock-codex-compat-launcher-activation` installs a temporary managed
+  `codex` launcher with the standard Omnigent marker and manifest pointer,
+  proves Omnigent resolves that launcher back to the manifest-pinned stock
+  Codex binary instead of recursing, delegates through
+  `uvx --from <repo> omnigent-stock-codex-wrapper`, starts the wrapper-owned
+  file-bridge runtime, runs the generated `fetch_apple_docs` bridge adapter
+  under `workspace-write`, injects deterministic route evidence, and uninstalls
+  the temporary launcher plus manifest;
+- for `stock-codex-compat`, treat the non-mutating host doctor gate as green:
+  `stock-codex-compat-launcher-doctor` validates the intended default
+  compatibility launcher target at
+  `~/.local/bin/omnigent-stock-codex-compat`, manifest path
+  `~/.local/omnigent/launchers/stock-codex-compat.json`, pinned stock Codex
+  `~/.local/omnigent/codex-stock/0.142.5/codex`, `uvx`, route prefix,
+  generated `fetch_apple_docs` adapter manifest, default bridge dir
+  `~/.local/omnigent/stock-codex-compat/adapter-bridge`, PATH posture,
+  rollback command, and install command shape without creating or replacing
+  launcher files. Current host result: target absent, parent on PATH, parent
+  writable, install allowed, and filesystem mutation false;
+- for `stock-codex-compat`, treat persistent adapter package placement as
+  green: `install_stock_codex_compat_launcher.py --install-adapter-package`
+  installed the default adapter package at
+  `~/.local/omnigent/stock-codex-compat/adapter-package`, a second run reused
+  it with `mutatesFilesystem=false`, and launcher doctor validated the package
+  against stock Codex `0.142.5` without explicit `--adapter-bin` or
+  `--adapter-manifest`. The package contains `adapter-manifest.json` and
+  `bin/fetch_apple_docs`;
+- for `stock-codex-compat`, treat the persistent separate-command launcher as
+  green for the current host: `omnigent-stock-codex-compat` is installed at
+  `~/.local/bin/omnigent-stock-codex-compat`, selected on PATH, delegates
+  `--version` to stock Codex `0.142.5`, probes the expected wrapper delegate and
+  adapter paths, was uninstalled once to prove rollback, then reinstalled as
+  the final host state without touching the existing `codex` default;
+- for `stock-codex-compat`, treat the clean-home install sequence as green:
+  `stock-codex-compat-clean-install` installs the adapter package and separate
+  command from defaults under a temporary fresh `HOME`, validates PATH
+  selection, probe, version delegation, force-aware doctor behavior, and
+  rollback, then removes the temporary profile;
+- for `stock-codex-compat`, treat the unsigned portable runtime bundle
+  rehearsal as green: `build_stock_codex_compat_bundle.py` creates
+  `omnigent-stock-codex-compat-bundle.tar.gz` with the `runtime/` source root
+  needed by `uvx --from <extracted-runtime>`, and
+  `stock-codex-compat-bundle-install` verifies SHA-256, safe extraction,
+  clean-home install, extracted-runtime launcher manifest wiring, probe,
+  version delegation, force-aware doctor behavior, and rollback;
+- for `stock-codex-compat`, treat the unsigned flat `.pkg` structure proof as
+  green: `build_stock_codex_compat_pkg.py` builds a package from the portable
+  runtime bundle and `stock-codex-compat-pkg-structure` verifies identifier
+  `ai.omnigent.stock-codex-compat`, version `0.3.0.dev0`, install prefix
+  `/Library/Application Support/Omnigent/stock-codex-compat`, script
+  `postinstall`, unsigned signature status, sanitized manifests, and required
+  runtime payload files, including `runtime/scripts/provision_stock_codex.py`,
+  without installing the package;
+- for `stock-codex-compat`, treat the expanded `.pkg` runtime live model turn
+  as green: `stock-codex-compat-pkg-runtime-live` builds the package, expands
+  it without installing, validates the runtime under
+  `Payload/Library/Application Support/Omnigent/stock-codex-compat/runtime`,
+  then runs pinned stock Codex `0.142.5` through the expanded runtime using
+  `uvx --from` and `omnigent-stock-codex-wrapper`, and injects the deterministic
+  Apple route before `STOCK_CODEX_COMPAT_LIVE_OK`;
+- for `stock-codex-compat`, treat per-user bootstrap from the pkg-installed
+  runtime as green: `stock-codex-compat-pkg-user-bootstrap` stages the package
+  payload under a temporary installed root, runs the installed runtime's
+  launcher installer against a clean temporary `HOME`, installs the adapter
+  package and `omnigent-stock-codex-compat` command, verifies PATH selection,
+  version delegation, probe output, manifest `repoRoot`, and force-aware doctor
+  behavior, force-updates the managed launcher, then executes the generated
+  rollback command through `uvx --from <installed-runtime>` and removes both
+  launcher and manifest;
+- for `stock-codex-compat`, treat clean stock-Codex provisioning from the
+  pkg-installed runtime as green: `stock-codex-compat-pkg-clean-provision`
+  stages the package payload under a temporary installed root, runs the
+  installed runtime's `provision_stock_codex.py` against a clean temporary
+  `HOME`, provisions pinned stock Codex `0.142.5` into the clean user's
+  `~/.local/omnigent/codex-stock/0.142.5/codex` from an explicit file-backed
+  channel artifact, verifies SHA-256 and `sourceKind=channel`, verifies
+  `OMNIGENT_STOCK_CODEX_PATH` and Omnigent resolver selection of the
+  clean-provisioned payload, proves a second no-force provision reuses the
+  same payload, and checks the provisioned manifest/output do not reference the
+  host stock-Codex cache;
+- for `stock-codex-compat`, treat clean auth onboarding from the pkg-installed
+  runtime as green: `stock-codex-compat-pkg-clean-auth-onboarding` stages the
+  package payload under a temporary installed root, provisions pinned stock
+  Codex `0.142.5` into the clean user's cache from the installed runtime, then
+  runs the installed runtime's auth classifier with
+  `PYTHONPATH=<installed-runtime>`; it verifies the current real stock auth
+  source is available, a clean `CODEX_HOME` reports `needs-auth`, a synthetic
+  populated `auth.json` reports available, the classifier uses the
+  clean-provisioned stock Codex path, and classifier output does not leak
+  synthetic credential material;
+- for `stock-codex-compat`, treat the wrapped MCP relay-tool gate as blocked:
+  `stock-codex-compat-wrapper-relay-tool` starts the real Omnigent
+  `tool_relay.json` sidecar and advertises `omnigent_wrapper_relay_probe`, but
+  stock `codex exec` never invokes it (`0` relay executor calls) even after
+  enabling every generically enableable current feature and prompting an
+  explicit `tool_search` fallback;
+- for `stock-codex-compat`, the remaining production gates are signed/notarized
+  packaging and Gatekeeper validation, remote official stock-Codex
+  acquisition/update policy if product scope requires it, broader bridge
+  coverage such as XcodeBuildMCP tests or UI automation, and diagnostics. Raw
+  unwrapped stock Codex Electron/CLI route parity remains blocked;
+- for both modes, decide whether the temporary Homebrew/GitHub remote proof
+  should become a persistent updater/install command, and what independent
+  signature or notarization policy is required;
 - decide whether automated browser/device login UX, token freshness validation,
   or cross-machine credential packaging is product scope; or
 - broaden the Apple workflow smoke to release/readiness/review only if product
