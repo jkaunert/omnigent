@@ -81,6 +81,53 @@ def _write_codex_tarball(
     return archive_path
 
 
+def _official_archive_url(
+    *,
+    version_slug: str = "0.143.0",
+    archive_executable: str = "codex-aarch64-apple-darwin",
+) -> str:
+    return (
+        "https://github.com/openai/codex/releases/download/"
+        f"rust-v{version_slug}/{archive_executable}.tar.gz"
+    )
+
+
+def _write_official_channel_manifest(
+    path: Path,
+    *,
+    version: str = "codex-cli 0.143.0",
+    archive_sha: str = "b" * 64,
+    archive_executable: str = "codex-aarch64-apple-darwin",
+    url: str | None = None,
+) -> Path:
+    version_slug = _MOD.version_slug(version)
+    path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "kind": _MOD.CHANNEL_MANIFEST_KIND,
+                "latest": version_slug,
+                "artifacts": [
+                    {
+                        "version": version,
+                        "platform": _MOD.current_channel_platform(),
+                        "url": url
+                        or _official_archive_url(
+                            version_slug=version_slug,
+                            archive_executable=archive_executable,
+                        ),
+                        "sha256": archive_sha,
+                        "archiveFormat": "tar.gz",
+                        "archiveExecutable": archive_executable,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_provision_stock_codex_copies_source_to_version_cache(tmp_path: Path) -> None:
     source_binary = _write_codex_binary(tmp_path / "source" / "codex")
     cache_root = tmp_path / "cache"
@@ -702,3 +749,366 @@ def test_main_rejects_channel_policy_without_channel_manifest(
 
     assert rc == 1
     assert "--channel-policy requires --channel-manifest" in capsys.readouterr().err
+
+
+def test_plan_stock_codex_update_reports_stage_required_without_mutation(
+    tmp_path: Path,
+) -> None:
+    current_codex = _write_codex_binary(tmp_path / "current" / "codex")
+    cache_root = tmp_path / "cache"
+    channel_manifest = _write_official_channel_manifest(tmp_path / "channel.json")
+
+    plan = _MOD.plan_stock_codex_update(
+        cache_root=cache_root,
+        channel_manifest=channel_manifest,
+        channel_version=None,
+        channel_platform=None,
+        channel_policy=_MOD.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY,
+        expected_sha256=None,
+        current_codex=current_codex,
+        launcher_manifest=None,
+        stage_update=False,
+        force=False,
+        allow_fork_codex=False,
+        allow_remote_channel_download=False,
+    )
+
+    data = plan.as_dict()
+    assert plan.action == "stage-required"
+    assert data["mutatesFilesystem"] is False
+    assert data["target"]["state"] == "absent"
+    assert data["selected"]["versionComparison"] == "newer"
+    assert data["promotion"]["required"] is True
+    assert data["promotion"]["ready"] is False
+    assert data["promotion"]["env"] == {}
+    assert data["rollback"]["codexPath"] == str(current_codex.resolve())
+    assert not cache_root.exists()
+
+
+def test_plan_stock_codex_update_resolves_current_from_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_codex = _write_codex_binary(tmp_path / "current" / "codex")
+    monkeypatch.setenv(_MOD.OMNIGENT_STOCK_CODEX_PATH_ENV, str(current_codex))
+    channel_manifest = _write_official_channel_manifest(tmp_path / "channel.json")
+
+    plan = _MOD.plan_stock_codex_update(
+        cache_root=tmp_path / "cache",
+        channel_manifest=channel_manifest,
+        channel_version=None,
+        channel_platform=None,
+        channel_policy=_MOD.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY,
+        expected_sha256=None,
+        current_codex=None,
+        launcher_manifest=None,
+        stage_update=False,
+        force=False,
+        allow_fork_codex=False,
+        allow_remote_channel_download=False,
+    )
+
+    assert plan.current_codex_path == current_codex.resolve()
+    assert plan.rollback_codex_path == current_codex.resolve()
+
+
+def test_plan_stock_codex_update_reports_stage_ready_with_preverified_payload(
+    tmp_path: Path,
+) -> None:
+    current_codex = _write_codex_binary(tmp_path / "current" / "codex")
+    target_codex = _write_codex_binary(
+        tmp_path / "target-source" / "codex",
+        version="codex-cli 0.143.0",
+    )
+    channel_manifest = _write_official_channel_manifest(tmp_path / "channel.json")
+    artifact = _MOD.select_channel_artifact(
+        channel_manifest=channel_manifest,
+        requested_version=None,
+        requested_platform=None,
+    )
+    cache_root = tmp_path / "cache"
+    target_payload_dir = cache_root / "0.143.0"
+    _MOD.copy_codex_payload(
+        source_binary=target_codex,
+        destination_payload_dir=target_payload_dir,
+        version="codex-cli 0.143.0",
+        digest=_MOD.sha256_file(target_codex),
+        source_kind="channel",
+        manifest_source_path=artifact.source,
+        manifest_source_realpath=artifact.source,
+        channel_manifest_path=channel_manifest,
+        channel_artifact=artifact,
+    )
+    launcher_manifest = tmp_path / "launcher.json"
+    launcher_manifest.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "pinnedCodexPath": str(current_codex),
+                "env": {_MOD.OMNIGENT_STOCK_CODEX_PATH_ENV: str(current_codex)},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = _MOD.plan_stock_codex_update(
+        cache_root=cache_root,
+        channel_manifest=channel_manifest,
+        channel_version=None,
+        channel_platform=None,
+        channel_policy=_MOD.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY,
+        expected_sha256=None,
+        current_codex=None,
+        launcher_manifest=launcher_manifest,
+        stage_update=True,
+        force=False,
+        allow_fork_codex=False,
+        allow_remote_channel_download=False,
+    )
+
+    data = plan.as_dict()
+    assert plan.action == "stage-ready"
+    assert data["mutatesFilesystem"] is False
+    assert data["target"]["state"] == "ready"
+    assert data["target"]["codexPath"] == str(target_payload_dir / "codex")
+    assert data["promotion"]["required"] is True
+    assert data["promotion"]["ready"] is True
+    assert data["promotion"]["env"] == {
+        _MOD.OMNIGENT_STOCK_CODEX_PATH_ENV: str(target_payload_dir / "codex")
+    }
+    assert data["promotion"]["launcherManifest"] == {
+        "manifestPath": str(launcher_manifest),
+        "field": "pinnedCodexPath",
+        "from": str(current_codex.resolve()),
+        "to": str(target_payload_dir / "codex"),
+        "updateRequired": True,
+        "ready": True,
+    }
+    assert data["rollback"]["codexPath"] == str(current_codex.resolve())
+
+
+def test_plan_stock_codex_update_reports_up_to_date_without_promotion(
+    tmp_path: Path,
+) -> None:
+    target_codex = _write_codex_binary(
+        tmp_path / "target-source" / "codex",
+        version="codex-cli 0.143.0",
+    )
+    channel_manifest = _write_official_channel_manifest(tmp_path / "channel.json")
+    artifact = _MOD.select_channel_artifact(
+        channel_manifest=channel_manifest,
+        requested_version=None,
+        requested_platform=None,
+    )
+    cache_root = tmp_path / "cache"
+    target_payload_dir = cache_root / "0.143.0"
+    _MOD.copy_codex_payload(
+        source_binary=target_codex,
+        destination_payload_dir=target_payload_dir,
+        version="codex-cli 0.143.0",
+        digest=_MOD.sha256_file(target_codex),
+        source_kind="channel",
+        manifest_source_path=artifact.source,
+        manifest_source_realpath=artifact.source,
+        channel_manifest_path=channel_manifest,
+        channel_artifact=artifact,
+    )
+
+    plan = _MOD.plan_stock_codex_update(
+        cache_root=cache_root,
+        channel_manifest=channel_manifest,
+        channel_version=None,
+        channel_platform=None,
+        channel_policy=_MOD.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY,
+        expected_sha256=None,
+        current_codex=target_payload_dir / "codex",
+        launcher_manifest=None,
+        stage_update=False,
+        force=False,
+        allow_fork_codex=False,
+        allow_remote_channel_download=False,
+    )
+
+    data = plan.as_dict()
+    assert plan.action == "up-to-date"
+    assert data["mutatesFilesystem"] is False
+    assert data["promotion"] == {
+        "required": False,
+        "ready": True,
+        "env": {},
+        "launcherManifest": None,
+    }
+    assert data["rollback"]["codexPath"] == str((target_payload_dir / "codex").resolve())
+
+
+def test_plan_stock_codex_update_promotes_stale_launcher_manifest(
+    tmp_path: Path,
+) -> None:
+    old_codex = _write_codex_binary(tmp_path / "old" / "codex")
+    target_codex = _write_codex_binary(
+        tmp_path / "target-source" / "codex",
+        version="codex-cli 0.143.0",
+    )
+    channel_manifest = _write_official_channel_manifest(tmp_path / "channel.json")
+    artifact = _MOD.select_channel_artifact(
+        channel_manifest=channel_manifest,
+        requested_version=None,
+        requested_platform=None,
+    )
+    cache_root = tmp_path / "cache"
+    target_payload_dir = cache_root / "0.143.0"
+    _MOD.copy_codex_payload(
+        source_binary=target_codex,
+        destination_payload_dir=target_payload_dir,
+        version="codex-cli 0.143.0",
+        digest=_MOD.sha256_file(target_codex),
+        source_kind="channel",
+        manifest_source_path=artifact.source,
+        manifest_source_realpath=artifact.source,
+        channel_manifest_path=channel_manifest,
+        channel_artifact=artifact,
+    )
+    launcher_manifest = tmp_path / "launcher.json"
+    launcher_manifest.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "pinnedCodexPath": str(old_codex),
+                "env": {_MOD.OMNIGENT_STOCK_CODEX_PATH_ENV: str(old_codex)},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = _MOD.plan_stock_codex_update(
+        cache_root=cache_root,
+        channel_manifest=channel_manifest,
+        channel_version=None,
+        channel_platform=None,
+        channel_policy=_MOD.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY,
+        expected_sha256=None,
+        current_codex=target_payload_dir / "codex",
+        launcher_manifest=launcher_manifest,
+        stage_update=False,
+        force=False,
+        allow_fork_codex=False,
+        allow_remote_channel_download=False,
+    )
+
+    data = plan.as_dict()
+    assert plan.action == "stage-ready"
+    assert data["promotion"]["required"] is True
+    assert data["promotion"]["ready"] is True
+    assert data["promotion"]["launcherManifest"] == {
+        "manifestPath": str(launcher_manifest),
+        "field": "pinnedCodexPath",
+        "from": str(old_codex.resolve()),
+        "to": str(target_payload_dir / "codex"),
+        "updateRequired": True,
+        "ready": True,
+    }
+    assert data["rollback"]["codexPath"] == str((target_payload_dir / "codex").resolve())
+
+
+def test_plan_stock_codex_update_reports_force_required_for_stale_payload(
+    tmp_path: Path,
+) -> None:
+    current_codex = _write_codex_binary(tmp_path / "current" / "codex")
+    target_codex = _write_codex_binary(
+        tmp_path / "target-source" / "codex",
+        version="codex-cli 0.143.0",
+    )
+    channel_manifest = _write_official_channel_manifest(tmp_path / "channel.json")
+    artifact = _MOD.select_channel_artifact(
+        channel_manifest=channel_manifest,
+        requested_version=None,
+        requested_platform=None,
+    )
+    stale_artifact = _MOD.StockCodexChannelArtifact(
+        version=artifact.version,
+        platform=artifact.platform,
+        source=_official_archive_url(
+            version_slug="0.143.0",
+            archive_executable="codex-x86_64-apple-darwin",
+        ),
+        source_field="url",
+        sha256=artifact.sha256,
+        archive_format=artifact.archive_format,
+        archive_executable="codex-x86_64-apple-darwin",
+    )
+    cache_root = tmp_path / "cache"
+    target_payload_dir = cache_root / "0.143.0"
+    _MOD.copy_codex_payload(
+        source_binary=target_codex,
+        destination_payload_dir=target_payload_dir,
+        version="codex-cli 0.143.0",
+        digest=_MOD.sha256_file(target_codex),
+        source_kind="channel",
+        manifest_source_path=stale_artifact.source,
+        manifest_source_realpath=stale_artifact.source,
+        channel_manifest_path=channel_manifest,
+        channel_artifact=stale_artifact,
+    )
+
+    plan = _MOD.plan_stock_codex_update(
+        cache_root=cache_root,
+        channel_manifest=channel_manifest,
+        channel_version=None,
+        channel_platform=None,
+        channel_policy=_MOD.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY,
+        expected_sha256=None,
+        current_codex=current_codex,
+        launcher_manifest=None,
+        stage_update=False,
+        force=False,
+        allow_fork_codex=False,
+        allow_remote_channel_download=False,
+    )
+
+    data = plan.as_dict()
+    assert plan.action == "force-required"
+    assert data["mutatesFilesystem"] is False
+    assert data["target"]["state"] == "stale"
+    assert data["promotion"]["ready"] is False
+    assert data["promotion"]["env"] == {}
+    assert "channel artifact mismatch" in str(data["target"]["error"])
+
+
+def test_main_plan_update_requires_channel_policy(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    channel_manifest = _write_official_channel_manifest(tmp_path / "channel.json")
+
+    rc = _MOD.main(
+        [
+            "--plan-update",
+            "--channel-manifest",
+            str(channel_manifest),
+            "--json",
+        ]
+    )
+
+    assert rc == 1
+    assert "--plan-update requires --channel-policy" in capsys.readouterr().err
+
+
+def test_main_plan_update_rejects_path_only_output(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    channel_manifest = _write_official_channel_manifest(tmp_path / "channel.json")
+
+    rc = _MOD.main(
+        [
+            "--plan-update",
+            "--channel-manifest",
+            str(channel_manifest),
+            "--channel-policy",
+            _MOD.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY,
+            "--print-path",
+        ]
+    )
+
+    assert rc == 1
+    assert "supports default text output or --json only" in capsys.readouterr().err

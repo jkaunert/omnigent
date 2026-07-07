@@ -172,6 +172,7 @@ The current spike proves the first narrow adapter behavior:
 | Stock-Codex channel manifest provisioning | `replacement-ready` for a local/file-backed update-channel contract | `scripts/provision_stock_codex.py` accepts a mutually exclusive `--channel-manifest` path whose `kind: omnigent-stock-codex-channel` manifest selects an artifact by `latest`, `--channel-version`, and platform, then stages a local path or `file://` artifact, verifies SHA-256 and `codex --version`, installs it into the deterministic `codex-stock/<version>/codex` cache, and records `sourceKind: channel`, channel manifest path, and channel artifact provenance in the installed payload manifest. `uvx --from . python scripts/prove_stock_codex_replacement.py --proof stock-codex-channel` proved this through a temporary local channel manifest and cache against stock Codex `0.142.2`, source `/Users/joshuakaunert/.local/omnigent/codex-stock/0.142.2/codex`, SHA-256 `31ad44ac440cd7a6dd907c773817800db9c9a7e9c13d3bab7309319e2cd08fa9`, `sourceKind=channel`, and `OMNIGENT_STOCK_CODEX_PATH` resolver selection of the channel-provisioned payload. This proves the manifest-driven staging/update primitive for local artifacts; remote transport is covered by the separate Homebrew remote-channel gate. |
 | Stock-Codex Homebrew/GitHub remote channel provisioning | `replacement-ready` for temporary official cask metadata download and archive extraction | `scripts/provision_stock_codex.py` now supports opt-in remote channel artifacts via `--allow-remote-channel-download`, verifies the downloaded artifact SHA-256 before materialization, supports `archiveFormat: tar.gz` with a declared `archiveExecutable`, extracts only a safe matching file into a staged `codex` binary, verifies `codex --version`, installs the binary with channel provenance, and records the remote source URL in the installed payload manifest. `uvx --from . python scripts/prove_stock_codex_replacement.py --proof stock-codex-homebrew-remote-channel` read `HOMEBREW_NO_AUTO_UPDATE=1 brew info --cask --json=v2 codex`, required `homepage=https://github.com/openai/codex`, required an `https://github.com/openai/codex/releases/download/...tar.gz` URL, downloaded `https://github.com/openai/codex/releases/download/rust-v0.142.2/codex-aarch64-apple-darwin.tar.gz`, verified cask archive SHA-256 `264c15a63146176db0314c54728437c97b1121bb2617c426c06925d62b4454b3`, extracted `codex-aarch64-apple-darwin`, verified `codex-cli 0.142.2`, installed a temporary payload with binary SHA-256 `31ad44ac440cd7a6dd907c773817800db9c9a7e9c13d3bab7309319e2cd08fa9`, and proved Omnigent resolver selection through `OMNIGENT_STOCK_CODEX_PATH`. This proves Homebrew cask metadata plus OpenAI GitHub release archive download, SHA verification, safe extraction, version verification, temporary installation, and resolver selection; it does not prove independent signature/notarization policy, automatic update scheduling, persistent installation, clean-auth onboarding, cross-machine portability, or app-bundle launcher mutation. |
 | Stock-Codex production channel policy | `replacement-ready` for official-source policy, no-network reuse, and fail-closed rejection | `docs/stock-codex-production-channel-policy.md` defines the accepted production source as an `omnigent-stock-codex-channel` artifact whose URL is exactly shaped as an HTTPS `github.com/openai/codex/releases/download/<tag>/<archiveExecutable>.tar.gz` tarball with a declared archive executable and SHA-256. `scripts/provision_stock_codex.py --channel-policy official-openai-github-release` validates that policy and now verifies an existing matching channel-managed payload before attempting remote materialization. `uvx --from . python scripts/prove_stock_codex_replacement.py --proof stock-codex-production-channel-policy --codex-path <stock-codex>` proves a temp-rooted clean cache can reuse a preverified official-channel payload without remote download, reject a non-official URL before cache mutation, and resolve the reused payload through `OMNIGENT_STOCK_CODEX_PATH`. This closes the production trust-source, exact-pin reuse, and fail-closed policy gate; automatic update scheduling, persistent launcher pointer promotion, and independent archive signature policy remain separate product decisions. |
+| Stock-Codex update doctor | `replacement-ready` for official-policy dry-run planning and promotion/rollback intent | `scripts/provision_stock_codex.py --plan-update` emits a stable JSON plan for an official channel artifact without promoting persistent pointers. The mode requires `--channel-policy official-openai-github-release`, inspects the current Codex path from `--current-codex`, launcher manifest, or `OMNIGENT_STOCK_CODEX_PATH`, verifies any existing target payload before recommending it, reports `stage-required`, `force-required`, `stage-ready`, `staged`, or `up-to-date`, and records promotion plus rollback intent. Promotion material such as env updates is emitted only when `promotion.ready=true`. `uvx --from . python scripts/prove_stock_codex_replacement.py --proof stock-codex-update-doctor --codex-path ~/.local/omnigent/codex-stock/0.142.5/codex` proved missing-policy rejection, dry-run no-mutation behavior for an absent target, target-ready promotion gating, preverified target detection with launcher promotion and rollback intent, up-to-date promotion suppression, and no host-cache references in emitted plans. This closes update planning and doctor semantics; automatic scheduling, real remote acquisition execution, persistent pointer promotion, and independent archive-signature verification remain separate decisions. |
 | Clean Codex-auth onboarding boundary | `replacement-ready` for local auth-source classification and stock-home separation | `scripts/prove_stock_codex_replacement.py --proof clean-auth-onboarding` now resolves stock Codex through the managed default, prefers stock `~/.codex/auth.json` when the parent Codex app process inherits `CODEX_HOME=/Users/joshuakaunert/.codex-fork`, verifies the current stock auth source is locally available without printing credential material, then runs an isolated clean `HOME` plus clean `CODEX_HOME` and proves it reports `needs-auth` rather than falling back to the Codex fork. The same proof writes a synthetic temporary API-key-shaped `auth.json`, verifies the classifier recognizes it as available, and removes the temporary profile. The current green run used stock Codex `0.142.2`, stock auth path `/Users/joshuakaunert/.codex/auth.json`, `clean_auth_real_auth_source=stock-default-home`, `clean_auth_clean_unavailable_reason=needs-auth`, and `clean_auth_synthetic_available_reason=None`. This proves the local onboarding boundary, credential-source separation, and failure classification; it does not automate `codex login`, prove browser/device auth UX, validate token freshness against OpenAI servers, package credentials for another machine, or run a live model call under a newly authenticated clean profile. |
 | Stock Codex compatibility install/config bridge | `replacement-ready` for isolated plugin install plus Omnigent bridge configuration; not yet live route parity | `uvx --from . python scripts/prove_stock_codex_replacement.py --proof stock-codex-compat --codex-path /Users/joshuakaunert/.local/omnigent/codex-stock/0.142.2/codex` created a temporary local Codex marketplace, installed and enabled `apple-appdev-workflow@LocalAppleWorkflow` through stock Codex's own `plugin marketplace add`, `plugin add`, and `plugin list --json` commands, then injected the real Omnigent `mcp_servers.omnigent` bridge and Codex policy hooks into an isolated temporary `CODEX_HOME`. Stock Codex's own `mcp list --json` and `mcp get omnigent --json` saw `XcodeBuildMCP`, `memory`, `omnigent`, and `sosumi`; the `omnigent` server command used `python -I -m omnigent.claude_native_bridge serve-mcp --bridge-dir <temp>`. The generated `hooks.json` carried `PreToolUse`, `PostToolUse`, and `UserPromptSubmit` commands for `omnigent.codex_native_hook evaluate-policy --bridge-dir <temp>`. This proves a stock Codex CLI profile can carry the plugin plus Omnigent sidecar bridge without mutating persistent `~/.codex`, the stock Codex app, or the Codex fork. It does not prove a live stock Codex Electron/CLI session emits deterministic route evidence before model output, executes adapter tools through that sidecar, pins the stock binary from the stock entrypoint, or preserves diagnostics under a real user turn. |
 | Stock Codex compatibility live route parity | `blocked` at stock-entrypoint route injection | `uvx --from . python scripts/prove_stock_codex_replacement.py --proof stock-codex-compat-live --codex-path /Users/joshuakaunert/.local/omnigent/codex-stock/0.142.2/codex --live-proof-timeout 180` reused the isolated compatibility profile, symlinked stock `~/.codex/auth.json` into the temporary `CODEX_HOME`, launched stock Codex `exec --json --dangerously-bypass-hook-trust`, and completed a live model turn from the stock entrypoint. The proof first caught a prompt-too-loose attempt where the model tried to inspect the workspace, then tightened the no-tool sentinel prompt. The final run returned the exact model sentinel `STOCK_CODEX_COMPAT_LIVE_OK`, proving the live stock-entrypoint profile can authenticate and run, but failed because the first agent message was only that sentinel and did not start with `Routing: orchestrator-led`. Diagnosis: the current Omnigent Codex policy hook can block `UserPromptSubmit`, but it does not rewrite or prepend prompt context for a stock Codex entrypoint. This preserves the primary Omnigent runtime as the proven route-before-model path and shows that stock-Codex compatibility needs a new route-injection surface, a supported stock hook/context mechanism, or an explicit compatibility wrapper before it can claim deterministic route parity. |
@@ -311,8 +312,8 @@ auth onboarding from the pkg-installed runtime, and signed/notarized `.pkg`
 distribution.
 Persistent app-bundle installation, LaunchServices/Dock/Finder default
 behavior, persistent update scheduling, remote official stock-Codex
-acquisition/update policy, automated browser/device login UX, and broader
-UI/device bridge coverage remain separate decisions.
+acquisition execution, automated browser/device login UX, and broader UI/device
+bridge coverage remain separate decisions.
 
 ## Proof Commands
 
@@ -626,6 +627,24 @@ Homebrew-cask-plus-OpenAI-GitHub-release trust path, not independent
 signature/notarization policy, automatic update scheduling, persistent
 installation, clean-auth onboarding, cross-machine portability, or app-bundle
 launcher mutation.
+
+Stock-Codex update doctor:
+
+```bash
+uvx --from . python scripts/prove_stock_codex_replacement.py \
+  --proof stock-codex-update-doctor \
+  --codex-path ~/.local/omnigent/codex-stock/0.142.5/codex
+```
+
+The `stock-codex-update-doctor` proof fails closed if `--apple-bundle` or
+`--allow-fork-codex` are supplied. It uses the real current stock Codex metadata,
+creates an official-policy-shaped synthetic newer artifact in a clean temporary
+home, and proves the update planner requires `--channel-policy`, keeps dry-run
+planning non-mutating, recognizes preverified targets, emits launcher promotion
+and rollback intent only after target readiness, and suppresses promotion when
+current already equals the selected target. It does not schedule updates,
+promote persistent launcher pointers, perform a real remote acquisition, or
+verify an independent archive signature.
 
 Clean Codex-auth onboarding boundary:
 
@@ -1350,6 +1369,21 @@ This closes production source-policy and no-network reuse. It does not add
 automatic update scheduling, persistent launcher pointer promotion, or an
 independent archive signature policy.
 
+Current stock-Codex update doctor status on 2026-07-07:
+`--proof stock-codex-update-doctor --codex-path
+~/.local/omnigent/codex-stock/0.142.5/codex` is green. The proof uses the real
+pinned stock Codex `0.142.5` metadata as the current payload, creates an
+official-policy-shaped synthetic newer release artifact in a clean temporary
+home, and runs `provision_stock_codex.py --plan-update`. It proves the planner
+fails closed without `--channel-policy`, reports `stage-required` without cache
+mutation when the selected target is absent, withholds promotion material until
+`promotion.ready=true`, reports `stage-ready` for a preverified target with
+launcher promotion and rollback intent, reports `up-to-date` with promotion
+suppressed when current equals target, and keeps the host stock-Codex cache out
+of emitted plans. This closes update planning and doctor semantics, not
+automatic scheduling, real remote acquisition execution, persistent pointer
+promotion, or independent archive-signature verification.
+
 Current isolated pinned launcher activation status on 2026-06-28: `--proof
 launcher-activation` passed without persistent filesystem or launcher mutation.
 The run used baseline `PATH` lookup `/opt/homebrew/bin/codex`, realpath
@@ -1679,11 +1713,14 @@ Run these in order unless a later gate becomes cheaper due to new evidence.
      acceptance. The production stock-Codex channel policy gate is green for
      official OpenAI GitHub release source validation, exact-pin reuse before
      network access, non-official URL rejection, and resolver selection. The
-     remaining carry-parity gates now focus on broader bridge coverage such as
-     screenshot, snapshot, gesture, or device execution through the wrapper file
-     bridge if product scope requires it, plus updater scheduling, persistent
-     pointer promotion, or independent archive signature policy if product scope
-     requires them.
+     stock-Codex update doctor gate is green for fail-closed policy
+     requirement, dry-run no-mutation behavior, preverified target detection,
+     target-ready promotion material, launcher promotion intent, rollback
+     intent, and up-to-date promotion suppression. The remaining carry-parity
+     gates now focus on broader bridge coverage such as screenshot, snapshot,
+     gesture, or device execution through the wrapper file bridge if product
+     scope requires it, plus updater scheduling, persistent pointer promotion,
+     or independent archive signature policy if product scope requires them.
      If no, raw stock Codex Electron/CLI route parity remains blocked until
      stock Codex exposes a pre-model prompt/context injection surface.
    - Minimum live acceptance should include deterministic route evidence before

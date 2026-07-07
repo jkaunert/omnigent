@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import platform
 import shutil
 import stat
@@ -122,6 +123,109 @@ class ProvisionedStockCodex:
             ),
             "channelArtifact": self.channel_artifact,
             "env": {OMNIGENT_STOCK_CODEX_PATH_ENV: str(self.codex_path)},
+        }
+
+    def as_json(self) -> str:
+        """Return a stable JSON summary for automation."""
+        return json.dumps(self.as_dict(), indent=2, sort_keys=True)
+
+
+@dataclass(frozen=True)
+class StockCodexUpdatePlan:
+    """Dry-run or stage-only update plan for a stock Codex payload."""
+
+    action: str
+    mutates_filesystem: bool
+    cache_root: Path
+    channel_manifest_path: Path
+    channel_policy: str
+    current_codex_path: Path | None
+    current_version: str | None
+    current_version_slug: str | None
+    current_sha256: str | None
+    selected_version: str
+    selected_version_slug: str
+    selected_artifact: StockCodexChannelArtifact
+    version_comparison: str
+    target_payload_dir: Path
+    target_codex_path: Path
+    target_state: str
+    target_error: str | None
+    staged_payload: ProvisionedStockCodex | None
+    launcher_manifest_path: Path | None
+    launcher_current_pinned_codex_path: Path | None
+    promotion_required: bool
+    rollback_codex_path: Path | None
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a stable JSON-ready plan summary."""
+        promotion_ready = self.target_state == "ready"
+        promotion_env = (
+            {OMNIGENT_STOCK_CODEX_PATH_ENV: str(self.target_codex_path)}
+            if self.promotion_required and promotion_ready
+            else {}
+        )
+        launcher_plan: dict[str, object] | None = None
+        if self.launcher_manifest_path is not None:
+            launcher_plan = {
+                "manifestPath": str(self.launcher_manifest_path),
+                "field": "pinnedCodexPath",
+                "from": (
+                    str(self.launcher_current_pinned_codex_path)
+                    if self.launcher_current_pinned_codex_path is not None
+                    else None
+                ),
+                "to": str(self.target_codex_path),
+                "updateRequired": self.promotion_required,
+                "ready": promotion_ready,
+            }
+        rollback = {
+            "codexPath": str(self.rollback_codex_path)
+            if self.rollback_codex_path is not None
+            else None,
+            "launcherManifestField": "pinnedCodexPath"
+            if self.launcher_manifest_path is not None
+            else None,
+            "payloadRetention": "versioned-cache-keeps-previous-payload",
+        }
+        return {
+            "kind": "omnigent-stock-codex-update-plan",
+            "schemaVersion": 1,
+            "action": self.action,
+            "mutatesFilesystem": self.mutates_filesystem,
+            "cacheRoot": str(self.cache_root),
+            "channelManifestPath": str(self.channel_manifest_path),
+            "channelPolicy": self.channel_policy,
+            "current": {
+                "codexPath": str(self.current_codex_path)
+                if self.current_codex_path is not None
+                else None,
+                "version": self.current_version,
+                "versionSlug": self.current_version_slug,
+                "sha256": self.current_sha256,
+            },
+            "selected": {
+                "version": self.selected_version,
+                "versionSlug": self.selected_version_slug,
+                "artifact": self.selected_artifact.as_manifest_dict(),
+                "versionComparison": self.version_comparison,
+            },
+            "target": {
+                "payloadDir": str(self.target_payload_dir),
+                "codexPath": str(self.target_codex_path),
+                "state": self.target_state,
+                "error": self.target_error,
+            },
+            "stagedPayload": (
+                self.staged_payload.as_dict() if self.staged_payload is not None else None
+            ),
+            "promotion": {
+                "required": self.promotion_required,
+                "ready": promotion_ready,
+                "env": promotion_env,
+                "launcherManifest": launcher_plan,
+            },
+            "rollback": rollback,
         }
 
     def as_json(self) -> str:
@@ -525,6 +629,220 @@ def verify_channel_payload_for_artifact(
     return provisioned
 
 
+def _parse_numeric_version_slug(slug: str) -> tuple[int, ...] | None:
+    """Parse simple numeric Codex version slugs such as ``0.143.0``."""
+    parts = slug.split(".")
+    if not parts or any(not part.isdigit() for part in parts):
+        return None
+    return tuple(int(part) for part in parts)
+
+
+def _version_comparison(current_slug: str | None, selected_slug: str) -> str:
+    """Compare current and selected version slugs for update planning."""
+    if current_slug is None:
+        return "unknown"
+    current_version = _parse_numeric_version_slug(current_slug)
+    selected_version = _parse_numeric_version_slug(selected_slug)
+    if current_version is None or selected_version is None:
+        return "same" if current_slug == selected_slug else "unknown"
+    if selected_version > current_version:
+        return "newer"
+    if selected_version < current_version:
+        return "older"
+    return "same"
+
+
+def _read_json_object(path: Path) -> dict[str, object]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ProvisioningError(f"Could not read JSON file: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ProvisioningError(f"JSON file is invalid: {path}") from exc
+    if not isinstance(data, dict):
+        raise ProvisioningError(f"JSON file is not an object: {path}")
+    return data
+
+
+def _launcher_manifest_pinned_codex_path(
+    launcher_manifest: Path | None,
+) -> Path | None:
+    if launcher_manifest is None:
+        return None
+    launcher_manifest = launcher_manifest.expanduser()
+    if not launcher_manifest.exists():
+        return None
+    manifest = _read_json_object(launcher_manifest)
+    pinned = manifest.get("pinnedCodexPath")
+    if isinstance(pinned, str) and pinned:
+        return Path(pinned).expanduser().resolve()
+    env = manifest.get("env")
+    if isinstance(env, dict):
+        env_pinned = env.get(OMNIGENT_STOCK_CODEX_PATH_ENV)
+        if isinstance(env_pinned, str) and env_pinned:
+            return Path(env_pinned).expanduser().resolve()
+    return None
+
+
+def _resolve_current_codex_for_plan(
+    *,
+    current_codex: Path | None,
+    launcher_manifest: Path | None,
+) -> Path | None:
+    if current_codex is not None:
+        return current_codex.expanduser().resolve()
+    launcher_pinned = _launcher_manifest_pinned_codex_path(launcher_manifest)
+    if launcher_pinned is not None:
+        return launcher_pinned
+    env_pinned = os.environ.get(OMNIGENT_STOCK_CODEX_PATH_ENV)
+    if env_pinned:
+        return Path(env_pinned).expanduser().resolve()
+    return None
+
+
+def _inspect_current_codex(
+    current_codex: Path | None,
+) -> tuple[str | None, str | None, str | None]:
+    if current_codex is None:
+        return None, None, None
+    if not current_codex.is_file():
+        raise ProvisioningError(f"Current Codex path does not exist: {current_codex}")
+    if not _is_executable(current_codex):
+        raise ProvisioningError(f"Current Codex path is not executable: {current_codex}")
+    current_version = codex_version(current_codex)
+    return current_version, version_slug(current_version), sha256_file(current_codex)
+
+
+def plan_stock_codex_update(
+    *,
+    cache_root: Path,
+    channel_manifest: Path,
+    channel_version: str | None,
+    channel_platform: str | None,
+    channel_policy: str,
+    expected_sha256: str | None,
+    current_codex: Path | None,
+    launcher_manifest: Path | None,
+    stage_update: bool,
+    force: bool,
+    allow_fork_codex: bool,
+    allow_remote_channel_download: bool,
+) -> StockCodexUpdatePlan:
+    """Plan or stage a stock-Codex update without promoting persistent pointers."""
+    cache_root = cache_root.expanduser()
+    channel_manifest = channel_manifest.expanduser()
+    launcher_manifest = launcher_manifest.expanduser() if launcher_manifest is not None else None
+    artifact = select_channel_artifact(
+        channel_manifest=channel_manifest,
+        requested_version=channel_version,
+        requested_platform=channel_platform,
+    )
+    validate_channel_artifact_policy(artifact, policy_name=channel_policy)
+    if expected_sha256 is not None and artifact.sha256.lower() != expected_sha256.lower():
+        raise ProvisioningError(
+            f"Channel artifact sha256 mismatch: expected={expected_sha256} "
+            f"actual={artifact.sha256}"
+        )
+
+    current_path = _resolve_current_codex_for_plan(
+        current_codex=current_codex,
+        launcher_manifest=launcher_manifest,
+    )
+    current_version, current_slug, current_sha = _inspect_current_codex(current_path)
+    target_payload_dir = payload_dir_for(cache_root, artifact.version)
+    target_codex_path = target_payload_dir / "codex"
+    target_state = "absent"
+    target_error: str | None = None
+    target_ready = False
+    staged_mutation = False
+    if target_payload_dir.exists():
+        try:
+            verify_channel_payload_for_artifact(target_payload_dir, artifact=artifact)
+        except ProvisioningError as exc:
+            target_state = "stale"
+            target_error = str(exc)
+        else:
+            target_state = "ready"
+            target_ready = True
+
+    staged_payload: ProvisionedStockCodex | None = None
+    if stage_update and (force or not target_ready):
+        staged_payload = provision_stock_codex_from_channel(
+            cache_root=cache_root,
+            channel_manifest=channel_manifest,
+            channel_version=channel_version,
+            channel_platform=channel_platform,
+            expected_sha256=expected_sha256,
+            force=force,
+            allow_fork_codex=allow_fork_codex,
+            allow_remote_channel_download=allow_remote_channel_download,
+            channel_policy=channel_policy,
+        )
+        staged_mutation = True
+        target_payload_dir = staged_payload.payload_dir
+        target_codex_path = staged_payload.codex_path
+        target_state = "ready"
+        target_error = None
+        target_ready = True
+    elif stage_update and target_ready:
+        staged_payload = verify_channel_payload_for_artifact(
+            target_payload_dir,
+            artifact=artifact,
+        )
+
+    version_comparison = _version_comparison(current_slug, artifact.version_slug)
+    same_current_target = (
+        current_path is not None
+        and target_ready
+        and current_path.expanduser().resolve() == target_codex_path.expanduser().resolve()
+    )
+    launcher_pinned = _launcher_manifest_pinned_codex_path(launcher_manifest)
+    launcher_matches_target = (
+        launcher_manifest is None
+        or (
+            launcher_pinned is not None
+            and target_ready
+            and launcher_pinned.expanduser().resolve() == target_codex_path.expanduser().resolve()
+        )
+    )
+    promotion_required = not (same_current_target and launcher_matches_target)
+    if not promotion_required:
+        action = "up-to-date"
+    elif target_state == "stale" and not force:
+        action = "force-required"
+    elif staged_mutation:
+        action = "staged"
+    elif target_ready:
+        action = "stage-ready"
+    else:
+        action = "stage-required"
+
+    return StockCodexUpdatePlan(
+        action=action,
+        mutates_filesystem=staged_mutation,
+        cache_root=cache_root,
+        channel_manifest_path=channel_manifest,
+        channel_policy=channel_policy,
+        current_codex_path=current_path,
+        current_version=current_version,
+        current_version_slug=current_slug,
+        current_sha256=current_sha,
+        selected_version=artifact.version,
+        selected_version_slug=artifact.version_slug,
+        selected_artifact=artifact,
+        version_comparison=version_comparison,
+        target_payload_dir=target_payload_dir,
+        target_codex_path=target_codex_path,
+        target_state=target_state,
+        target_error=target_error,
+        staged_payload=staged_payload,
+        launcher_manifest_path=launcher_manifest,
+        launcher_current_pinned_codex_path=launcher_pinned,
+        promotion_required=promotion_required,
+        rollback_codex_path=current_path,
+    )
+
+
 def select_channel_artifact(
     *,
     channel_manifest: Path,
@@ -909,6 +1227,40 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             f"Current policy: {OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY}."
         ),
     )
+    parser.add_argument(
+        "--plan-update",
+        action="store_true",
+        help=(
+            "Emit a dry-run update plan for a channel artifact. Requires "
+            "--channel-manifest and --channel-policy."
+        ),
+    )
+    parser.add_argument(
+        "--current-codex",
+        type=Path,
+        default=None,
+        help=(
+            "Current stock Codex executable for --plan-update. Defaults to "
+            "the launcher manifest pin or OMNIGENT_STOCK_CODEX_PATH."
+        ),
+    )
+    parser.add_argument(
+        "--launcher-manifest",
+        type=Path,
+        default=None,
+        help=(
+            "Optional compatibility launcher manifest for --plan-update. The "
+            "planner reads pinnedCodexPath but never edits the manifest."
+        ),
+    )
+    parser.add_argument(
+        "--stage-update",
+        action="store_true",
+        help=(
+            "With --plan-update, stage the selected channel payload into the "
+            "versioned cache but do not promote launcher or environment pointers."
+        ),
+    )
     output = parser.add_mutually_exclusive_group()
     output.add_argument(
         "--print-path",
@@ -927,6 +1279,49 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
+        if args.plan_update:
+            if args.channel_manifest is None:
+                raise ProvisioningError("--plan-update requires --channel-manifest")
+            if args.channel_policy is None:
+                raise ProvisioningError("--plan-update requires --channel-policy")
+            if args.print_path or args.print_shell_env:
+                raise ProvisioningError(
+                    "--plan-update supports default text output or --json only"
+                )
+            plan = plan_stock_codex_update(
+                cache_root=args.cache_root,
+                channel_manifest=args.channel_manifest,
+                channel_version=args.channel_version,
+                channel_platform=args.channel_platform,
+                channel_policy=args.channel_policy,
+                expected_sha256=args.expected_sha256,
+                current_codex=args.current_codex,
+                launcher_manifest=args.launcher_manifest,
+                stage_update=args.stage_update,
+                force=args.force,
+                allow_fork_codex=args.allow_fork_codex,
+                allow_remote_channel_download=args.allow_remote_channel_download,
+            )
+            if args.json:
+                print(plan.as_json())
+            else:
+                print(f"stock_codex_update_action={plan.action}")
+                print(f"stock_codex_update_mutates_filesystem={plan.mutates_filesystem}")
+                print(f"stock_codex_update_current_path={plan.current_codex_path}")
+                print(f"stock_codex_update_current_version={plan.current_version}")
+                print(f"stock_codex_update_selected_version={plan.selected_version}")
+                print(f"stock_codex_update_version_comparison={plan.version_comparison}")
+                print(f"stock_codex_update_target_state={plan.target_state}")
+                print(f"stock_codex_update_target_path={plan.target_codex_path}")
+                print(f"stock_codex_update_promotion_required={plan.promotion_required}")
+                print(f"stock_codex_update_rollback_path={plan.rollback_codex_path}")
+            return 0
+        if args.current_codex is not None:
+            raise ProvisioningError("--current-codex requires --plan-update")
+        if args.launcher_manifest is not None:
+            raise ProvisioningError("--launcher-manifest requires --plan-update")
+        if args.stage_update:
+            raise ProvisioningError("--stage-update requires --plan-update")
         if args.channel_manifest is not None:
             provisioned = provision_stock_codex_from_channel(
                 cache_root=args.cache_root,

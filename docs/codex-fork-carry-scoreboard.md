@@ -83,6 +83,12 @@ GitHub release tarballs with declared archive executables, verifies matching
 channel-managed payloads before any remote download is allowed, rejects
 non-official URLs before cache mutation, and proves resolver selection from a
 clean temporary cache.
+The `stock-codex-update-doctor` proof is also green: it requires that same
+production channel policy for `--plan-update`, reports `stage-required` without
+cache mutation when a selected target is absent, withholds promotion material
+until `promotion.ready=true`, reports `stage-ready` with launcher promotion and
+rollback intent for a preverified target, suppresses promotion for `up-to-date`,
+and keeps host cache paths out of emitted update plans.
 The existing `/opt/homebrew/bin/codex` Omnigent-managed launcher now delegates
 to that `0.142.5` payload while preserving the original Homebrew backup path.
 The `clean-auth-onboarding` proof remains green for the local auth boundary:
@@ -284,11 +290,14 @@ The next gates should split by product mode:
   validation, and Gatekeeper acceptance. The production stock-Codex channel
   policy gate is green for official-source validation, clean-cache reuse before
   network access, fail-closed non-official URL rejection, and resolver selection.
-  Remaining production choices are updater scheduling, persistent launcher
-  pointer promotion, independent archive signature policy, and broader UI/device
-  bridge coverage such as screenshot, snapshot, gesture, or device execution if
-  product scope requires them. Raw unwrapped stock Codex Electron/CLI route
-  parity remains blocked;
+  The update doctor gate is green for fail-closed policy requirement, dry-run
+  no-mutation behavior, preverified target detection, launcher promotion intent,
+  target-ready promotion material, rollback intent, and up-to-date promotion
+  suppression. Remaining production choices are updater scheduling, persistent
+  launcher pointer promotion, independent archive signature policy, and broader
+  UI/device bridge coverage such as screenshot, snapshot, gesture, or device
+  execution if product scope requires them. Raw unwrapped stock Codex
+  Electron/CLI route parity remains blocked;
 - decide whether automated browser/device login UX, token freshness validation,
   or cross-machine credential packaging is product scope; or
 - broaden the Apple workflow smoke to release/readiness/review only if product

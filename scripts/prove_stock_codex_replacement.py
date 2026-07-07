@@ -543,6 +543,47 @@ class StockCodexProductionChannelPolicyProof:
 
 
 @dataclass(frozen=True)
+class StockCodexUpdateDoctorProof:
+    """Non-mutating proof result for stock-Codex update planning."""
+
+    source_codex_path: Path
+    source_codex_realpath: Path
+    source_codex_version: str
+    source_codex_sha256: str
+    current_codex_path: Path
+    current_codex_version: str
+    current_codex_sha256: str
+    policy_name: str
+    official_channel_manifest_path: Path
+    official_archive_url: str
+    official_archive_sha256: str
+    archive_executable: str
+    selected_version: str
+    selected_binary_sha256: str
+    clean_home: Path
+    cache_root: Path
+    launcher_manifest_path: Path
+    target_payload_dir: Path
+    target_codex_path: Path
+    dry_run_action: str
+    dry_run_target_state: str
+    dry_run_mutates_filesystem: bool
+    dry_run_cache_mutated: bool
+    ready_action: str
+    ready_target_state: str
+    ready_mutates_filesystem: bool
+    ready_promotion_required: bool
+    ready_launcher_update_required: bool
+    ready_rollback_codex_path: Path
+    ready_version_comparison: str
+    up_to_date_action: str
+    up_to_date_promotion_required: bool
+    missing_policy_error: str
+    host_cache_root: Path
+    host_cache_referenced_by_plans: bool
+
+
+@dataclass(frozen=True)
 class CleanAuthOnboardingProof:
     """Non-mutating proof result for clean Codex auth onboarding boundaries."""
 
@@ -2341,6 +2382,544 @@ def print_stock_codex_production_channel_policy_proof(
     print(
         "ASSERTION: this proof is temp-rooted, preserves the host stock Codex "
         "cache, and relies on the existing remote-channel proof for live download transport"
+    )
+
+
+def _next_patch_version_slug(version_slug: str) -> str:
+    """Return a synthetic next patch version for deterministic update proofs."""
+    parts = version_slug.split(".")
+    if len(parts) < 2 or any(not part.isdigit() for part in parts):
+        return "0.143.0"
+    numeric = [int(part) for part in parts]
+    numeric[-1] += 1
+    return ".".join(str(part) for part in numeric)
+
+
+def _write_synthetic_codex_binary(path: Path, *, version: str) -> None:
+    """Write a tiny executable that behaves like ``codex --version``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"""#!/bin/sh
+if [ "${{1:-}}" = "--version" ]; then
+  cat <<'EOF'
+{version}
+EOF
+  exit 0
+fi
+printf 'synthetic stock codex\\n'
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _json_object(data: dict[str, Any], key: str, *, label: str) -> dict[str, Any]:
+    value = data.get(key)
+    if not isinstance(value, dict):
+        raise SystemExit(f"{label} missing object field {key!r}: {data!r}")
+    return value
+
+
+def _json_bool(data: dict[str, Any], key: str, *, label: str) -> bool:
+    value = data.get(key)
+    if not isinstance(value, bool):
+        raise SystemExit(f"{label} missing bool field {key!r}: {data!r}")
+    return value
+
+
+def run_stock_codex_update_doctor_proof(
+    source_codex_path: Path,
+) -> StockCodexUpdateDoctorProof:
+    """Prove update planning, dry-run safety, and promotion/rollback intent."""
+    source_codex_realpath = source_codex_path.expanduser().resolve()
+    source_digest = sha256_file(source_codex_realpath)
+    source_version = codex_version(source_codex_realpath)
+    current_slug = _codex_version_dir_name(source_version)
+    selected_slug = _next_patch_version_slug(current_slug)
+    selected_version = f"codex-cli {selected_slug}"
+    repo_root = Path(__file__).resolve().parents[1]
+    provisioner_script = repo_root / "scripts" / "provision_stock_codex.py"
+    provisioner = _load_stock_codex_provisioner()
+    policy_name = provisioner.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY
+    archive_executable = _stock_codex_archive_executable_name()
+    official_archive_url = (
+        "https://github.com/openai/codex/releases/download/"
+        f"rust-v{selected_slug}/{archive_executable}.tar.gz"
+    )
+    host_cache_root = (
+        Path.home() / ".local" / "omnigent" / "codex-stock"
+    ).expanduser().resolve()
+
+    with tempfile.TemporaryDirectory(prefix="omnigent-stock-codex-update-doctor-") as temp_root:
+        root = Path(temp_root).resolve()
+        clean_home = root / "home"
+        clean_tmp = root / "tmp"
+        clean_home.mkdir(mode=0o700)
+        clean_tmp.mkdir(mode=0o700)
+        cache_root = clean_home / ".local" / "omnigent" / "codex-stock"
+        dry_run_cache_root = clean_home / ".local" / "omnigent" / "codex-stock-dry-run"
+
+        current_codex_path = root / "current" / "codex"
+        current_codex_path.parent.mkdir(parents=True)
+        shutil.copy2(source_codex_realpath, current_codex_path)
+        current_codex_path.chmod(0o755)
+        current_codex_version = codex_version(current_codex_path)
+        current_codex_sha = sha256_file(current_codex_path)
+        if current_codex_version != source_version or current_codex_sha != source_digest:
+            raise SystemExit(
+                "Update doctor temp current Codex copy changed identity.\n"
+                f"source_version={source_version!r}\ncurrent_version={current_codex_version!r}\n"
+                f"source_sha={source_digest}\ncurrent_sha={current_codex_sha}"
+            )
+
+        selected_binary = root / "selected" / archive_executable
+        _write_synthetic_codex_binary(selected_binary, version=selected_version)
+        selected_binary_sha = sha256_file(selected_binary)
+        archive_path = root / "official-update-archive-fixture.tar.gz"
+        with tarfile.open(archive_path, "w:gz") as archive:
+            archive.add(selected_binary, arcname=archive_executable)
+        archive_sha = sha256_file(archive_path)
+
+        channel_manifest_path = root / "official-update-channel.json"
+        channel_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-channel",
+                    "latest": selected_slug,
+                    "artifacts": [
+                        {
+                            "version": selected_version,
+                            "platform": provisioner.current_channel_platform(),
+                            "url": official_archive_url,
+                            "sha256": archive_sha,
+                            "archiveFormat": "tar.gz",
+                            "archiveExecutable": archive_executable,
+                        }
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        artifact = provisioner.select_channel_artifact(
+            channel_manifest=channel_manifest_path,
+            requested_version=None,
+            requested_platform=None,
+        )
+        target_payload_dir = cache_root / selected_slug
+        provisioner.copy_codex_payload(
+            source_binary=selected_binary,
+            destination_payload_dir=target_payload_dir,
+            version=selected_version,
+            digest=selected_binary_sha,
+            source_kind="channel",
+            manifest_source_path=official_archive_url,
+            manifest_source_realpath=official_archive_url,
+            channel_manifest_path=channel_manifest_path,
+            channel_artifact=artifact,
+        )
+        target_codex_path = target_payload_dir / "codex"
+
+        launcher_manifest_path = root / "stock-codex-compat-launcher.json"
+        launcher_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-compat-launcher",
+                    "pinnedCodexPath": str(current_codex_path),
+                    "env": {OMNIGENT_STOCK_CODEX_PATH_ENV: str(current_codex_path)},
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        env = os.environ.copy()
+        env.update({"HOME": str(clean_home), "TMPDIR": str(clean_tmp)})
+        env.pop("CODEX_HOME", None)
+        env.pop(OMNIGENT_STOCK_CODEX_PATH_ENV, None)
+        common_command = [
+            sys.executable,
+            str(provisioner_script),
+            "--plan-update",
+            "--channel-manifest",
+            str(channel_manifest_path),
+            "--channel-policy",
+            policy_name,
+            "--json",
+        ]
+
+        dry_run_plan = _run_stock_codex_provisioner_json(
+            [
+                *common_command,
+                "--cache-root",
+                str(dry_run_cache_root),
+                "--current-codex",
+                str(current_codex_path),
+                "--launcher-manifest",
+                str(launcher_manifest_path),
+            ],
+            env=env,
+            cwd=repo_root,
+            failure_label="Stock Codex update doctor dry-run plan",
+        )
+        dry_run_action = _json_string(dry_run_plan, "action")
+        dry_run_target = _json_object(
+            dry_run_plan,
+            "target",
+            label="Stock Codex update doctor dry-run plan",
+        )
+        dry_run_target_state = _json_string(dry_run_target, "state")
+        dry_run_mutates = _json_bool(
+            dry_run_plan,
+            "mutatesFilesystem",
+            label="Stock Codex update doctor dry-run plan",
+        )
+        dry_run_promotion = _json_object(
+            dry_run_plan,
+            "promotion",
+            label="Stock Codex update doctor dry-run plan",
+        )
+        dry_run_promotion_ready = _json_bool(
+            dry_run_promotion,
+            "ready",
+            label="Stock Codex update doctor dry-run promotion",
+        )
+        dry_run_promotion_env = _json_object(
+            dry_run_promotion,
+            "env",
+            label="Stock Codex update doctor dry-run promotion",
+        )
+        dry_run_cache_mutated = dry_run_cache_root.exists() and any(
+            dry_run_cache_root.rglob("*")
+        )
+        if dry_run_action != "stage-required" or dry_run_target_state != "absent":
+            raise SystemExit(
+                "Update doctor dry-run did not report absent target staging requirement.\n"
+                f"plan={dry_run_plan!r}"
+            )
+        if dry_run_mutates or dry_run_cache_mutated:
+            raise SystemExit(
+                "Update doctor dry-run mutated filesystem state.\n"
+                f"mutates={dry_run_mutates}\ncache_mutated={dry_run_cache_mutated}"
+            )
+        if dry_run_promotion_ready or dry_run_promotion_env:
+            raise SystemExit(
+                "Update doctor dry-run exposed promotion material before target readiness.\n"
+                f"plan={dry_run_plan!r}"
+            )
+
+        ready_plan = _run_stock_codex_provisioner_json(
+            [
+                *common_command,
+                "--cache-root",
+                str(cache_root),
+                "--current-codex",
+                str(current_codex_path),
+                "--launcher-manifest",
+                str(launcher_manifest_path),
+            ],
+            env=env,
+            cwd=repo_root,
+            failure_label="Stock Codex update doctor ready plan",
+        )
+        ready_action = _json_string(ready_plan, "action")
+        ready_target = _json_object(
+            ready_plan,
+            "target",
+            label="Stock Codex update doctor ready plan",
+        )
+        ready_target_state = _json_string(ready_target, "state")
+        ready_target_path = Path(_json_string(ready_target, "codexPath")).resolve()
+        ready_mutates = _json_bool(
+            ready_plan,
+            "mutatesFilesystem",
+            label="Stock Codex update doctor ready plan",
+        )
+        ready_promotion = _json_object(
+            ready_plan,
+            "promotion",
+            label="Stock Codex update doctor ready plan",
+        )
+        ready_promotion_required = _json_bool(
+            ready_promotion,
+            "required",
+            label="Stock Codex update doctor ready promotion",
+        )
+        ready_promotion_ready = _json_bool(
+            ready_promotion,
+            "ready",
+            label="Stock Codex update doctor ready promotion",
+        )
+        ready_promotion_env = _json_object(
+            ready_promotion,
+            "env",
+            label="Stock Codex update doctor ready promotion",
+        )
+        ready_launcher = _json_object(
+            ready_promotion,
+            "launcherManifest",
+            label="Stock Codex update doctor ready promotion",
+        )
+        ready_launcher_update_required = _json_bool(
+            ready_launcher,
+            "updateRequired",
+            label="Stock Codex update doctor ready launcher promotion",
+        )
+        ready_rollback = _json_object(
+            ready_plan,
+            "rollback",
+            label="Stock Codex update doctor ready plan",
+        )
+        ready_rollback_codex_path = Path(_json_string(ready_rollback, "codexPath")).resolve()
+        ready_selected = _json_object(
+            ready_plan,
+            "selected",
+            label="Stock Codex update doctor ready plan",
+        )
+        ready_version_comparison = _json_string(ready_selected, "versionComparison")
+        if ready_action != "stage-ready" or ready_target_state != "ready":
+            raise SystemExit(
+                "Update doctor did not report preverified target as stage-ready.\n"
+                f"plan={ready_plan!r}"
+            )
+        if ready_target_path != target_codex_path.resolve():
+            raise SystemExit(
+                "Update doctor selected the wrong target payload.\n"
+                f"expected={target_codex_path}\nactual={ready_target_path}"
+            )
+        if ready_mutates:
+            raise SystemExit(f"Update doctor ready plan claimed mutation: {ready_plan!r}")
+        if not ready_promotion_required or not ready_launcher_update_required:
+            raise SystemExit(
+                "Update doctor did not report required launcher promotion.\n"
+                f"plan={ready_plan!r}"
+            )
+        if not ready_promotion_ready or ready_promotion_env.get(
+            OMNIGENT_STOCK_CODEX_PATH_ENV
+        ) != str(target_codex_path):
+            raise SystemExit(
+                "Update doctor ready plan did not expose target-ready promotion env.\n"
+                f"plan={ready_plan!r}"
+            )
+        if ready_rollback_codex_path != current_codex_path.resolve():
+            raise SystemExit(
+                "Update doctor rollback path did not preserve current Codex.\n"
+                f"expected={current_codex_path}\nactual={ready_rollback_codex_path}"
+            )
+        if ready_version_comparison != "newer":
+            raise SystemExit(
+                "Update doctor did not classify the selected payload as newer.\n"
+                f"plan={ready_plan!r}"
+            )
+
+        up_to_date_plan = _run_stock_codex_provisioner_json(
+            [
+                *common_command,
+                "--cache-root",
+                str(cache_root),
+                "--current-codex",
+                str(target_codex_path),
+            ],
+            env=env,
+            cwd=repo_root,
+            failure_label="Stock Codex update doctor up-to-date plan",
+        )
+        up_to_date_action = _json_string(up_to_date_plan, "action")
+        up_to_date_promotion = _json_object(
+            up_to_date_plan,
+            "promotion",
+            label="Stock Codex update doctor up-to-date plan",
+        )
+        up_to_date_promotion_required = _json_bool(
+            up_to_date_promotion,
+            "required",
+            label="Stock Codex update doctor up-to-date promotion",
+        )
+        up_to_date_promotion_ready = _json_bool(
+            up_to_date_promotion,
+            "ready",
+            label="Stock Codex update doctor up-to-date promotion",
+        )
+        if (
+            up_to_date_action != "up-to-date"
+            or up_to_date_promotion_required
+            or not up_to_date_promotion_ready
+        ):
+            raise SystemExit(
+                "Update doctor did not suppress promotion for current target.\n"
+                f"plan={up_to_date_plan!r}"
+            )
+
+        missing_policy_completed = subprocess.run(
+            [
+                sys.executable,
+                str(provisioner_script),
+                "--plan-update",
+                "--channel-manifest",
+                str(channel_manifest_path),
+                "--json",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=repo_root,
+            timeout=30,
+        )
+        if missing_policy_completed.returncode == 0:
+            raise SystemExit(
+                "Update doctor accepted --plan-update without channel policy.\n"
+                f"stdout={missing_policy_completed.stdout}\nstderr={missing_policy_completed.stderr}"
+            )
+        missing_policy_error = (
+            missing_policy_completed.stderr or missing_policy_completed.stdout
+        ).strip()
+        if "--plan-update requires --channel-policy" not in missing_policy_error:
+            raise SystemExit(
+                "Update doctor missing-policy failure was not explicit.\n"
+                f"stdout={missing_policy_completed.stdout}\nstderr={missing_policy_completed.stderr}"
+            )
+
+        plan_text = (
+            json.dumps(dry_run_plan, sort_keys=True)
+            + "\n"
+            + json.dumps(ready_plan, sort_keys=True)
+            + "\n"
+            + json.dumps(up_to_date_plan, sort_keys=True)
+        )
+        host_cache_referenced = str(host_cache_root) in plan_text
+        if host_cache_referenced:
+            raise SystemExit(
+                "Update doctor plan referenced the host stock Codex cache.\n"
+                f"host_cache_root={host_cache_root}"
+            )
+
+        return StockCodexUpdateDoctorProof(
+            source_codex_path=source_codex_path,
+            source_codex_realpath=source_codex_realpath,
+            source_codex_version=source_version,
+            source_codex_sha256=source_digest,
+            current_codex_path=current_codex_path,
+            current_codex_version=current_codex_version,
+            current_codex_sha256=current_codex_sha,
+            policy_name=policy_name,
+            official_channel_manifest_path=channel_manifest_path,
+            official_archive_url=official_archive_url,
+            official_archive_sha256=archive_sha,
+            archive_executable=archive_executable,
+            selected_version=selected_version,
+            selected_binary_sha256=selected_binary_sha,
+            clean_home=clean_home,
+            cache_root=cache_root,
+            launcher_manifest_path=launcher_manifest_path,
+            target_payload_dir=target_payload_dir,
+            target_codex_path=target_codex_path,
+            dry_run_action=dry_run_action,
+            dry_run_target_state=dry_run_target_state,
+            dry_run_mutates_filesystem=dry_run_mutates,
+            dry_run_cache_mutated=dry_run_cache_mutated,
+            ready_action=ready_action,
+            ready_target_state=ready_target_state,
+            ready_mutates_filesystem=ready_mutates,
+            ready_promotion_required=ready_promotion_required,
+            ready_launcher_update_required=ready_launcher_update_required,
+            ready_rollback_codex_path=ready_rollback_codex_path,
+            ready_version_comparison=ready_version_comparison,
+            up_to_date_action=up_to_date_action,
+            up_to_date_promotion_required=up_to_date_promotion_required,
+            missing_policy_error=missing_policy_error,
+            host_cache_root=host_cache_root,
+            host_cache_referenced_by_plans=host_cache_referenced,
+        )
+
+
+def print_stock_codex_update_doctor_proof(proof: StockCodexUpdateDoctorProof) -> None:
+    """Emit operator evidence for the stock-Codex update doctor proof."""
+    print("stock_codex_update_doctor_rehearsal=selected")
+    print(f"stock_codex_update_doctor_policy_name={proof.policy_name}")
+    print(f"stock_codex_update_doctor_source_path={proof.source_codex_path}")
+    print(f"stock_codex_update_doctor_source_realpath={proof.source_codex_realpath}")
+    print(f"stock_codex_update_doctor_source_version={proof.source_codex_version}")
+    print(f"stock_codex_update_doctor_source_sha256={proof.source_codex_sha256}")
+    print(f"stock_codex_update_doctor_current_path={proof.current_codex_path}")
+    print(f"stock_codex_update_doctor_current_version={proof.current_codex_version}")
+    print(f"stock_codex_update_doctor_current_sha256={proof.current_codex_sha256}")
+    print(f"stock_codex_update_doctor_manifest={proof.official_channel_manifest_path}")
+    print(f"stock_codex_update_doctor_archive_url={proof.official_archive_url}")
+    print(f"stock_codex_update_doctor_archive_sha256={proof.official_archive_sha256}")
+    print(f"stock_codex_update_doctor_archive_executable={proof.archive_executable}")
+    print(f"stock_codex_update_doctor_selected_version={proof.selected_version}")
+    print(f"stock_codex_update_doctor_selected_binary_sha256={proof.selected_binary_sha256}")
+    print(f"stock_codex_update_doctor_clean_home={proof.clean_home}")
+    print(f"stock_codex_update_doctor_cache_root={proof.cache_root}")
+    print(f"stock_codex_update_doctor_launcher_manifest={proof.launcher_manifest_path}")
+    print(f"stock_codex_update_doctor_target_payload_dir={proof.target_payload_dir}")
+    print(f"stock_codex_update_doctor_target_path={proof.target_codex_path}")
+    print(f"stock_codex_update_doctor_dry_run_action={proof.dry_run_action}")
+    print(f"stock_codex_update_doctor_dry_run_target_state={proof.dry_run_target_state}")
+    print(
+        "stock_codex_update_doctor_dry_run_mutates_filesystem="
+        f"{proof.dry_run_mutates_filesystem}"
+    )
+    print(
+        "stock_codex_update_doctor_dry_run_cache_mutated="
+        f"{proof.dry_run_cache_mutated}"
+    )
+    print(f"stock_codex_update_doctor_ready_action={proof.ready_action}")
+    print(f"stock_codex_update_doctor_ready_target_state={proof.ready_target_state}")
+    print(
+        "stock_codex_update_doctor_ready_mutates_filesystem="
+        f"{proof.ready_mutates_filesystem}"
+    )
+    print(
+        "stock_codex_update_doctor_ready_promotion_required="
+        f"{proof.ready_promotion_required}"
+    )
+    print(
+        "stock_codex_update_doctor_ready_launcher_update_required="
+        f"{proof.ready_launcher_update_required}"
+    )
+    print(
+        "stock_codex_update_doctor_ready_rollback_codex_path="
+        f"{proof.ready_rollback_codex_path}"
+    )
+    print(
+        "stock_codex_update_doctor_ready_version_comparison="
+        f"{proof.ready_version_comparison}"
+    )
+    print(f"stock_codex_update_doctor_up_to_date_action={proof.up_to_date_action}")
+    print(
+        "stock_codex_update_doctor_up_to_date_promotion_required="
+        f"{proof.up_to_date_promotion_required}"
+    )
+    print(f"stock_codex_update_doctor_missing_policy_error={proof.missing_policy_error!r}")
+    print(f"stock_codex_update_doctor_host_cache_root={proof.host_cache_root}")
+    print(
+        "stock_codex_update_doctor_host_cache_referenced_by_plans="
+        f"{proof.host_cache_referenced_by_plans}"
+    )
+    print("stock_codex_update_doctor_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: update planning requires the official OpenAI GitHub release "
+        "channel policy before selecting an artifact"
+    )
+    print(
+        "ASSERTION: the default update doctor is a dry run; absent targets report "
+        "stage-required without mutating the cache"
+    )
+    print(
+        "ASSERTION: preverified targets report stage-ready with explicit "
+        "launcher promotion and rollback paths, but do not promote persistent pointers"
+    )
+    print(
+        "ASSERTION: when current Codex already equals the selected target, "
+        "promotion is suppressed"
     )
 
 
@@ -14059,6 +14638,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-channel",
             "stock-codex-homebrew-remote-channel",
             "stock-codex-production-channel-policy",
+            "stock-codex-update-doctor",
             "clean-auth-onboarding",
             "stock-codex-compat",
             "stock-codex-compat-live",
@@ -14128,6 +14708,9 @@ def parse_args() -> argparse.Namespace:
             "OpenAI GitHub release channel policy, clean-cache offline reuse, "
             "non-official URL rejection, and resolver selection without "
             "mutating global state. "
+            "'stock-codex-update-doctor' proves official-policy update "
+            "planning, dry-run no-mutation behavior, launcher promotion "
+            "intent, rollback intent, and up-to-date promotion suppression. "
             "'clean-auth-onboarding' proves clean CODEX_HOME needs-auth "
             "classification plus populated auth detection without running "
             "interactive login. "
@@ -14351,6 +14934,18 @@ def main() -> int:
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_stock_codex_production_channel_policy_proof(
             run_stock_codex_production_channel_policy_proof(codex_path)
+        )
+        return 0
+
+    if requested_proof == "stock-codex-update-doctor":
+        if args.apple_bundle is not None:
+            raise SystemExit("stock-codex-update-doctor does not use --apple-bundle; omit it.")
+        if args.allow_fork_codex:
+            raise SystemExit("stock-codex-update-doctor cannot allow a Codex-fork binary.")
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_update_doctor_proof(
+            run_stock_codex_update_doctor_proof(codex_path)
         )
         return 0
 

@@ -28,9 +28,11 @@ The policy supports exact version pins. Channel manifests may mark a `latest`
 value, but production install/update code should record the selected exact
 version and SHA-256 in the installed payload manifest before the payload is used.
 
-The current proof gate exercises the exact pin path. Automatic update
-scheduling, staged rollout, and persistent launcher pointer promotion are
-separate product decisions.
+The production channel proof exercises the exact pin path. The update doctor
+proof exercises version comparison, dry-run planning, preverified target
+detection, promotion intent, rollback intent, and up-to-date promotion
+suppression. Automatic update scheduling, staged rollout policy, and persistent
+launcher pointer promotion are separate product decisions.
 
 ## Rollback
 
@@ -39,9 +41,9 @@ Provisioned payloads live in versioned cache directories:
 `<cache-root>/<version>/codex`
 
 That layout preserves older payloads as rollback candidates. This policy does
-not yet define an automatic rollback daemon or persistent pointer update flow.
-Those should be added only after the acquisition policy, signing/notarization
-path, clean auth boundary, and installed runtime bootstrap remain green.
+not define an automatic rollback daemon or persistent pointer update flow. The
+update doctor emits rollback intent by retaining the current Codex path and
+relying on versioned-cache payload retention.
 
 ## Proof Gate
 
@@ -56,3 +58,18 @@ uvx --from . python scripts/prove_stock_codex_replacement.py \
 The proof is temp-rooted. It validates the policy, proves matching payload reuse
 without remote download, proves non-official URL rejection before cache mutation,
 and proves Omnigent resolver selection through `OMNIGENT_STOCK_CODEX_PATH`.
+
+Run the update doctor gate:
+
+```sh
+uvx --from . python scripts/prove_stock_codex_replacement.py \
+  --proof stock-codex-update-doctor \
+  --codex-path ~/.local/omnigent/codex-stock/0.142.5/codex
+```
+
+The proof is temp-rooted. It proves `--plan-update` requires the production
+channel policy, dry-run planning reports `stage-required` without cache
+mutation when the selected target is absent, promotion material is withheld
+until `promotion.ready=true`, preverified targets report `stage-ready` with
+launcher promotion and rollback intent, and already-current targets report
+`up-to-date` with promotion suppressed.
