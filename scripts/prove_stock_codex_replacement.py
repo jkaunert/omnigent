@@ -19,6 +19,7 @@ import json
 import os
 import platform
 import plistlib
+import pwd
 import re
 import shlex
 import shutil
@@ -1550,6 +1551,9 @@ class StockCodexCompatPkgExternalCleanUserProof:
     source_bundle_sha256: str | None
     package_identifier: str | None
     package_version: str | None
+    clean_user_name: str | None
+    clean_user_uid: int | None
+    clean_user_gid: int | None
     clean_user_home: Path | None
     clean_user_marker_path: Path | None
     clean_user_proof_root: Path | None
@@ -2356,16 +2360,17 @@ def _run_stock_codex_provisioner_json(
     cwd: Path,
     failure_label: str,
     timeout: float = 60,
+    run_as_user: str | None = None,
+    sudo_path: str | None = None,
 ) -> dict[str, Any]:
     """Run a stock-Codex provisioner command and parse its JSON output."""
-    completed = subprocess.run(
+    completed = _run_external_clean_user_subprocess(
         command,
-        check=False,
-        capture_output=True,
-        text=True,
         env=env,
         cwd=cwd,
         timeout=timeout,
+        run_as_user=run_as_user,
+        sudo_path=sudo_path,
     )
     if completed.returncode != 0:
         raise SystemExit(
@@ -3862,6 +3867,8 @@ def _run_installed_runtime_auth_classifier(
     home: Path,
     codex_home: Path,
     stock_codex_path: Path,
+    run_as_user: str | None = None,
+    sudo_path: str | None = None,
 ) -> tuple[Path, str | None, str]:
     """Run the packaged runtime's auth classifier in an isolated subprocess."""
     classifier_code = (
@@ -3886,14 +3893,13 @@ def _run_installed_runtime_auth_classifier(
             "PYTHONPATH": os.pathsep.join(python_path_entries),
         }
     )
-    completed = subprocess.run(
+    completed = _run_external_clean_user_subprocess(
         [sys.executable, "-c", classifier_code],
-        check=False,
-        capture_output=True,
-        text=True,
         env=env,
         cwd=installed_runtime_root,
         timeout=30,
+        run_as_user=run_as_user,
+        sudo_path=sudo_path,
     )
     combined_output = (completed.stdout or "") + (completed.stderr or "")
     if completed.returncode != 0:
@@ -8500,19 +8506,20 @@ def _run_stock_codex_compat_installer_cli_json(
     env: dict[str, str],
     repo_root: Path,
     script_path: Path | None = None,
+    run_as_user: str | None = None,
+    sudo_path: str | None = None,
 ) -> dict[str, Any]:
     """Run the compatibility launcher installer CLI and return its JSON output."""
     script_path = script_path or (
         repo_root / "scripts" / "install_stock_codex_compat_launcher.py"
     )
-    completed = subprocess.run(
+    completed = _run_external_clean_user_subprocess(
         [sys.executable, str(script_path), *args, "--json"],
-        check=False,
-        capture_output=True,
-        text=True,
         cwd=repo_root,
         env=env,
         timeout=30,
+        run_as_user=run_as_user,
+        sudo_path=sudo_path,
     )
     if completed.returncode != 0:
         raise SystemExit(
@@ -10981,6 +10988,123 @@ EXTERNAL_CLEAN_USER_MARKER_NAME = ".omnigent-stock-codex-compat-clean-user-ok"
 EXTERNAL_CLEAN_USER_PROOF_ROOT_NAME = (
     ".omnigent-stock-codex-compat-clean-user-proof"
 )
+_CLEAN_USER_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
+_CLEAN_USER_SUBPROCESS_ENV_KEYS = (
+    "HOME",
+    "TMPDIR",
+    "CODEX_HOME",
+    "PATH",
+    "PYTHONPATH",
+    "UV_CACHE_DIR",
+    "UV_TOOL_DIR",
+    "UV_PYTHON_INSTALL_DIR",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    OMNIGENT_STOCK_CODEX_PATH_ENV,
+)
+
+
+@dataclass(frozen=True)
+class _ExternalCleanUserAccount:
+    """Resolved account metadata for a marked throwaway macOS user."""
+
+    name: str
+    uid: int
+    gid: int
+    home: Path
+
+
+def _lookup_external_clean_user_account(
+    clean_user_name: str,
+) -> _ExternalCleanUserAccount:
+    """Resolve a clean-user account from the local passwd database."""
+    entry = pwd.getpwnam(clean_user_name)
+    return _ExternalCleanUserAccount(
+        name=entry.pw_name,
+        uid=entry.pw_uid,
+        gid=entry.pw_gid,
+        home=Path(entry.pw_dir).expanduser().resolve(),
+    )
+
+
+def _external_clean_user_subprocess_env_args(
+    env: Mapping[str, str],
+) -> list[str]:
+    """Return deterministic env assignments for sudo-executed user commands."""
+    assignments: list[str] = []
+    for key in _CLEAN_USER_SUBPROCESS_ENV_KEYS:
+        value = env.get(key)
+        if value is not None:
+            assignments.append(f"{key}={value}")
+    return assignments
+
+
+def _external_clean_user_command(
+    command: list[str],
+    *,
+    env: Mapping[str, str],
+    run_as_user: str | None,
+    sudo_path: str | None,
+) -> tuple[list[str], dict[str, str]]:
+    """Wrap a command so user-level proof work can run as the target account."""
+    if run_as_user is None:
+        return command, dict(env)
+    if not sudo_path:
+        raise SystemExit("clean-user account proof requires sudo")
+    return (
+        [
+            sudo_path,
+            "-u",
+            run_as_user,
+            "/usr/bin/env",
+            "-i",
+            *_external_clean_user_subprocess_env_args(env),
+            *command,
+        ],
+        {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+
+
+def _run_external_clean_user_subprocess(
+    command: list[str],
+    *,
+    env: Mapping[str, str],
+    cwd: Path | None = None,
+    timeout: float = 60.0,
+    run_as_user: str | None = None,
+    sudo_path: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a proof command directly or through sudo for a clean user account."""
+    wrapped_command, wrapped_env = _external_clean_user_command(
+        command,
+        env=env,
+        run_as_user=run_as_user,
+        sudo_path=sudo_path,
+    )
+    return subprocess.run(
+        wrapped_command,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=wrapped_env,
+        cwd=cwd,
+        timeout=timeout,
+    )
+
+
+def _chown_external_clean_user_paths(
+    paths: tuple[Path, ...],
+    *,
+    account: _ExternalCleanUserAccount | None,
+) -> None:
+    """Make root-created proof directories writable by the target account."""
+    if account is None:
+        return
+    for path in paths:
+        os.chown(path, account.uid, account.gid)
 
 
 def _external_clean_user_guard_paths(clean_user_home: Path) -> tuple[Path, ...]:
@@ -11002,27 +11126,78 @@ def _external_clean_user_guard_paths(clean_user_home: Path) -> tuple[Path, ...]:
 def _external_clean_user_preflight(
     *,
     clean_user_home: Path | None,
-) -> tuple[Path | None, Path | None, tuple[str, ...]]:
+    clean_user_name: str | None = None,
+) -> tuple[
+    Path | None,
+    Path | None,
+    _ExternalCleanUserAccount | None,
+    tuple[str, ...],
+]:
     """Validate an operator-supplied clean home before mutating it."""
-    if clean_user_home is None:
+    account: _ExternalCleanUserAccount | None = None
+    missing: list[str] = []
+    if clean_user_name is not None:
+        clean_user_name = clean_user_name.strip()
+        if not clean_user_name:
+            missing.append("clean user name cannot be empty")
+        elif not _CLEAN_USER_NAME_PATTERN.fullmatch(clean_user_name):
+            missing.append(
+                "clean user name contains unsupported characters; use a local "
+                "short name such as omnigent-clean"
+            )
+        else:
+            try:
+                account = _lookup_external_clean_user_account(clean_user_name)
+            except KeyError:
+                missing.append(f"clean user account does not exist: {clean_user_name}")
+            else:
+                if account.uid == 0:
+                    missing.append("clean user account cannot be root")
+                if account.home == Path("/"):
+                    missing.append("clean user account home cannot be /")
+
+    if clean_user_home is None and account is None:
         marker_hint = f"<clean-user-home>/{EXTERNAL_CLEAN_USER_MARKER_NAME}"
         return (
             None,
             None,
+            account,
             (
+                *missing,
                 "stock-codex-compat-pkg-external-clean-user requires "
-                "--clean-user-home pointing at a disposable user profile or "
-                f"clean VM home containing marker {marker_hint}",
+                "--clean-user-home pointing at a disposable profile or "
+                "--clean-user-name pointing at a disposable local account "
+                f"whose home contains marker {marker_hint}",
             ),
         )
 
-    resolved_home = clean_user_home.expanduser().resolve()
+    if clean_user_home is None:
+        assert account is not None
+        resolved_home = account.home
+    else:
+        resolved_home = clean_user_home.expanduser().resolve()
+        if account is not None and resolved_home != account.home:
+            missing.append(
+                "clean user home does not match passwd home for "
+                f"{account.name}: expected {account.home}, got {resolved_home}"
+            )
     marker_path = resolved_home / EXTERNAL_CLEAN_USER_MARKER_NAME
-    missing: list[str] = []
     if not resolved_home.is_dir():
         missing.append(f"clean user home does not exist: {resolved_home}")
     elif not os.access(resolved_home, os.W_OK | os.X_OK):
         missing.append(f"clean user home is not writable/searchable: {resolved_home}")
+    elif account is not None:
+        try:
+            home_stat = resolved_home.stat()
+        except OSError as exc:
+            missing.append(f"could not stat clean user home: {resolved_home}: {exc}")
+        else:
+            if home_stat.st_uid != account.uid:
+                missing.append(
+                    "clean user home is not owned by the requested account: "
+                    f"home={resolved_home} owner_uid={home_stat.st_uid} "
+                    f"expected_uid={account.uid}"
+                )
     if resolved_home == Path("/"):
         missing.append("clean user home cannot be /")
     if not marker_path.is_file():
@@ -11041,7 +11216,7 @@ def _external_clean_user_preflight(
                 "clean user home already contains Omnigent stock-Codex "
                 f"compatibility state; choose a fresh throwaway profile or remove: {existing}"
             )
-    return resolved_home, marker_path, tuple(missing)
+    return resolved_home, marker_path, account, tuple(missing)
 
 
 def _cleanup_external_clean_user_state(
@@ -11088,6 +11263,7 @@ def _blocked_stock_codex_compat_pkg_external_clean_user_proof(
     stock_codex_path: Path | None,
     stock_codex_version: str | None,
     stock_codex_sha256: str | None,
+    clean_user_account: _ExternalCleanUserAccount | None = None,
     clean_user_home: Path | None = None,
     clean_user_marker_path: Path | None = None,
     structure: StockCodexCompatPkgStructureProof | None = None,
@@ -11107,6 +11283,9 @@ def _blocked_stock_codex_compat_pkg_external_clean_user_proof(
         ),
         package_identifier=structure.package_identifier if structure is not None else None,
         package_version=structure.package_version if structure is not None else None,
+        clean_user_name=clean_user_account.name if clean_user_account is not None else None,
+        clean_user_uid=clean_user_account.uid if clean_user_account is not None else None,
+        clean_user_gid=clean_user_account.gid if clean_user_account is not None else None,
         clean_user_home=clean_user_home,
         clean_user_marker_path=clean_user_marker_path,
         clean_user_proof_root=None,
@@ -11160,6 +11339,7 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
     *,
     package_path: Path | None,
     clean_user_home: Path | None,
+    clean_user_name: str | None = None,
 ) -> StockCodexCompatPkgExternalCleanUserProof:
     """Run signed-pkg bootstrap against a marked external clean user home."""
     stock_codex_path = stock_codex_path.expanduser().resolve()
@@ -11178,12 +11358,19 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
         "stapler": None,
         "installer": shutil.which("installer"),
         "hdiutil": shutil.which("hdiutil"),
+        "sudo": shutil.which("sudo"),
         "uvx": shutil.which("uvx"),
     }
     if tool_paths["xcrun"]:
         tool_paths["stapler"] = _xcrun_find_tool(str(tool_paths["xcrun"]), "stapler")
-    resolved_clean_home, marker_path, clean_home_missing = _external_clean_user_preflight(
+    (
+        resolved_clean_home,
+        marker_path,
+        clean_user_account,
+        clean_home_missing,
+    ) = _external_clean_user_preflight(
         clean_user_home=clean_user_home,
+        clean_user_name=clean_user_name,
     )
     missing: list[str] = list(clean_home_missing)
     if package_path is None:
@@ -11198,6 +11385,8 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
     for tool_name in ("pkgutil", "xcrun", "spctl", "stapler", "installer", "hdiutil", "uvx"):
         if not tool_paths[tool_name]:
             missing.append(f"missing tool: {tool_name}")
+    if clean_user_account is not None and not tool_paths["sudo"]:
+        missing.append("missing tool: sudo")
     if missing:
         return _blocked_stock_codex_compat_pkg_external_clean_user_proof(
             tool_paths=tool_paths,
@@ -11205,6 +11394,7 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
             stock_codex_path=stock_codex_path,
             stock_codex_version=stock_codex_version,
             stock_codex_sha256=stock_codex_sha256,
+            clean_user_account=clean_user_account,
             clean_user_home=resolved_clean_home,
             clean_user_marker_path=marker_path,
         )
@@ -11229,6 +11419,7 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
                 stock_codex_path=stock_codex_path,
                 stock_codex_version=stock_codex_version,
                 stock_codex_sha256=stock_codex_sha256,
+                clean_user_account=clean_user_account,
                 clean_user_home=resolved_clean_home,
                 clean_user_marker_path=marker_path,
                 structure=structure,
@@ -11262,6 +11453,8 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
         )
         clean_cache_root = resolved_clean_home / ".local" / "omnigent" / "codex-stock"
         clean_codex_home = resolved_clean_home / ".codex-omnigent-clean-user-canary"
+        run_as_user = clean_user_account.name if clean_user_account is not None else None
+        sudo_path = tool_paths["sudo"] if clean_user_account is not None else None
         removable_empty_parents = (
             manifest_path.parent,
             resolved_clean_home / ".local" / "omnigent",
@@ -11361,6 +11554,10 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
             proof_root.mkdir(mode=0o700)
             clean_tmp.mkdir(mode=0o700)
             clean_codex_home.mkdir(mode=0o700)
+            _chown_external_clean_user_paths(
+                (proof_root, clean_tmp, clean_codex_home),
+                account=clean_user_account,
+            )
             channel_root = proof_root / "stock-codex-channel"
             channel_artifacts = channel_root / "artifacts"
             channel_artifacts.mkdir(parents=True)
@@ -11429,6 +11626,8 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
                 cwd=installed_runtime_root,
                 failure_label="External clean-user stock Codex provisioner",
                 timeout=120,
+                run_as_user=run_as_user,
+                sudo_path=sudo_path,
             )
             provisioned_codex_path = Path(_json_string(provisioned, "codexPath")).resolve()
             provisioned_sha256 = _json_string(provisioned, "sha256")
@@ -11467,6 +11666,8 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
                 env=env,
                 repo_root=installed_runtime_root,
                 script_path=installer_script_path,
+                run_as_user=run_as_user,
+                sudo_path=sudo_path,
             )
             install_payload = _run_stock_codex_compat_installer_cli_json(
                 [
@@ -11482,6 +11683,8 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
                 env=env,
                 repo_root=installed_runtime_root,
                 script_path=installer_script_path,
+                run_as_user=run_as_user,
+                sudo_path=sudo_path,
             )
             selected = shutil.which("omnigent-stock-codex-compat", path=env["PATH"])
             if selected is None:
@@ -11492,12 +11695,11 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
                     "External clean-user selected the wrong compatibility command.\n"
                     f"expected={launcher_path.resolve()}\nactual={selected_command_path}"
                 )
-            version = subprocess.run(
+            version = _run_external_clean_user_subprocess(
                 [str(selected_command_path), "--version"],
-                check=False,
-                capture_output=True,
-                text=True,
                 env=env,
+                run_as_user=run_as_user,
+                sudo_path=sudo_path,
                 timeout=10,
             )
             version_output = (version.stdout or version.stderr).strip()
@@ -11507,12 +11709,11 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
                     f"expected={stock_codex_version!r}\nactual={version_output!r}\n"
                     f"exit={version.returncode}"
                 )
-            probe = subprocess.run(
+            probe = _run_external_clean_user_subprocess(
                 [str(selected_command_path), "--omnigent-stock-codex-compat-launcher-probe"],
-                check=False,
-                capture_output=True,
-                text=True,
                 env=env,
+                run_as_user=run_as_user,
+                sudo_path=sudo_path,
                 timeout=10,
             )
             probe_output = ((probe.stdout or "") + (probe.stderr or "")).strip()
@@ -11549,6 +11750,8 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
                 env=env,
                 repo_root=installed_runtime_root,
                 script_path=installer_script_path,
+                run_as_user=run_as_user,
+                sudo_path=sudo_path,
             )
             if doctor_payload.get("installAllowed") is not True:
                 raise SystemExit(
@@ -11574,6 +11777,8 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
                     home=resolved_clean_home,
                     codex_home=clean_codex_home,
                     stock_codex_path=provisioned_codex_path,
+                    run_as_user=run_as_user,
+                    sudo_path=sudo_path,
                 )
             )
             if clean_auth_classifier_path != (clean_codex_home / "auth.json").resolve():
@@ -11604,6 +11809,8 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
                 env=env,
                 cwd=installed_runtime_root,
                 timeout=240,
+                run_as_user=run_as_user,
+                sudo_path=sudo_path,
             )
             if "compat_launcher_action=uninstalled" not in rollback.stdout:
                 raise SystemExit(
@@ -11704,6 +11911,9 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
             source_bundle_sha256=structure.source_bundle_sha256,
             package_identifier=structure.package_identifier,
             package_version=structure.package_version,
+            clean_user_name=clean_user_account.name if clean_user_account else None,
+            clean_user_uid=clean_user_account.uid if clean_user_account else None,
+            clean_user_gid=clean_user_account.gid if clean_user_account else None,
             clean_user_home=resolved_clean_home,
             clean_user_marker_path=marker_path,
             clean_user_proof_root=proof_root,
@@ -11844,19 +12054,31 @@ def _run_shell_command_for_proof(
     env: Mapping[str, str],
     cwd: Path,
     timeout: float = 60.0,
+    run_as_user: str | None = None,
+    sudo_path: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Execute generated shell metadata in a proof-scoped environment."""
-    completed = subprocess.run(
-        command,
-        shell=True,
-        executable="/bin/sh",
-        check=False,
-        capture_output=True,
-        text=True,
-        env=dict(env),
-        cwd=cwd,
-        timeout=timeout,
-    )
+    if run_as_user is None:
+        completed = subprocess.run(
+            command,
+            shell=True,
+            executable="/bin/sh",
+            check=False,
+            capture_output=True,
+            text=True,
+            env=dict(env),
+            cwd=cwd,
+            timeout=timeout,
+        )
+    else:
+        completed = _run_external_clean_user_subprocess(
+            ["/bin/sh", "-c", command],
+            env=env,
+            cwd=cwd,
+            timeout=timeout,
+            run_as_user=run_as_user,
+            sudo_path=sudo_path,
+        )
     if completed.returncode != 0:
         raise SystemExit(
             "Generated proof command failed.\n"
@@ -15007,6 +15229,9 @@ def print_stock_codex_compat_pkg_external_clean_user_proof(
         f"{proof.package_identifier}"
     )
     print(f"stock_codex_compat_pkg_external_clean_user_version={proof.package_version}")
+    print(f"stock_codex_compat_pkg_external_clean_user_account={proof.clean_user_name}")
+    print(f"stock_codex_compat_pkg_external_clean_user_uid={proof.clean_user_uid}")
+    print(f"stock_codex_compat_pkg_external_clean_user_gid={proof.clean_user_gid}")
     print(f"stock_codex_compat_pkg_external_clean_user_home={proof.clean_user_home}")
     print(
         "stock_codex_compat_pkg_external_clean_user_marker="
@@ -19917,12 +20142,14 @@ def parse_args() -> argparse.Namespace:
             "removes payload and receipt state before detaching the image; macOS "
             "installer requires root/admin privileges for the live install step. "
             "'stock-codex-compat-pkg-external-clean-user' consumes --pkg-path "
-            "and --clean-user-home, requires an operator-supplied disposable "
-            "home marker, installs the signed/notarized pkg onto a temporary "
-            "mounted target volume, bootstraps the installed runtime against "
-            "that external clean profile, verifies rollback and cleanup of "
-            "canary-created user state, then removes payload and receipt state "
-            "before detaching the image; macOS installer requires root/admin "
+            "and either --clean-user-home or --clean-user-name, requires an "
+            "operator-supplied disposable home marker, installs the "
+            "signed/notarized pkg onto a temporary mounted target volume, "
+            "bootstraps the installed runtime against that external clean "
+            "profile, optionally runs user-level commands as the requested "
+            "local account, verifies rollback and cleanup of canary-created "
+            "user state, then removes payload and receipt state before "
+            "detaching the image; macOS installer requires root/admin "
             "privileges for the live install step. "
             "'stock-codex-compat-wrapper-xcodebuild-bridge-adapter' proves "
             "that XcodeBuildMCP simulator build/run can execute through the "
@@ -20041,9 +20268,24 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Disposable external user home for "
-            "stock-codex-compat-pkg-external-clean-user. The directory must "
-            f"contain {EXTERNAL_CLEAN_USER_MARKER_NAME} and must not already "
-            "contain Omnigent stock-Codex compatibility state."
+            "stock-codex-compat-pkg-external-clean-user. When "
+            "--clean-user-name is omitted, this is the disposable profile to "
+            f"mutate. When --clean-user-name is present, it must match that "
+            f"account's passwd home. The directory must contain "
+            f"{EXTERNAL_CLEAN_USER_MARKER_NAME} and must not already contain "
+            "Omnigent stock-Codex compatibility state."
+        ),
+    )
+    parser.add_argument(
+        "--clean-user-name",
+        default=None,
+        help=(
+            "Optional local throwaway account for "
+            "stock-codex-compat-pkg-external-clean-user. When set, the proof "
+            "derives the home from passwd unless --clean-user-home is also "
+            "provided, validates the marked home, and runs user-level "
+            "provisioning/bootstrap/auth/rollback commands as this account "
+            "through sudo -u."
         ),
     )
     parser.add_argument(
@@ -20656,6 +20898,7 @@ def main() -> int:
                 codex_path,
                 package_path=args.pkg_path,
                 clean_user_home=args.clean_user_home,
+                clean_user_name=args.clean_user_name,
             )
         )
         return 0

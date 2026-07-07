@@ -360,16 +360,22 @@ short of a separate clean physical or virtual machine.
 2026-07-07 external clean-user gate note:
 `stock-codex-compat-pkg-external-clean-user` adds the next validation surface
 for a marked throwaway macOS user profile or clean VM home. The gate is
-deliberately fail-closed: it requires `--clean-user-home`, requires the marker
+deliberately fail-closed: it requires either `--clean-user-home` or
+`--clean-user-name`, requires the marker
 `.omnigent-stock-codex-compat-clean-user-ok`, refuses preexisting Omnigent
 compatibility state in that profile, consumes an existing signed/stapled
 package through `--pkg-path`, and still uses a temporary mounted target volume
-instead of this host's real `/Library`. The admin-authenticated rerun against a
-marked `/private/tmp` throwaway home now reports `replacement-ready` and proves
-the package install, receipt validation, external-home provisioning, launcher
-bootstrap, proof-scoped `CODEX_HOME`, proof-scoped uv/XDG scratch directories,
-clean auth classification, rollback, user-state cleanup, package cleanup, and
-detach sequence. A separate macOS account or clean VM remains unproven.
+instead of this host's real `/Library`. When `--clean-user-name` is supplied,
+the proof derives or validates the passwd home, rejects root and mismatched
+homes, and runs user-level provisioning, launcher bootstrap, auth
+classification, and rollback through `sudo -u <clean-user>` with a proof-scoped
+environment. The admin-authenticated rerun against a marked `/private/tmp`
+throwaway home now reports `replacement-ready` and proves the package install,
+receipt validation, external-home provisioning, launcher bootstrap,
+proof-scoped `CODEX_HOME`, proof-scoped uv/XDG scratch directories, clean auth
+classification, rollback, user-state cleanup, package cleanup, and detach
+sequence. A live run against a separate macOS account or clean VM remains
+unproven.
 
 This proves the scoped carry-parity claims above plus current-host clean-profile
 and default-path rehearsals, unsigned portable artifact rehearsal, expanded
@@ -1934,9 +1940,11 @@ Run these in order unless a later gate becomes cheaper due to new evidence.
      launcher, classifies clean auth as `needs-auth`, cleans package payload and
      receipt state, and detaches the image. The external clean-user gate is now
      green for an admin-authenticated marked throwaway home and leaves only the
-     operator marker after cleanup; it still does not create users itself or
-     prove a separate macOS account/VM. The production
-     stock-Codex channel policy gate is green for
+     operator marker after cleanup. It also has a fail-closed `--clean-user-name`
+     account mode that derives the passwd home and executes user-level work
+     through `sudo -u`, but it still does not create users itself or prove a
+     separate macOS account/VM until that live account or VM run is captured.
+     The production stock-Codex channel policy gate is green for
      official OpenAI GitHub release source validation, exact-pin reuse before
      network access, non-official URL rejection, and resolver selection. The
      stock-Codex update doctor gate is green for fail-closed policy

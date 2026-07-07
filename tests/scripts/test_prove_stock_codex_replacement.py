@@ -3260,7 +3260,11 @@ def test_stock_codex_compat_pkg_clean_user_canary_uses_installed_pkg_runtime(
         cwd: Path,
         failure_label: str,
         timeout: float = 60,
+        run_as_user: str | None = None,
+        sudo_path: str | None = None,
     ) -> dict[str, Any]:
+        assert run_as_user is None
+        assert sudo_path is None
         assert failure_label
         assert timeout > 0
         assert cwd == mounted_target / runtime_root.relative_to("/")
@@ -3294,7 +3298,11 @@ def test_stock_codex_compat_pkg_clean_user_canary_uses_installed_pkg_runtime(
         env: dict[str, str],
         repo_root: Path,
         script_path: Path,
+        run_as_user: str | None = None,
+        sudo_path: str | None = None,
     ) -> dict[str, Any]:
+        assert run_as_user is None
+        assert sudo_path is None
         assert repo_root == mounted_target / runtime_root.relative_to("/")
         assert script_path == repo_root / "scripts" / "install_stock_codex_compat_launcher.py"
         installer_cli_calls.append(args)
@@ -3478,6 +3486,92 @@ def test_stock_codex_compat_pkg_external_clean_user_requires_marked_home(
     assert any("not marked disposable" in item for item in proof.missing_prerequisites)
 
 
+def test_stock_codex_compat_pkg_external_clean_user_resolves_account_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = _write_codex_binary(tmp_path / "stock" / "codex")
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+    clean_home = tmp_path / "external-account-home"
+    clean_home.mkdir()
+    home_stat = clean_home.stat()
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        if path is not None:
+            return None
+        return {
+            "pkgutil": "/usr/sbin/pkgutil",
+            "xcrun": "/usr/bin/xcrun",
+            "spctl": "/usr/sbin/spctl",
+            "installer": "/usr/sbin/installer",
+            "hdiutil": "/usr/bin/hdiutil",
+            "sudo": "/usr/bin/sudo",
+            "uvx": str(_write_uvx_binary(tmp_path / "tools" / "uvx")),
+        }.get(name)
+
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+    monkeypatch.setattr(_MOD, "_xcrun_find_tool", lambda _xcrun, tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(
+        _MOD,
+        "_lookup_external_clean_user_account",
+        lambda name: _MOD._ExternalCleanUserAccount(
+            name=name,
+            uid=home_stat.st_uid or 501,
+            gid=home_stat.st_gid,
+            home=clean_home.resolve(),
+        ),
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_external_clean_user_proof(
+        stock_codex,
+        package_path=package_path,
+        clean_user_home=None,
+        clean_user_name="omnigent-clean",
+    )
+
+    assert proof.status == "blocked"
+    assert proof.clean_user_name == "omnigent-clean"
+    assert proof.clean_user_home == clean_home.resolve()
+    assert proof.clean_user_marker_path == (
+        clean_home.resolve() / _MOD.EXTERNAL_CLEAN_USER_MARKER_NAME
+    )
+    assert any("not marked disposable" in item for item in proof.missing_prerequisites)
+
+
+def test_external_clean_user_command_wraps_sudo_with_clean_env() -> None:
+    command, env = _MOD._external_clean_user_command(
+        ["/bin/echo", "ok"],
+        env={
+            "HOME": "/Users/omnigent-clean",
+            "TMPDIR": "/Users/omnigent-clean/.tmp",
+            "PATH": "/Users/omnigent-clean/.local/bin:/usr/bin:/bin",
+            "PYTHONPATH": "/runtime",
+            "CODEX_HOME": "/Users/omnigent-clean/.codex-proof",
+            "UV_CACHE_DIR": "/Users/omnigent-clean/.proof/uv-cache",
+            "XDG_CACHE_HOME": "/Users/omnigent-clean/.proof/xdg-cache",
+            "SECRET_TOKEN": "must-not-leak",
+        },
+        run_as_user="omnigent-clean",
+        sudo_path="/usr/bin/sudo",
+    )
+
+    assert command[:5] == [
+        "/usr/bin/sudo",
+        "-u",
+        "omnigent-clean",
+        "/usr/bin/env",
+        "-i",
+    ]
+    assert "HOME=/Users/omnigent-clean" in command
+    assert "PATH=/Users/omnigent-clean/.local/bin:/usr/bin:/bin" in command
+    assert "PYTHONPATH=/runtime" in command
+    assert "SECRET_TOKEN=must-not-leak" not in command
+    assert command[-2:] == ["/bin/echo", "ok"]
+    assert env == {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+
+
 def test_stock_codex_compat_pkg_external_clean_user_uses_marked_home(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3655,7 +3749,11 @@ def test_stock_codex_compat_pkg_external_clean_user_uses_marked_home(
         cwd: Path,
         failure_label: str,
         timeout: float = 60,
+        run_as_user: str | None = None,
+        sudo_path: str | None = None,
     ) -> dict[str, Any]:
+        assert run_as_user is None
+        assert sudo_path is None
         assert failure_label
         assert timeout > 0
         assert cwd == mounted_target / runtime_root.relative_to("/")
@@ -3699,7 +3797,11 @@ def test_stock_codex_compat_pkg_external_clean_user_uses_marked_home(
         env: dict[str, str],
         repo_root: Path,
         script_path: Path,
+        run_as_user: str | None = None,
+        sudo_path: str | None = None,
     ) -> dict[str, Any]:
+        assert run_as_user is None
+        assert sudo_path is None
         assert repo_root == mounted_target / runtime_root.relative_to("/")
         assert script_path == repo_root / "scripts" / "install_stock_codex_compat_launcher.py"
         assert Path(env["HOME"]) == clean_home.resolve()
