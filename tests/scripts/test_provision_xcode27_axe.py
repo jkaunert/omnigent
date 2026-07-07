@@ -111,7 +111,8 @@ def test_provision_axe_copies_source_binary_to_ref_cache(tmp_path: Path) -> None
 def test_parse_args_defaults_to_pinned_ref_and_ad_hoc_signing() -> None:
     args = _MOD.parse_args([])
 
-    assert args.ref == "9051a6e13fdd8e0789f734a11fc1e71f48def916"
+    assert args.repo_url == "https://github.com/cameroncooke/AXe.git"
+    assert args.ref == "51cfaf7552512224c5e9e6a01e059d3986d544bc"
     assert args.codesign_identity == "-"
 
 

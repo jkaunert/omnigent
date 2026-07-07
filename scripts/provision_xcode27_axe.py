@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision the temporary Xcode 27-compatible AXe payload for Omnigent proofs."""
+"""Provision the Xcode 27-compatible AXe payload for Omnigent proofs."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_AXE_REPO_URL = "https://github.com/jkaunert/AXe.git"
-DEFAULT_AXE_REF = "9051a6e13fdd8e0789f734a11fc1e71f48def916"
+DEFAULT_AXE_REPO_URL = "https://github.com/cameroncooke/AXe.git"
+DEFAULT_AXE_REF = "51cfaf7552512224c5e9e6a01e059d3986d544bc"
 DEFAULT_CACHE_ROOT = Path.home() / ".cache" / "omnigent" / "axe"
 DEFAULT_CODESIGN_IDENTITY = "-"
 OMNIGENT_AXE_ENV_VAR = "OMNIGENT_XCODEBUILDMCP_AXE_PATH"
