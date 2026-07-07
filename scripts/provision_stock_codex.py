@@ -233,6 +233,82 @@ class StockCodexUpdatePlan:
         return json.dumps(self.as_dict(), indent=2, sort_keys=True)
 
 
+@dataclass(frozen=True)
+class StockCodexUpdatePromotionResult:
+    """Result of promoting a ready update plan into a launcher manifest."""
+
+    action: str
+    mutates_filesystem: bool
+    plan: StockCodexUpdatePlan
+    launcher_manifest_path: Path
+    rollback_metadata_path: Path | None
+    previous_codex_path: Path
+    promoted_codex_path: Path
+    promoted_env_path: Path
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a stable JSON-ready promotion summary."""
+        return {
+            "kind": "omnigent-stock-codex-update-promotion",
+            "schemaVersion": 1,
+            "action": self.action,
+            "mutatesFilesystem": self.mutates_filesystem,
+            "plan": self.plan.as_dict(),
+            "launcherManifest": {
+                "manifestPath": str(self.launcher_manifest_path),
+                "field": "pinnedCodexPath",
+                "from": str(self.previous_codex_path),
+                "to": str(self.promoted_codex_path),
+                "env": {OMNIGENT_STOCK_CODEX_PATH_ENV: str(self.promoted_env_path)},
+            },
+            "rollback": {
+                "metadataPath": str(self.rollback_metadata_path)
+                if self.rollback_metadata_path is not None
+                else None,
+                "codexPath": str(self.previous_codex_path),
+                "payloadRetention": "versioned-cache-keeps-previous-payload",
+            },
+        }
+
+    def as_json(self) -> str:
+        """Return a stable JSON summary for automation."""
+        return json.dumps(self.as_dict(), indent=2, sort_keys=True)
+
+
+@dataclass(frozen=True)
+class StockCodexUpdateRollbackResult:
+    """Result of rolling a launcher manifest back from persisted metadata."""
+
+    action: str
+    mutates_filesystem: bool
+    launcher_manifest_path: Path
+    rollback_metadata_path: Path
+    previous_codex_path: Path
+    promoted_codex_path: Path
+    rollback_env_path: Path
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a stable JSON-ready rollback summary."""
+        return {
+            "kind": "omnigent-stock-codex-update-rollback",
+            "schemaVersion": 1,
+            "action": self.action,
+            "mutatesFilesystem": self.mutates_filesystem,
+            "rollbackMetadataPath": str(self.rollback_metadata_path),
+            "launcherManifest": {
+                "manifestPath": str(self.launcher_manifest_path),
+                "field": "pinnedCodexPath",
+                "from": str(self.promoted_codex_path),
+                "to": str(self.previous_codex_path),
+                "env": {OMNIGENT_STOCK_CODEX_PATH_ENV: str(self.rollback_env_path)},
+            },
+        }
+
+    def as_json(self) -> str:
+        """Return a stable JSON summary for automation."""
+        return json.dumps(self.as_dict(), indent=2, sort_keys=True)
+
+
 class ProvisioningError(RuntimeError):
     """The stock Codex payload could not be provisioned or verified."""
 
@@ -664,6 +740,17 @@ def _read_json_object(path: Path) -> dict[str, object]:
     return data
 
 
+def _write_json_object_atomic(path: Path, payload: dict[str, object]) -> None:
+    """Atomically write a JSON object."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    tmp_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    tmp_path.replace(path)
+
+
 def _launcher_manifest_pinned_codex_path(
     launcher_manifest: Path | None,
 ) -> Path | None:
@@ -682,6 +769,36 @@ def _launcher_manifest_pinned_codex_path(
         if isinstance(env_pinned, str) and env_pinned:
             return Path(env_pinned).expanduser().resolve()
     return None
+
+
+def _launcher_manifest_env_codex_path(
+    manifest: dict[str, object],
+) -> Path | None:
+    env = manifest.get("env")
+    if isinstance(env, dict):
+        env_pinned = env.get(OMNIGENT_STOCK_CODEX_PATH_ENV)
+        if isinstance(env_pinned, str) and env_pinned:
+            return Path(env_pinned).expanduser().resolve()
+    return None
+
+
+def _strict_launcher_manifest_codex_paths(
+    manifest_path: Path,
+) -> tuple[dict[str, object], Path, Path]:
+    manifest = _read_json_object(manifest_path)
+    pinned = manifest.get("pinnedCodexPath")
+    pinned_path = (
+        Path(pinned).expanduser().resolve()
+        if isinstance(pinned, str) and pinned
+        else None
+    )
+    env_path = _launcher_manifest_env_codex_path(manifest)
+    if pinned_path is None or env_path is None:
+        raise ProvisioningError(
+            "Launcher manifest must contain pinnedCodexPath and "
+            f"env.{OMNIGENT_STOCK_CODEX_PATH_ENV}: {manifest_path}"
+        )
+    return manifest, pinned_path, env_path
 
 
 def _resolve_current_codex_for_plan(
@@ -840,6 +957,186 @@ def plan_stock_codex_update(
         launcher_current_pinned_codex_path=launcher_pinned,
         promotion_required=promotion_required,
         rollback_codex_path=current_path,
+    )
+
+
+def default_rollback_metadata_path(launcher_manifest: Path) -> Path:
+    """Return the default rollback metadata path for a launcher manifest."""
+    launcher_manifest = launcher_manifest.expanduser()
+    return launcher_manifest.with_name(f"{launcher_manifest.name}.rollback.json")
+
+
+def promote_stock_codex_update(
+    plan: StockCodexUpdatePlan,
+    *,
+    rollback_metadata_path: Path | None,
+) -> StockCodexUpdatePromotionResult:
+    """Promote a ready update plan by updating the launcher manifest pointer."""
+    if plan.launcher_manifest_path is None:
+        raise ProvisioningError("--promote-update requires --launcher-manifest")
+    launcher_manifest_path = plan.launcher_manifest_path.expanduser()
+    if plan.target_state != "ready":
+        raise ProvisioningError(
+            f"Cannot promote stock Codex update before target is ready: {plan.target_state}"
+        )
+    if not plan.target_codex_path.is_file() or not _is_executable(plan.target_codex_path):
+        raise ProvisioningError(f"Promotion target is not executable: {plan.target_codex_path}")
+
+    manifest, pinned_path, env_path = _strict_launcher_manifest_codex_paths(
+        launcher_manifest_path
+    )
+    previous = plan.launcher_current_pinned_codex_path
+    if previous is None:
+        raise ProvisioningError("Cannot promote launcher manifest without a rollback path")
+    previous = previous.expanduser().resolve()
+    if pinned_path != previous or env_path != previous:
+        raise ProvisioningError(
+            "Launcher manifest changed since planning; refusing to promote. "
+            f"planned={previous} pinned={pinned_path} env={env_path}"
+        )
+    promoted = plan.target_codex_path.expanduser().resolve()
+    if not plan.promotion_required:
+        return StockCodexUpdatePromotionResult(
+            action="up-to-date",
+            mutates_filesystem=False,
+            plan=plan,
+            launcher_manifest_path=launcher_manifest_path,
+            rollback_metadata_path=None,
+            previous_codex_path=previous,
+            promoted_codex_path=promoted,
+            promoted_env_path=env_path,
+        )
+
+    rollback_metadata_path = (
+        rollback_metadata_path.expanduser()
+        if rollback_metadata_path is not None
+        else default_rollback_metadata_path(launcher_manifest_path)
+    )
+    target_manifest_path = plan.target_payload_dir / MANIFEST_NAME
+    target_payload = plan.staged_payload or verify_channel_payload_for_artifact(
+        plan.target_payload_dir,
+        artifact=plan.selected_artifact,
+    )
+    rollback_metadata: dict[str, object] = {
+        "schemaVersion": 1,
+        "kind": "omnigent-stock-codex-update-rollback",
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "launcherManifestPath": str(launcher_manifest_path),
+        "field": "pinnedCodexPath",
+        "envKey": OMNIGENT_STOCK_CODEX_PATH_ENV,
+        "from": str(previous),
+        "to": str(promoted),
+        "targetManifestPath": str(target_manifest_path),
+        "targetVersion": plan.selected_version,
+        "targetSha256": target_payload.sha256,
+        "targetArtifactSha256": plan.selected_artifact.sha256,
+    }
+    _write_json_object_atomic(rollback_metadata_path, rollback_metadata)
+
+    env = dict(manifest.get("env") if isinstance(manifest.get("env"), dict) else {})
+    env[OMNIGENT_STOCK_CODEX_PATH_ENV] = str(promoted)
+    manifest["pinnedCodexPath"] = str(promoted)
+    manifest["env"] = env
+    manifest["lastStockCodexUpdate"] = {
+        "schemaVersion": 1,
+        "from": str(previous),
+        "to": str(promoted),
+        "targetManifestPath": str(target_manifest_path),
+        "targetVersion": plan.selected_version,
+        "targetSha256": target_payload.sha256,
+        "targetArtifactSha256": plan.selected_artifact.sha256,
+        "rollbackMetadataPath": str(rollback_metadata_path),
+        "promotedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    _write_json_object_atomic(launcher_manifest_path, manifest)
+
+    return StockCodexUpdatePromotionResult(
+        action="promoted",
+        mutates_filesystem=True,
+        plan=plan,
+        launcher_manifest_path=launcher_manifest_path,
+        rollback_metadata_path=rollback_metadata_path,
+        previous_codex_path=previous,
+        promoted_codex_path=promoted,
+        promoted_env_path=promoted,
+    )
+
+
+def _rollback_metadata_string(
+    metadata: dict[str, object],
+    key: str,
+    *,
+    metadata_path: Path,
+) -> str:
+    value = metadata.get(key)
+    if not isinstance(value, str) or not value:
+        raise ProvisioningError(f"Rollback metadata missing {key!r}: {metadata_path}")
+    return value
+
+
+def rollback_stock_codex_update(
+    rollback_metadata_path: Path,
+) -> StockCodexUpdateRollbackResult:
+    """Apply persisted rollback metadata to a launcher manifest."""
+    rollback_metadata_path = rollback_metadata_path.expanduser()
+    metadata = _read_json_object(rollback_metadata_path)
+    if metadata.get("kind") != "omnigent-stock-codex-update-rollback":
+        raise ProvisioningError(
+            f"Rollback metadata kind mismatch: {metadata.get('kind')!r}"
+        )
+    launcher_manifest_path = Path(
+        _rollback_metadata_string(
+            metadata,
+            "launcherManifestPath",
+            metadata_path=rollback_metadata_path,
+        )
+    ).expanduser()
+    previous = Path(
+        _rollback_metadata_string(metadata, "from", metadata_path=rollback_metadata_path)
+    ).expanduser().resolve()
+    promoted = Path(
+        _rollback_metadata_string(metadata, "to", metadata_path=rollback_metadata_path)
+    ).expanduser().resolve()
+    manifest, pinned_path, env_path = _strict_launcher_manifest_codex_paths(
+        launcher_manifest_path
+    )
+    if pinned_path == previous and env_path == previous:
+        return StockCodexUpdateRollbackResult(
+            action="already-rolled-back",
+            mutates_filesystem=False,
+            launcher_manifest_path=launcher_manifest_path,
+            rollback_metadata_path=rollback_metadata_path,
+            previous_codex_path=previous,
+            promoted_codex_path=promoted,
+            rollback_env_path=previous,
+        )
+    if pinned_path != promoted or env_path != promoted:
+        raise ProvisioningError(
+            "Launcher manifest changed since promotion; refusing rollback. "
+            f"expected={promoted} pinned={pinned_path} env={env_path}"
+        )
+
+    env = dict(manifest.get("env") if isinstance(manifest.get("env"), dict) else {})
+    env[OMNIGENT_STOCK_CODEX_PATH_ENV] = str(previous)
+    manifest["pinnedCodexPath"] = str(previous)
+    manifest["env"] = env
+    manifest["lastStockCodexRollback"] = {
+        "schemaVersion": 1,
+        "from": str(promoted),
+        "to": str(previous),
+        "rollbackMetadataPath": str(rollback_metadata_path),
+        "appliedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    _write_json_object_atomic(launcher_manifest_path, manifest)
+
+    return StockCodexUpdateRollbackResult(
+        action="rolled-back",
+        mutates_filesystem=True,
+        launcher_manifest_path=launcher_manifest_path,
+        rollback_metadata_path=rollback_metadata_path,
+        previous_codex_path=previous,
+        promoted_codex_path=promoted,
+        rollback_env_path=previous,
     )
 
 
@@ -1261,6 +1558,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "versioned cache but do not promote launcher or environment pointers."
         ),
     )
+    parser.add_argument(
+        "--promote-update",
+        action="store_true",
+        help=(
+            "With --plan-update, promote a ready target into --launcher-manifest "
+            "and write rollback metadata. Does not schedule future updates."
+        ),
+    )
+    parser.add_argument(
+        "--rollback-metadata",
+        type=Path,
+        default=None,
+        help=(
+            "Rollback metadata path to write with --promote-update. Defaults to "
+            "<launcher-manifest>.rollback.json."
+        ),
+    )
+    parser.add_argument(
+        "--rollback-update",
+        type=Path,
+        default=None,
+        metavar="ROLLBACK_METADATA",
+        help=(
+            "Apply previously written stock Codex update rollback metadata and exit."
+        ),
+    )
     output = parser.add_mutually_exclusive_group()
     output.add_argument(
         "--print-path",
@@ -1279,6 +1602,59 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
+        if args.rollback_update is not None:
+            if args.plan_update:
+                raise ProvisioningError("--rollback-update cannot be combined with --plan-update")
+            if args.print_path or args.print_shell_env:
+                raise ProvisioningError(
+                    "--rollback-update supports default text output or --json only"
+                )
+            disallowed = [
+                ("--source-binary", args.source_binary),
+                ("--channel-manifest", args.channel_manifest),
+                ("--channel-version", args.channel_version),
+                ("--channel-platform", args.channel_platform),
+                ("--expected-sha256", args.expected_sha256),
+                ("--current-codex", args.current_codex),
+                ("--launcher-manifest", args.launcher_manifest),
+                ("--rollback-metadata", args.rollback_metadata),
+            ]
+            for option, value in disallowed:
+                if value is not None:
+                    raise ProvisioningError(f"{option} cannot be combined with --rollback-update")
+            if (
+                args.force
+                or args.allow_fork_codex
+                or args.allow_remote_channel_download
+                or args.stage_update
+                or args.promote_update
+                or args.channel_policy is not None
+            ):
+                raise ProvisioningError(
+                    "--rollback-update cannot be combined with provisioning or update flags"
+                )
+            rollback_result = rollback_stock_codex_update(args.rollback_update)
+            if args.json:
+                print(rollback_result.as_json())
+            else:
+                print(f"stock_codex_update_rollback_action={rollback_result.action}")
+                print(
+                    "stock_codex_update_rollback_mutates_filesystem="
+                    f"{rollback_result.mutates_filesystem}"
+                )
+                print(
+                    "stock_codex_update_rollback_launcher_manifest="
+                    f"{rollback_result.launcher_manifest_path}"
+                )
+                print(
+                    "stock_codex_update_rollback_previous_path="
+                    f"{rollback_result.previous_codex_path}"
+                )
+                print(
+                    "stock_codex_update_rollback_promoted_path="
+                    f"{rollback_result.promoted_codex_path}"
+                )
+            return 0
         if args.plan_update:
             if args.channel_manifest is None:
                 raise ProvisioningError("--plan-update requires --channel-manifest")
@@ -1288,6 +1664,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise ProvisioningError(
                     "--plan-update supports default text output or --json only"
                 )
+            if args.promote_update and args.launcher_manifest is None:
+                raise ProvisioningError("--promote-update requires --launcher-manifest")
+            if args.rollback_metadata is not None and not args.promote_update:
+                raise ProvisioningError("--rollback-metadata requires --promote-update")
             plan = plan_stock_codex_update(
                 cache_root=args.cache_root,
                 channel_manifest=args.channel_manifest,
@@ -1302,8 +1682,18 @@ def main(argv: list[str] | None = None) -> int:
                 allow_fork_codex=args.allow_fork_codex,
                 allow_remote_channel_download=args.allow_remote_channel_download,
             )
+            promotion_result: StockCodexUpdatePromotionResult | None = None
+            if args.promote_update:
+                promotion_result = promote_stock_codex_update(
+                    plan,
+                    rollback_metadata_path=args.rollback_metadata,
+                )
             if args.json:
-                print(plan.as_json())
+                print(
+                    promotion_result.as_json()
+                    if promotion_result is not None
+                    else plan.as_json()
+                )
             else:
                 print(f"stock_codex_update_action={plan.action}")
                 print(f"stock_codex_update_mutates_filesystem={plan.mutates_filesystem}")
@@ -1315,6 +1705,23 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"stock_codex_update_target_path={plan.target_codex_path}")
                 print(f"stock_codex_update_promotion_required={plan.promotion_required}")
                 print(f"stock_codex_update_rollback_path={plan.rollback_codex_path}")
+                if promotion_result is not None:
+                    print(
+                        "stock_codex_update_promotion_action="
+                        f"{promotion_result.action}"
+                    )
+                    print(
+                        "stock_codex_update_promotion_mutates_filesystem="
+                        f"{promotion_result.mutates_filesystem}"
+                    )
+                    print(
+                        "stock_codex_update_promotion_launcher_manifest="
+                        f"{promotion_result.launcher_manifest_path}"
+                    )
+                    print(
+                        "stock_codex_update_promotion_rollback_metadata="
+                        f"{promotion_result.rollback_metadata_path}"
+                    )
             return 0
         if args.current_codex is not None:
             raise ProvisioningError("--current-codex requires --plan-update")
@@ -1322,6 +1729,10 @@ def main(argv: list[str] | None = None) -> int:
             raise ProvisioningError("--launcher-manifest requires --plan-update")
         if args.stage_update:
             raise ProvisioningError("--stage-update requires --plan-update")
+        if args.promote_update:
+            raise ProvisioningError("--promote-update requires --plan-update")
+        if args.rollback_metadata is not None:
+            raise ProvisioningError("--rollback-metadata requires --promote-update")
         if args.channel_manifest is not None:
             provisioned = provision_stock_codex_from_channel(
                 cache_root=args.cache_root,

@@ -2138,9 +2138,43 @@ def test_stock_codex_compat_pkg_update_promotion_proof_promotes_and_rolls_back(
             return subprocess.CompletedProcess(cmd, 0, stdout=f"{version}\n", stderr="")
         if len(cmd) >= 2 and Path(cmd[1]).name == "provision_stock_codex.py":
             args = cmd[2:]
+            if "--rollback-update" in args:
+                rollback_metadata_path = Path(args[args.index("--rollback-update") + 1])
+                rollback_metadata = json.loads(
+                    rollback_metadata_path.read_text(encoding="utf-8")
+                )
+                launcher_manifest_path = Path(str(rollback_metadata["launcherManifestPath"]))
+                previous = Path(str(rollback_metadata["from"])).resolve()
+                promoted = Path(str(rollback_metadata["to"])).resolve()
+                launcher_manifest = json.loads(
+                    launcher_manifest_path.read_text(encoding="utf-8")
+                )
+                assert Path(str(launcher_manifest["pinnedCodexPath"])).resolve() == promoted
+                launcher_manifest["pinnedCodexPath"] = str(previous)
+                launcher_manifest["env"][_MOD.OMNIGENT_STOCK_CODEX_PATH_ENV] = str(previous)
+                launcher_manifest_path.write_text(
+                    json.dumps(launcher_manifest) + "\n",
+                    encoding="utf-8",
+                )
+                result = {
+                    "kind": "omnigent-stock-codex-update-rollback",
+                    "schemaVersion": 1,
+                    "action": "rolled-back",
+                    "mutatesFilesystem": True,
+                    "rollbackMetadataPath": str(rollback_metadata_path),
+                    "launcherManifest": {
+                        "manifestPath": str(launcher_manifest_path),
+                        "field": "pinnedCodexPath",
+                        "from": str(promoted),
+                        "to": str(previous),
+                        "env": {_MOD.OMNIGENT_STOCK_CODEX_PATH_ENV: str(previous)},
+                    },
+                }
+                return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(result), stderr="")
             cache_root = Path(args[args.index("--cache-root") + 1])
             launcher_manifest_path = Path(args[args.index("--launcher-manifest") + 1])
             allow_remote = "--allow-remote-channel-download" in args
+            promote_update = "--promote-update" in args
             target_dir = cache_root / "0.143.0"
             target_path = target_dir / "codex"
             if not allow_remote and not target_path.exists():
@@ -2230,6 +2264,52 @@ def test_stock_codex_compat_pkg_update_promotion_proof_promotes_and_rolls_back(
                     "channelArtifact": expected_artifact,
                 },
             }
+            if promote_update:
+                rollback_metadata_path = Path(args[args.index("--rollback-metadata") + 1])
+                assert action == "stage-ready"
+                rollback_metadata = {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-update-rollback",
+                    "launcherManifestPath": str(launcher_manifest_path),
+                    "field": "pinnedCodexPath",
+                    "envKey": _MOD.OMNIGENT_STOCK_CODEX_PATH_ENV,
+                    "from": str(pinned_path),
+                    "to": str(target_path.resolve()),
+                }
+                rollback_metadata_path.write_text(
+                    json.dumps(rollback_metadata) + "\n",
+                    encoding="utf-8",
+                )
+                launcher_manifest["pinnedCodexPath"] = str(target_path.resolve())
+                launcher_manifest["env"][_MOD.OMNIGENT_STOCK_CODEX_PATH_ENV] = str(
+                    target_path.resolve()
+                )
+                launcher_manifest_path.write_text(
+                    json.dumps(launcher_manifest) + "\n",
+                    encoding="utf-8",
+                )
+                result = {
+                    "kind": "omnigent-stock-codex-update-promotion",
+                    "schemaVersion": 1,
+                    "action": "promoted",
+                    "mutatesFilesystem": True,
+                    "plan": plan,
+                    "launcherManifest": {
+                        "manifestPath": str(launcher_manifest_path),
+                        "field": "pinnedCodexPath",
+                        "from": str(pinned_path),
+                        "to": str(target_path.resolve()),
+                        "env": {
+                            _MOD.OMNIGENT_STOCK_CODEX_PATH_ENV: str(target_path.resolve())
+                        },
+                    },
+                    "rollback": {
+                        "metadataPath": str(rollback_metadata_path),
+                        "codexPath": str(pinned_path),
+                        "payloadRetention": "versioned-cache-keeps-previous-payload",
+                    },
+                }
+                return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(result), stderr="")
             return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(plan), stderr="")
         raise AssertionError(f"unexpected subprocess command: {cmd!r}")
 
@@ -2253,12 +2333,16 @@ def test_stock_codex_compat_pkg_update_promotion_proof_promotes_and_rolls_back(
     assert proof.acquired_version == "codex-cli 0.143.0"
     assert proof.acquired_source_kind == "channel"
     assert proof.acquired_codex_path == proof.clean_cache_root / "0.143.0" / "codex"
+    assert proof.promotion_command_action == "promoted"
+    assert proof.promotion_command_mutates_filesystem is True
     assert proof.promoted_codex_path == proof.acquired_codex_path
     assert proof.promoted_env_path == proof.acquired_codex_path
     assert proof.promoted_metadata_to_path == proof.acquired_codex_path
     assert proof.post_promotion_action == "up-to-date"
     assert proof.post_promotion_mutates_filesystem is False
     assert proof.post_promotion_required is False
+    assert proof.rollback_command_action == "rolled-back"
+    assert proof.rollback_command_mutates_filesystem is True
     assert proof.rollback_codex_path == proof.current_codex_path
     assert proof.rollback_env_path == proof.current_codex_path
     assert proof.rollback_plan_action == "stage-ready"

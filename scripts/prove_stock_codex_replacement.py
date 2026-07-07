@@ -31,7 +31,6 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 from urllib.parse import urlparse
@@ -1318,12 +1317,16 @@ class StockCodexCompatPkgUpdatePromotionProof:
     acquisition_promotion_required: bool
     acquisition_promotion_ready: bool
     acquisition_launcher_update_required: bool
+    promotion_command_action: str
+    promotion_command_mutates_filesystem: bool
     promoted_codex_path: Path
     promoted_env_path: Path
     promoted_metadata_to_path: Path
     post_promotion_action: str
     post_promotion_mutates_filesystem: bool
     post_promotion_required: bool
+    rollback_command_action: str
+    rollback_command_mutates_filesystem: bool
     rollback_codex_path: Path
     rollback_env_path: Path
     rollback_plan_action: str
@@ -2198,168 +2201,6 @@ def _run_stock_codex_provisioner_json(
     if not isinstance(parsed, dict):
         raise SystemExit(f"{failure_label} emitted non-object JSON: {parsed!r}")
     return parsed
-
-
-def _read_json_file(path: Path, *, label: str) -> dict[str, Any]:
-    """Read a JSON object from disk for proof-local manifest checks."""
-    try:
-        parsed = json.loads(path.read_text(encoding="utf-8"))
-    except OSError as exc:
-        raise SystemExit(f"{label} could not read JSON file: {path}: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"{label} JSON file is invalid: {path}") from exc
-    if not isinstance(parsed, dict):
-        raise SystemExit(f"{label} JSON file is not an object: {path}")
-    return parsed
-
-
-def _write_json_file_atomic(path: Path, payload: dict[str, Any]) -> None:
-    """Atomically write a proof-local JSON object."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    tmp_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    tmp_path.replace(path)
-
-
-def _launcher_manifest_stock_codex_path(
-    manifest: dict[str, Any],
-    *,
-    field: str,
-    label: str,
-) -> Path:
-    value = manifest.get(field)
-    if not isinstance(value, str) or not value:
-        raise SystemExit(f"{label} missing launcher manifest field {field!r}: {manifest!r}")
-    return Path(value).expanduser().resolve()
-
-
-def _launcher_manifest_env_codex_path(
-    manifest: dict[str, Any],
-    *,
-    label: str,
-) -> Path:
-    env = manifest.get("env")
-    if not isinstance(env, dict):
-        raise SystemExit(f"{label} missing launcher manifest env object: {manifest!r}")
-    value = env.get(OMNIGENT_STOCK_CODEX_PATH_ENV)
-    if not isinstance(value, str) or not value:
-        raise SystemExit(
-            f"{label} missing launcher manifest {OMNIGENT_STOCK_CODEX_PATH_ENV}: {manifest!r}"
-        )
-    return Path(value).expanduser().resolve()
-
-
-def _promote_stock_codex_launcher_manifest(
-    *,
-    launcher_manifest_path: Path,
-    rollback_metadata_path: Path,
-    expected_current_codex_path: Path,
-    target_codex_path: Path,
-    target_manifest_path: Path,
-    target_version: str,
-    target_sha256: str,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Promote a proof-local launcher manifest and persist rollback metadata."""
-    manifest = _read_json_file(
-        launcher_manifest_path,
-        label="Stock Codex launcher promotion",
-    )
-    current_path = _launcher_manifest_stock_codex_path(
-        manifest,
-        field="pinnedCodexPath",
-        label="Stock Codex launcher promotion",
-    )
-    current_env_path = _launcher_manifest_env_codex_path(
-        manifest,
-        label="Stock Codex launcher promotion",
-    )
-    expected_current = expected_current_codex_path.expanduser().resolve()
-    if current_path != expected_current or current_env_path != expected_current:
-        raise SystemExit(
-            "Stock Codex launcher promotion started from an unexpected pointer.\n"
-            f"expected={expected_current}\npinned={current_path}\nenv={current_env_path}"
-        )
-
-    target = target_codex_path.expanduser().resolve()
-    rollback_metadata: dict[str, Any] = {
-        "schemaVersion": 1,
-        "kind": "omnigent-stock-codex-compat-update-rollback",
-        "createdAt": datetime.now(timezone.utc).isoformat(),
-        "launcherManifestPath": str(launcher_manifest_path),
-        "field": "pinnedCodexPath",
-        "envKey": OMNIGENT_STOCK_CODEX_PATH_ENV,
-        "from": str(expected_current),
-        "to": str(target),
-        "targetManifestPath": str(target_manifest_path),
-        "targetVersion": target_version,
-        "targetSha256": target_sha256,
-    }
-    _write_json_file_atomic(rollback_metadata_path, rollback_metadata)
-
-    env = dict(manifest.get("env") if isinstance(manifest.get("env"), dict) else {})
-    env[OMNIGENT_STOCK_CODEX_PATH_ENV] = str(target)
-    manifest["pinnedCodexPath"] = str(target)
-    manifest["env"] = env
-    manifest["lastStockCodexUpdate"] = {
-        "schemaVersion": 1,
-        "from": str(expected_current),
-        "to": str(target),
-        "targetManifestPath": str(target_manifest_path),
-        "targetVersion": target_version,
-        "targetSha256": target_sha256,
-        "rollbackMetadataPath": str(rollback_metadata_path),
-    }
-    _write_json_file_atomic(launcher_manifest_path, manifest)
-    return manifest, rollback_metadata
-
-
-def _rollback_stock_codex_launcher_manifest(
-    *,
-    launcher_manifest_path: Path,
-    rollback_metadata_path: Path,
-) -> dict[str, Any]:
-    """Roll a proof-local launcher manifest back to its previous stock-Codex path."""
-    manifest = _read_json_file(
-        launcher_manifest_path,
-        label="Stock Codex launcher rollback",
-    )
-    rollback = _read_json_file(
-        rollback_metadata_path,
-        label="Stock Codex launcher rollback metadata",
-    )
-    previous = Path(_json_string(rollback, "from")).expanduser().resolve()
-    promoted = Path(_json_string(rollback, "to")).expanduser().resolve()
-    current_path = _launcher_manifest_stock_codex_path(
-        manifest,
-        field="pinnedCodexPath",
-        label="Stock Codex launcher rollback",
-    )
-    current_env_path = _launcher_manifest_env_codex_path(
-        manifest,
-        label="Stock Codex launcher rollback",
-    )
-    if current_path != promoted or current_env_path != promoted:
-        raise SystemExit(
-            "Stock Codex launcher rollback started from an unexpected pointer.\n"
-            f"expected={promoted}\npinned={current_path}\nenv={current_env_path}"
-        )
-
-    env = dict(manifest.get("env") if isinstance(manifest.get("env"), dict) else {})
-    env[OMNIGENT_STOCK_CODEX_PATH_ENV] = str(previous)
-    manifest["pinnedCodexPath"] = str(previous)
-    manifest["env"] = env
-    manifest["lastStockCodexRollback"] = {
-        "schemaVersion": 1,
-        "from": str(promoted),
-        "to": str(previous),
-        "rollbackMetadataPath": str(rollback_metadata_path),
-        "appliedAt": datetime.now(timezone.utc).isoformat(),
-    }
-    _write_json_file_atomic(launcher_manifest_path, manifest)
-    return manifest
 
 
 def run_stock_codex_production_channel_policy_proof(
@@ -11395,31 +11236,106 @@ def run_stock_codex_compat_pkg_update_promotion_proof(
                 f"{acquired_manifest!r}"
             )
 
-        promoted_manifest, rollback_metadata = _promote_stock_codex_launcher_manifest(
-            launcher_manifest_path=launcher_manifest_path,
-            rollback_metadata_path=rollback_metadata_path,
-            expected_current_codex_path=current_codex_path,
-            target_codex_path=acquired_codex_path,
-            target_manifest_path=acquired_manifest_path,
-            target_version=acquired_version,
-            target_sha256=acquired_sha,
+        promotion_result = _run_stock_codex_provisioner_json(
+            [
+                *update_command,
+                "--promote-update",
+                "--rollback-metadata",
+                str(rollback_metadata_path),
+            ],
+            env=env,
+            cwd=installed_runtime_root,
+            failure_label="Pkg-installed Stock Codex update promotion command",
+            timeout=60,
         )
-        promoted_codex_path = _launcher_manifest_stock_codex_path(
-            promoted_manifest,
-            field="pinnedCodexPath",
-            label="Stock Codex update promotion proof",
+        promotion_command_action = _json_string(promotion_result, "action")
+        promotion_command_mutates = _json_bool(
+            promotion_result,
+            "mutatesFilesystem",
+            label="Pkg-installed Stock Codex update promotion command",
         )
-        promoted_env_path = _launcher_manifest_env_codex_path(
-            promoted_manifest,
-            label="Stock Codex update promotion proof",
+        promotion_plan = _json_object(
+            promotion_result,
+            "plan",
+            label="Pkg-installed Stock Codex update promotion command",
         )
-        promoted_metadata_to_path = (
-            Path(_json_string(rollback_metadata, "to")).expanduser().resolve()
+        promotion_plan_action = _json_string(promotion_plan, "action")
+        promotion_plan_mutates = _json_bool(
+            promotion_plan,
+            "mutatesFilesystem",
+            label="Pkg-installed Stock Codex update promotion command plan",
         )
+        promotion_launcher = _json_object(
+            promotion_result,
+            "launcherManifest",
+            label="Pkg-installed Stock Codex update promotion command",
+        )
+        promotion_env = _json_object(
+            promotion_launcher,
+            "env",
+            label="Pkg-installed Stock Codex update promotion command launcher",
+        )
+        promotion_rollback = _json_object(
+            promotion_result,
+            "rollback",
+            label="Pkg-installed Stock Codex update promotion command",
+        )
+        promoted_codex_path = Path(_json_string(promotion_launcher, "to")).resolve()
+        promoted_env_path = Path(
+            _json_string(promotion_env, OMNIGENT_STOCK_CODEX_PATH_ENV)
+        ).resolve()
+        promotion_rollback_metadata_path = Path(
+            _json_string(promotion_rollback, "metadataPath")
+        ).resolve()
+        rollback_metadata = json.loads(rollback_metadata_path.read_text(encoding="utf-8"))
+        if not isinstance(rollback_metadata, dict):
+            raise SystemExit(
+                "Pkg-installed update promotion rollback metadata is invalid: "
+                f"{rollback_metadata!r}"
+            )
+        promoted_metadata_to_path = Path(
+            _json_string(rollback_metadata, "to")
+        ).expanduser().resolve()
+        promoted_manifest = json.loads(launcher_manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(promoted_manifest, dict):
+            raise SystemExit(
+                "Pkg-installed update promotion launcher manifest is invalid: "
+                f"{promoted_manifest!r}"
+            )
+        promoted_manifest_path = Path(
+            _json_string(promoted_manifest, "pinnedCodexPath")
+        ).expanduser().resolve()
+        promoted_manifest_env = promoted_manifest.get("env")
+        if not isinstance(promoted_manifest_env, dict):
+            raise SystemExit(
+                "Pkg-installed update promotion manifest env is invalid: "
+                f"{promoted_manifest!r}"
+            )
+        promoted_manifest_env_path = Path(
+            _json_string(promoted_manifest_env, OMNIGENT_STOCK_CODEX_PATH_ENV)
+        ).expanduser().resolve()
+        if promotion_command_action != "promoted" or not promotion_command_mutates:
+            raise SystemExit(
+                "Pkg-installed update promotion command did not report promotion.\n"
+                f"result={promotion_result!r}"
+            )
+        if promotion_plan_action != "stage-ready" or promotion_plan_mutates:
+            raise SystemExit(
+                "Pkg-installed update promotion command did not reuse a ready "
+                f"target without cache mutation.\nresult={promotion_result!r}"
+            )
+        if promotion_rollback_metadata_path != rollback_metadata_path.resolve():
+            raise SystemExit(
+                "Pkg-installed update promotion command wrote unexpected "
+                "rollback metadata path.\n"
+                f"expected={rollback_metadata_path}\nactual={promotion_rollback_metadata_path}"
+            )
         if (
             promoted_codex_path != acquired_codex_path
             or promoted_env_path != acquired_codex_path
             or promoted_metadata_to_path != acquired_codex_path
+            or promoted_manifest_path != acquired_codex_path
+            or promoted_manifest_env_path != acquired_codex_path
         ):
             raise SystemExit(
                 "Pkg-installed update promotion did not persist the acquired target.\n"
@@ -11473,20 +11389,68 @@ def run_stock_codex_compat_pkg_update_promotion_proof(
                 f"plan={post_promotion_plan!r}"
             )
 
-        rollback_manifest = _rollback_stock_codex_launcher_manifest(
-            launcher_manifest_path=launcher_manifest_path,
-            rollback_metadata_path=rollback_metadata_path,
+        rollback_result = _run_stock_codex_provisioner_json(
+            [
+                sys.executable,
+                str(provisioner_script_path),
+                "--rollback-update",
+                str(rollback_metadata_path),
+                "--json",
+            ],
+            env=env,
+            cwd=installed_runtime_root,
+            failure_label="Pkg-installed Stock Codex update rollback command",
+            timeout=60,
         )
-        rollback_codex_path = _launcher_manifest_stock_codex_path(
-            rollback_manifest,
-            field="pinnedCodexPath",
-            label="Stock Codex update rollback proof",
+        rollback_command_action = _json_string(rollback_result, "action")
+        rollback_command_mutates = _json_bool(
+            rollback_result,
+            "mutatesFilesystem",
+            label="Pkg-installed Stock Codex update rollback command",
         )
-        rollback_env_path = _launcher_manifest_env_codex_path(
-            rollback_manifest,
-            label="Stock Codex update rollback proof",
+        rollback_launcher = _json_object(
+            rollback_result,
+            "launcherManifest",
+            label="Pkg-installed Stock Codex update rollback command",
         )
-        if rollback_codex_path != current_codex_path or rollback_env_path != current_codex_path:
+        rollback_launcher_env = _json_object(
+            rollback_launcher,
+            "env",
+            label="Pkg-installed Stock Codex update rollback command launcher",
+        )
+        rollback_codex_path = Path(_json_string(rollback_launcher, "to")).resolve()
+        rollback_env_path = Path(
+            _json_string(rollback_launcher_env, OMNIGENT_STOCK_CODEX_PATH_ENV)
+        ).resolve()
+        rollback_manifest = json.loads(launcher_manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(rollback_manifest, dict):
+            raise SystemExit(
+                "Pkg-installed update rollback launcher manifest is invalid: "
+                f"{rollback_manifest!r}"
+            )
+        rollback_manifest_path = Path(
+            _json_string(rollback_manifest, "pinnedCodexPath")
+        ).expanduser().resolve()
+        rollback_manifest_env = rollback_manifest.get("env")
+        if not isinstance(rollback_manifest_env, dict):
+            raise SystemExit(
+                "Pkg-installed update rollback manifest env is invalid: "
+                f"{rollback_manifest!r}"
+            )
+        rollback_manifest_env_path = Path(
+            _json_string(rollback_manifest_env, OMNIGENT_STOCK_CODEX_PATH_ENV)
+        ).expanduser().resolve()
+        if rollback_command_action != "rolled-back" or not rollback_command_mutates:
+            raise SystemExit(
+                "Pkg-installed update rollback command did not report rollback.\n"
+                f"result={rollback_result!r}"
+            )
+        if (
+            rollback_codex_path != current_codex_path
+            or rollback_env_path != current_codex_path
+            or rollback_manifest_path != current_codex_path
+            or rollback_manifest_env_path != current_codex_path
+        ):
             raise SystemExit(
                 "Pkg-installed update rollback did not restore the previous pointer.\n"
                 f"expected={current_codex_path}\n"
@@ -11541,7 +11505,11 @@ def run_stock_codex_compat_pkg_update_promotion_proof(
         proof_text = (
             json.dumps(acquisition_plan, sort_keys=True)
             + "\n"
+            + json.dumps(promotion_result, sort_keys=True)
+            + "\n"
             + json.dumps(post_promotion_plan, sort_keys=True)
+            + "\n"
+            + json.dumps(rollback_result, sort_keys=True)
             + "\n"
             + json.dumps(rollback_plan, sort_keys=True)
             + "\n"
@@ -11601,12 +11569,16 @@ def run_stock_codex_compat_pkg_update_promotion_proof(
             acquisition_promotion_required=acquisition_promotion_required,
             acquisition_promotion_ready=acquisition_promotion_ready,
             acquisition_launcher_update_required=acquisition_launcher_update_required,
+            promotion_command_action=promotion_command_action,
+            promotion_command_mutates_filesystem=promotion_command_mutates,
             promoted_codex_path=promoted_codex_path,
             promoted_env_path=promoted_env_path,
             promoted_metadata_to_path=promoted_metadata_to_path,
             post_promotion_action=post_promotion_action,
             post_promotion_mutates_filesystem=post_promotion_mutates,
             post_promotion_required=post_promotion_required,
+            rollback_command_action=rollback_command_action,
+            rollback_command_mutates_filesystem=rollback_command_mutates,
             rollback_codex_path=rollback_codex_path,
             rollback_env_path=rollback_env_path,
             rollback_plan_action=rollback_plan_action,
@@ -12614,6 +12586,14 @@ def print_stock_codex_compat_pkg_update_promotion_proof(
         f"{proof.acquisition_launcher_update_required}"
     )
     print(
+        "stock_codex_compat_pkg_update_promotion_command_action="
+        f"{proof.promotion_command_action}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_promotion_command_mutates_filesystem="
+        f"{proof.promotion_command_mutates_filesystem}"
+    )
+    print(
         f"stock_codex_compat_pkg_update_promotion_promoted_codex_path={proof.promoted_codex_path}"
     )
     print(f"stock_codex_compat_pkg_update_promotion_promoted_env_path={proof.promoted_env_path}")
@@ -12627,6 +12607,14 @@ def print_stock_codex_compat_pkg_update_promotion_proof(
         f"{proof.post_promotion_mutates_filesystem}"
     )
     print(f"stock_codex_compat_pkg_update_promotion_post_required={proof.post_promotion_required}")
+    print(
+        "stock_codex_compat_pkg_update_promotion_rollback_command_action="
+        f"{proof.rollback_command_action}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_promotion_rollback_command_mutates_filesystem="
+        f"{proof.rollback_command_mutates_filesystem}"
+    )
     print(
         f"stock_codex_compat_pkg_update_promotion_rollback_codex_path={proof.rollback_codex_path}"
     )

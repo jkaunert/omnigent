@@ -1010,6 +1010,196 @@ def test_plan_stock_codex_update_promotes_stale_launcher_manifest(
     assert data["rollback"]["codexPath"] == str((target_payload_dir / "codex").resolve())
 
 
+def test_main_promote_update_writes_launcher_and_rollback_metadata(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    old_codex = _write_codex_binary(tmp_path / "old" / "codex")
+    target_codex = _write_codex_binary(
+        tmp_path / "target-source" / "codex",
+        version="codex-cli 0.143.0",
+    )
+    target_digest = _MOD.sha256_file(target_codex)
+    channel_manifest = _write_official_channel_manifest(tmp_path / "channel.json")
+    artifact = _MOD.select_channel_artifact(
+        channel_manifest=channel_manifest,
+        requested_version=None,
+        requested_platform=None,
+    )
+    cache_root = tmp_path / "cache"
+    target_payload_dir = cache_root / "0.143.0"
+    _MOD.copy_codex_payload(
+        source_binary=target_codex,
+        destination_payload_dir=target_payload_dir,
+        version="codex-cli 0.143.0",
+        digest=target_digest,
+        source_kind="channel",
+        manifest_source_path=artifact.source,
+        manifest_source_realpath=artifact.source,
+        channel_manifest_path=channel_manifest,
+        channel_artifact=artifact,
+    )
+    launcher_manifest = tmp_path / "launcher.json"
+    launcher_manifest.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "kind": "omnigent-stock-codex-compat-launcher",
+                "pinnedCodexPath": str(old_codex),
+                "env": {_MOD.OMNIGENT_STOCK_CODEX_PATH_ENV: str(old_codex)},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rollback_metadata = tmp_path / "launcher.rollback.json"
+
+    rc = _MOD.main(
+        [
+            "--plan-update",
+            "--stage-update",
+            "--cache-root",
+            str(cache_root),
+            "--channel-manifest",
+            str(channel_manifest),
+            "--channel-policy",
+            _MOD.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY,
+            "--launcher-manifest",
+            str(launcher_manifest),
+            "--promote-update",
+            "--rollback-metadata",
+            str(rollback_metadata),
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["kind"] == "omnigent-stock-codex-update-promotion"
+    assert output["action"] == "promoted"
+    assert output["mutatesFilesystem"] is True
+    assert output["plan"]["action"] == "stage-ready"
+    assert output["launcherManifest"]["from"] == str(old_codex.resolve())
+    assert output["launcherManifest"]["to"] == str(target_payload_dir / "codex")
+    assert output["rollback"]["metadataPath"] == str(rollback_metadata)
+
+    promoted_manifest = json.loads(launcher_manifest.read_text(encoding="utf-8"))
+    assert promoted_manifest["pinnedCodexPath"] == str(target_payload_dir / "codex")
+    assert promoted_manifest["env"][_MOD.OMNIGENT_STOCK_CODEX_PATH_ENV] == str(
+        target_payload_dir / "codex"
+    )
+    assert promoted_manifest["lastStockCodexUpdate"]["rollbackMetadataPath"] == str(
+        rollback_metadata
+    )
+    assert promoted_manifest["lastStockCodexUpdate"]["targetSha256"] == target_digest
+    assert promoted_manifest["lastStockCodexUpdate"]["targetArtifactSha256"] == artifact.sha256
+    rollback = json.loads(rollback_metadata.read_text(encoding="utf-8"))
+    assert rollback["kind"] == "omnigent-stock-codex-update-rollback"
+    assert rollback["launcherManifestPath"] == str(launcher_manifest)
+    assert rollback["from"] == str(old_codex.resolve())
+    assert rollback["to"] == str((target_payload_dir / "codex").resolve())
+    assert rollback["targetSha256"] == target_digest
+    assert rollback["targetArtifactSha256"] == artifact.sha256
+
+
+def test_main_rollback_update_restores_launcher_manifest(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    old_codex = _write_codex_binary(tmp_path / "old" / "codex")
+    target_codex = _write_codex_binary(
+        tmp_path / "cache" / "0.143.0" / "codex",
+        version="codex-cli 0.143.0",
+    )
+    launcher_manifest = tmp_path / "launcher.json"
+    launcher_manifest.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "kind": "omnigent-stock-codex-compat-launcher",
+                "pinnedCodexPath": str(target_codex),
+                "env": {_MOD.OMNIGENT_STOCK_CODEX_PATH_ENV: str(target_codex)},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rollback_metadata = tmp_path / "launcher.rollback.json"
+    rollback_metadata.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "kind": "omnigent-stock-codex-update-rollback",
+                "launcherManifestPath": str(launcher_manifest),
+                "field": "pinnedCodexPath",
+                "envKey": _MOD.OMNIGENT_STOCK_CODEX_PATH_ENV,
+                "from": str(old_codex.resolve()),
+                "to": str(target_codex.resolve()),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rc = _MOD.main(["--rollback-update", str(rollback_metadata), "--json"])
+
+    assert rc == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["kind"] == "omnigent-stock-codex-update-rollback"
+    assert output["action"] == "rolled-back"
+    assert output["mutatesFilesystem"] is True
+    assert output["launcherManifest"]["from"] == str(target_codex.resolve())
+    assert output["launcherManifest"]["to"] == str(old_codex.resolve())
+    rolled_back_manifest = json.loads(launcher_manifest.read_text(encoding="utf-8"))
+    assert rolled_back_manifest["pinnedCodexPath"] == str(old_codex.resolve())
+    assert rolled_back_manifest["env"][_MOD.OMNIGENT_STOCK_CODEX_PATH_ENV] == str(
+        old_codex.resolve()
+    )
+
+    rc = _MOD.main(["--rollback-update", str(rollback_metadata), "--json"])
+
+    assert rc == 0
+    idempotent_output = json.loads(capsys.readouterr().out)
+    assert idempotent_output["action"] == "already-rolled-back"
+    assert idempotent_output["mutatesFilesystem"] is False
+
+
+def test_main_promote_update_requires_launcher_manifest(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    channel_manifest = _write_official_channel_manifest(tmp_path / "channel.json")
+
+    rc = _MOD.main(
+        [
+            "--plan-update",
+            "--channel-manifest",
+            str(channel_manifest),
+            "--channel-policy",
+            _MOD.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY,
+            "--promote-update",
+            "--json",
+        ]
+    )
+
+    assert rc == 1
+    assert "--promote-update requires --launcher-manifest" in capsys.readouterr().err
+
+
+def test_main_rollback_update_rejects_plan_options(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rollback_metadata = tmp_path / "rollback.json"
+
+    rc = _MOD.main(["--rollback-update", str(rollback_metadata), "--plan-update"])
+
+    assert rc == 1
+    assert "--rollback-update cannot be combined with --plan-update" in (
+        capsys.readouterr().err
+    )
+
+
 def test_plan_stock_codex_update_reports_force_required_for_stale_payload(
     tmp_path: Path,
 ) -> None:
