@@ -18,6 +18,7 @@ from omnigent.adapters.xcodebuild_cli import (
     DEFAULT_XCODEBUILD_CLI_POLICY,
     XcodeBuildCliAdapterPolicy,
     build_xcodebuildmcp_simulator_build_run_stock_codex_bridge_handler,
+    build_xcodebuildmcp_simulator_test_stock_codex_bridge_handler,
 )
 from omnigent.stock_codex_adapter_bridge import (
     AdapterBridgeHandler,
@@ -27,9 +28,11 @@ from omnigent.stock_codex_adapter_bridge import (
 APPLE_DOCS_BRIDGE_HANDLER_TIMEOUT_SECONDS = 120
 APPLE_DOCS_BRIDGE_CAPABILITY = "apple-docs"
 XCODEBUILD_BRIDGE_CAPABILITY = "xcodebuildmcp-simulator-build-run"
+XCODEBUILD_TEST_BRIDGE_CAPABILITY = "xcodebuildmcp-simulator-test"
 SUPPORTED_STOCK_CODEX_BRIDGE_CAPABILITIES = (
     APPLE_DOCS_BRIDGE_CAPABILITY,
     XCODEBUILD_BRIDGE_CAPABILITY,
+    XCODEBUILD_TEST_BRIDGE_CAPABILITY,
 )
 
 
@@ -72,6 +75,10 @@ def build_stock_codex_adapter_bridge_handlers(
                 build_xcodebuildmcp_simulator_build_run_stock_codex_bridge_handler(
                     xcodebuild_policy or DEFAULT_XCODEBUILD_CLI_POLICY
                 )
+            )
+        elif capability == XCODEBUILD_TEST_BRIDGE_CAPABILITY:
+            handlers[name] = build_xcodebuildmcp_simulator_test_stock_codex_bridge_handler(
+                xcodebuild_policy or DEFAULT_XCODEBUILD_CLI_POLICY
             )
     return handlers
 

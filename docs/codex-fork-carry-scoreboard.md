@@ -278,8 +278,9 @@ The next gates should split by product mode:
   credentials. This host has a Developer ID Application identity, but that is
   insufficient for `.pkg` signing; remaining production gates are
   credential-backed execution of that gate, remote official stock-Codex
-  acquisition/update policy if product scope requires it, broader bridge
-  coverage such as XcodeBuildMCP tests or UI automation, and diagnostics. Raw
+  acquisition/update policy if product scope requires it, broader UI/device
+  bridge coverage such as screenshot, snapshot, gesture, or device execution,
+  and diagnostics. Raw
   unwrapped stock Codex Electron/CLI route parity remains blocked;
 - for both modes, decide whether the temporary Homebrew/GitHub remote proof
   should become a persistent updater/install command, and what independent

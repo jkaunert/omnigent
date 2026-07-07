@@ -37,6 +37,8 @@ from omnigent.adapters.xcodebuild_cli import (
     build_xcodebuildmcp_simulator_screenshot_tool_source,
     build_xcodebuildmcp_simulator_snapshot_ui_tool_source,
     build_xcodebuildmcp_simulator_tap_tool_source,
+    build_xcodebuildmcp_simulator_test_stock_codex_bridge_adapter_spec,
+    build_xcodebuildmcp_simulator_test_stock_codex_bridge_handler,
     build_xcodebuildmcp_simulator_test_tool_source,
     build_xcodebuildmcp_simulator_type_text_tool_source,
     write_xcodebuildmcp_simulator_build_run_tool,
@@ -228,6 +230,26 @@ def test_stock_codex_bridge_adapter_spec_uses_closed_build_run_schema(
     assert "OMNIGENT_STOCK_CODEX_COMPAT_ADAPTER_BRIDGE_DIR" in spec.command_source
 
 
+def test_stock_codex_bridge_adapter_spec_uses_closed_test_schema(
+    tmp_path: Path,
+) -> None:
+    spec = build_xcodebuildmcp_simulator_test_stock_codex_bridge_adapter_spec()
+
+    manifest = build_stock_codex_compat_adapter_manifest(tmp_path / "bin", (spec,))
+
+    assert manifest["tools"][0]["name"] == XCODEBUILD_CLI_TEST_TOOL_NAME
+    assert manifest["tools"][0]["capability"] == "xcodebuildmcp-simulator-test"
+    assert manifest["tools"][0]["parameters"]["required"] == [
+        "project_path",
+        "scheme",
+        "configuration",
+        "simulator_name",
+        "derived_data_path",
+    ]
+    assert manifest["tools"][0]["parameters"]["additionalProperties"] is False
+    assert "OMNIGENT_STOCK_CODEX_COMPAT_ADAPTER_BRIDGE_DIR" in spec.command_source
+
+
 def test_stock_codex_bridge_handler_runs_build_run_with_adapter_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -277,6 +299,57 @@ def test_stock_codex_bridge_handler_runs_build_run_with_adapter_env(
     assert response.status == "ok"
     assert response.exitCode == 0
     assert "Build & Run complete" in response.stdout
+
+
+def test_stock_codex_bridge_handler_runs_simulator_test_with_adapter_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_path = tmp_path / "Demo.xcodeproj"
+    project_path.mkdir()
+    derived_data_path = tmp_path / "DerivedData"
+    fake_xcodebuildmcp = tmp_path / "xcodebuildmcp"
+    fake_xcodebuildmcp.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" != \"simulator\" ] || [ \"$2\" != \"test\" ]; then\n"
+        "  echo unexpected command >&2\n"
+        "  exit 66\n"
+        "fi\n"
+        "if [ -z \"$XCODEBUILDMCP_ENABLED_WORKFLOWS\" ]; then\n"
+        "  echo missing workflows env >&2\n"
+        "  exit 67\n"
+        "fi\n"
+        "if [ -n \"${XCODEBUILDMCP_AXE_PATH:-}\" ]; then\n"
+        "  echo ambient axe path leaked >&2\n"
+        "  exit 68\n"
+        "fi\n"
+        "echo '10 tests passed'\n"
+        "echo '0 failed'\n"
+        "echo '0 skipped'\n",
+        encoding="utf-8",
+    )
+    fake_xcodebuildmcp.chmod(0o755)
+    policy = XcodeBuildCliAdapterPolicy(
+        test_command_prefix=(str(fake_xcodebuildmcp), "simulator", "test"),
+        allowed_derived_data_roots=(str(tmp_path),),
+        timeout_seconds=5,
+    )
+    handler = build_xcodebuildmcp_simulator_test_stock_codex_bridge_handler(policy)
+    monkeypatch.setenv(XCODEBUILDMCP_AXE_PATH_ENV, "/ambient/axe")
+
+    response = handler(
+        {
+            "project_path": str(project_path),
+            "scheme": "Demo",
+            "configuration": "Debug",
+            "simulator_name": "iPhone 17",
+            "derived_data_path": str(derived_data_path),
+        }
+    )
+
+    assert response.status == "ok"
+    assert response.exitCode == 0
+    assert "tests passed" in response.stdout
 
 
 def test_generated_test_tool_source_names_expected_tool() -> None:

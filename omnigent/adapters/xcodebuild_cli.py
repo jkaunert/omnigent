@@ -287,6 +287,44 @@ def build_xcodebuildmcp_simulator_build_run_stock_codex_bridge_handler(
     return handler
 
 
+def build_xcodebuildmcp_simulator_test_stock_codex_bridge_handler(
+    policy: XcodeBuildCliAdapterPolicy = DEFAULT_XCODEBUILD_CLI_POLICY,
+) -> AdapterBridgeHandler:
+    """Build the wrapper-side file-bridge handler for simulator tests."""
+
+    def handler(arguments: Mapping[str, object]) -> AdapterBridgeResponse:
+        try:
+            completed = subprocess.run(
+                policy.command_for_simulator_test(
+                    project_path=require_string_argument(arguments, "project_path"),
+                    scheme=require_string_argument(arguments, "scheme"),
+                    configuration=require_string_argument(arguments, "configuration"),
+                    simulator_name=require_string_argument(arguments, "simulator_name"),
+                    derived_data_path=require_string_argument(arguments, "derived_data_path"),
+                    extra_args=["-quiet"],
+                    use_latest_os=True,
+                ),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=policy.timeout_seconds,
+                env=xcodebuild_bridge_subprocess_env(policy),
+            )
+        except subprocess.TimeoutExpired:
+            return AdapterBridgeResponse.error(
+                "Error: xcodebuildmcp CLI timed out after "
+                f"{policy.timeout_seconds} seconds.",
+                exit_code=75,
+            )
+        return AdapterBridgeResponse.from_completed_process(
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            returncode=completed.returncode,
+        )
+
+    return handler
+
+
 def _xcodebuild_stock_codex_build_run_parameters() -> dict[str, object]:
     return {
         "type": "object",
@@ -339,6 +377,31 @@ def build_xcodebuildmcp_simulator_build_run_stock_codex_bridge_adapter_spec(
         parameters=_xcodebuild_stock_codex_build_run_parameters(),
         command_source=build_stock_codex_compat_file_bridge_command_source(
             policy.tool_name,
+            (
+                "project_path",
+                "scheme",
+                "configuration",
+                "simulator_name",
+                "derived_data_path",
+            ),
+            timeout_seconds=bridge_timeout_seconds,
+        ),
+    )
+
+
+def build_xcodebuildmcp_simulator_test_stock_codex_bridge_adapter_spec(
+    policy: XcodeBuildCliAdapterPolicy = DEFAULT_XCODEBUILD_CLI_POLICY,
+    *,
+    bridge_timeout_seconds: int = 240,
+) -> StockCodexCompatAdapterCommandSpec:
+    """Build a stock-Codex bridge adapter for simulator tests."""
+    return StockCodexCompatAdapterCommandSpec(
+        name=policy.test_tool_name,
+        capability="xcodebuildmcp-simulator-test",
+        description="Run iOS simulator tests through the Omnigent wrapper bridge.",
+        parameters=_xcodebuild_stock_codex_build_run_parameters(),
+        command_source=build_stock_codex_compat_file_bridge_command_source(
+            policy.test_tool_name,
             (
                 "project_path",
                 "scheme",

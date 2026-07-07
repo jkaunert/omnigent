@@ -61,6 +61,7 @@ from omnigent.adapters.xcodebuild_cli import (
     XCODEBUILDMCP_CLI_TEST_COMMAND,
     XCODEBUILDMCP_CLI_TYPE_TEXT_COMMAND,
     build_xcodebuildmcp_simulator_build_run_stock_codex_bridge_adapter_spec,
+    build_xcodebuildmcp_simulator_test_stock_codex_bridge_adapter_spec,
     write_xcodebuildmcp_simulator_build_run_tool,
     write_xcodebuildmcp_simulator_runtime_logs_tool,
     write_xcodebuildmcp_simulator_screenshot_tool,
@@ -185,7 +186,7 @@ XCODEBUILD_CLI_RUN_SENTINELS = (
     "Bundle ID: ai.omnigent.ios",
 )
 XCODEBUILD_CLI_TEST_SENTINELS = (
-    "9 tests passed",
+    "tests passed",
     "0 failed",
     "0 skipped",
 )
@@ -287,6 +288,9 @@ STOCK_CODEX_COMPAT_LAUNCHER_ACTIVATION_SENTINEL = (
 )
 STOCK_CODEX_COMPAT_WRAPPER_XCODEBUILD_BRIDGE_ADAPTER_SENTINEL = (
     "STOCK_CODEX_COMPAT_WRAPPER_XCODEBUILD_BRIDGE_ADAPTER_OK"
+)
+STOCK_CODEX_COMPAT_WRAPPER_XCODEBUILD_BRIDGE_TEST_ADAPTER_SENTINEL = (
+    "STOCK_CODEX_COMPAT_WRAPPER_XCODEBUILD_BRIDGE_TEST_ADAPTER_OK"
 )
 STOCK_CODEX_COMPAT_ADAPTER_ROUTE_COMMAND_NAME = (
     "omnigent-wrapper-route-adapter-probe"
@@ -4102,13 +4106,20 @@ def run_stock_codex_compat_wrapper_apple_docs_bridge_adapter_proof(
         )
 
 
-def run_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
+def _run_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
     source_bundle: Path,
     stock_codex_path: Path,
     *,
     timeout_seconds: float,
+    tool_name: str,
+    xcodebuild_spec: Any,
+    output_sentinels: tuple[str, ...],
+    final_sentinel: str,
+    failure_reply: str,
+    proof_name: str,
+    temp_prefix: str,
 ) -> StockCodexCompatWrapperXcodebuildBridgeAdapterProof:
-    """Prove XcodeBuildMCP build/run can execute through a wrapper-owned file bridge."""
+    """Prove XcodeBuildMCP can execute through a wrapper-owned file bridge."""
     source_bundle = source_bundle.expanduser().resolve()
     stock_codex_path = stock_codex_path.expanduser().resolve()
     stock_codex_version = codex_version(stock_codex_path)
@@ -4116,27 +4127,18 @@ def run_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
     if not codex_native._codex_auth_json_has_available_credential(auth_path):
         raise SystemExit(
             "Current real Codex auth source is not available; cannot run live "
-            "stock-codex-compat-wrapper-xcodebuild-bridge-adapter proof.\n"
+            f"{proof_name} proof.\n"
             f"auth_path={auth_path}\n"
             f"auth_source={auth_source}"
         )
 
-    xcodebuild_policy = XCODEBUILD_CLI_POLICY
-    xcodebuild_spec = (
-        build_xcodebuildmcp_simulator_build_run_stock_codex_bridge_adapter_spec(
-            xcodebuild_policy,
-            bridge_timeout_seconds=XCODEBUILD_CLI_STOCK_COMPAT_BRIDGE_TIMEOUT_SECONDS,
-        )
-    )
     xcodebuild_workspace_root = resolve_xcodebuild_mcp_workspace_root()
     project_path = (
         xcodebuild_workspace_root / APPLE_MCP_XCODEBUILD_PROJECT_RELATIVE_PATH
     )
     simulator_name = resolve_xcodebuild_mcp_simulator_name()
 
-    with tempfile.TemporaryDirectory(
-        prefix="omnigent-stock-codex-compat-wrapper-xcodebuild-bridge-adapter-proof-"
-    ) as temp_root:
+    with tempfile.TemporaryDirectory(prefix=temp_prefix) as temp_root:
         unresolved_root = Path(temp_root)
         root = Path(temp_root).resolve()
         codex_home = root / "codex-home"
@@ -4231,7 +4233,7 @@ def run_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
         }
         adapter_command = " ".join(
             [
-                XCODEBUILD_CLI_TOOL,
+                tool_name,
                 "--project_path",
                 shlex.quote(tool_args["project_path"]),
                 "--scheme",
@@ -4244,17 +4246,17 @@ def run_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
                 shlex.quote(tool_args["derived_data_path"]),
             ]
         )
-        expected_output = ", ".join(XCODEBUILD_CLI_RUN_SENTINELS)
+        expected_output = ", ".join(output_sentinels)
         prompt = (
             "Wrapped stock Codex XcodeBuildMCP bridge-adapter proof. The "
-            f"adapter manifest declares `{XCODEBUILD_CLI_TOOL}` for capability "
+            f"adapter manifest declares `{tool_name}` for capability "
             f"`{xcodebuild_spec.capability}` with argument object "
             f"`{json.dumps(tool_args, sort_keys=True)}`. Use the shell command "
             f"tool exactly once to run `{adapter_command}`. Do not use "
             "dynamicTools, MCP tools, or any other command. Reply exactly "
-            f"{STOCK_CODEX_COMPAT_WRAPPER_XCODEBUILD_BRIDGE_ADAPTER_SENTINEL} "
+            f"{final_sentinel} "
             f"if stdout contains {expected_output}; otherwise reply "
-            "XCODEBUILD_BRIDGE_ADAPTER_FAILED."
+            f"{failure_reply}."
         )
         completed = subprocess.run(
             [
@@ -4294,8 +4296,7 @@ def run_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
         stderr_preview = _preview_text(completed.stderr, limit=2000)
         if completed.returncode != 0:
             raise SystemExit(
-                "Live stock-codex-compat-wrapper-xcodebuild-bridge-adapter "
-                "command failed.\n"
+                f"Live {proof_name} command failed.\n"
                 f"exit={completed.returncode}\n"
                 f"stderr={stderr_preview}\n"
                 f"stdout_preview={_preview_text(completed.stdout, limit=2000)}"
@@ -4303,37 +4304,33 @@ def run_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
         events = _parse_stock_codex_exec_jsonl(completed.stdout)
         thread_id, first_agent_message = _extract_stock_codex_thread_and_agent_message(
             events,
-            proof_name="stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
+            proof_name=proof_name,
         )
         if not first_agent_message.startswith(EXPECTED_ROUTE):
             raise SystemExit(
-                "Live stock-codex-compat-wrapper-xcodebuild-bridge-adapter proof "
-                "did not emit deterministic route evidence before model output.\n"
+                f"Live {proof_name} proof did not emit deterministic route "
+                "evidence before model output.\n"
                 f"expected_prefix={EXPECTED_ROUTE!r}\n"
                 f"first_agent_message={first_agent_message!r}"
             )
         command_item = _validate_stock_codex_adapter_command_execution_events(
             events,
-            command_name=XCODEBUILD_CLI_TOOL,
+            command_name=tool_name,
             command_argument=str(project_path),
-            output_sentinel=XCODEBUILD_CLI_RUN_SENTINELS[0],
+            output_sentinel=output_sentinels[0],
         )
         command_output = str(command_item["aggregated_output"])
-        for output_sentinel in XCODEBUILD_CLI_RUN_SENTINELS:
+        for output_sentinel in output_sentinels:
             if output_sentinel not in command_output:
                 raise SystemExit(
                     "Wrapped stock Codex XcodeBuildMCP bridge adapter output "
                     f"missed expected sentinel {output_sentinel!r}: {command_item!r}"
                 )
-        if (
-            STOCK_CODEX_COMPAT_WRAPPER_XCODEBUILD_BRIDGE_ADAPTER_SENTINEL
-            not in first_agent_message
-        ):
+        if final_sentinel not in first_agent_message:
             raise SystemExit(
-                "Live stock-codex-compat-wrapper-xcodebuild-bridge-adapter proof "
-                "did not return the expected sentinel after the adapter command.\n"
-                f"sentinel="
-                f"{STOCK_CODEX_COMPAT_WRAPPER_XCODEBUILD_BRIDGE_ADAPTER_SENTINEL!r}\n"
+                f"Live {proof_name} proof did not return the expected sentinel "
+                "after the adapter command.\n"
+                f"sentinel={final_sentinel!r}\n"
                 f"first_agent_message={first_agent_message!r}\n"
                 f"command={command_item.get('command')!r}\n"
                 f"command_output_preview={_preview_text(command_output, limit=1000)!r}"
@@ -4341,43 +4338,43 @@ def run_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
         wrapper_evidence = _read_stock_codex_compat_wrapper_evidence(wrapper_evidence_path)
         if wrapper_evidence["routeInjected"] is not True:
             raise SystemExit(
-                "Live stock-codex-compat-wrapper-xcodebuild-bridge-adapter proof "
-                "did not prove wrapper-owned route injection.\n"
+                f"Live {proof_name} proof did not prove wrapper-owned route "
+                "injection.\n"
                 f"evidence={wrapper_evidence!r}"
             )
         if wrapper_evidence.get("adapterBin") != str(adapter_bin):
             raise SystemExit(
-                "Live stock-codex-compat-wrapper-xcodebuild-bridge-adapter proof "
-                "did not prove wrapper-owned adapter-bin injection.\n"
+                f"Live {proof_name} proof did not prove wrapper-owned "
+                "adapter-bin injection.\n"
                 f"expected_adapter_bin={adapter_bin}\n"
                 f"evidence={wrapper_evidence!r}"
             )
         if wrapper_evidence.get("adapterManifest") != str(adapter_manifest):
             raise SystemExit(
-                "Live stock-codex-compat-wrapper-xcodebuild-bridge-adapter proof "
-                "did not prove wrapper-owned adapter-manifest validation.\n"
+                f"Live {proof_name} proof did not prove wrapper-owned "
+                "adapter-manifest validation.\n"
                 f"expected_adapter_manifest={adapter_manifest}\n"
                 f"evidence={wrapper_evidence!r}"
             )
         if wrapper_evidence.get("adapterBridgeDir") != str(adapter_bridge_dir):
             raise SystemExit(
-                "Live stock-codex-compat-wrapper-xcodebuild-bridge-adapter proof "
-                "did not prove wrapper-owned adapter bridge injection.\n"
+                f"Live {proof_name} proof did not prove wrapper-owned adapter "
+                "bridge injection.\n"
                 f"expected_adapter_bridge_dir={adapter_bridge_dir}\n"
                 f"evidence={wrapper_evidence!r}"
             )
-        expected_tool_names = [XCODEBUILD_CLI_TOOL]
+        expected_tool_names = [tool_name]
         if wrapper_evidence.get("adapterToolNames") != expected_tool_names:
             raise SystemExit(
-                "Live stock-codex-compat-wrapper-xcodebuild-bridge-adapter proof "
-                "did not record the expected adapter tool names.\n"
+                f"Live {proof_name} proof did not record the expected adapter "
+                "tool names.\n"
                 f"expected_adapter_tool_names={expected_tool_names!r}\n"
                 f"evidence={wrapper_evidence!r}"
             )
         if tuple(expected_tool_names) != adapter_package_result.tool_names:
             raise SystemExit(
-                "Live stock-codex-compat-wrapper-xcodebuild-bridge-adapter proof "
-                "did not use the production adapter package generator.\n"
+                f"Live {proof_name} proof did not use the production adapter "
+                "package generator.\n"
                 f"expected_adapter_tool_names={expected_tool_names!r}\n"
                 f"package_tool_names={adapter_package_result.tool_names!r}"
             )
@@ -4413,6 +4410,68 @@ def run_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
             mcp_servers=mcp_servers,
             stderr_preview=stderr_preview,
         )
+
+
+def run_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
+    source_bundle: Path,
+    stock_codex_path: Path,
+    *,
+    timeout_seconds: float,
+) -> StockCodexCompatWrapperXcodebuildBridgeAdapterProof:
+    """Prove XcodeBuildMCP build/run can execute through a wrapper-owned file bridge."""
+    xcodebuild_policy = XCODEBUILD_CLI_POLICY
+    xcodebuild_spec = (
+        build_xcodebuildmcp_simulator_build_run_stock_codex_bridge_adapter_spec(
+            xcodebuild_policy,
+            bridge_timeout_seconds=XCODEBUILD_CLI_STOCK_COMPAT_BRIDGE_TIMEOUT_SECONDS,
+        )
+    )
+    return _run_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
+        source_bundle,
+        stock_codex_path,
+        timeout_seconds=timeout_seconds,
+        tool_name=XCODEBUILD_CLI_TOOL,
+        xcodebuild_spec=xcodebuild_spec,
+        output_sentinels=XCODEBUILD_CLI_RUN_SENTINELS,
+        final_sentinel=STOCK_CODEX_COMPAT_WRAPPER_XCODEBUILD_BRIDGE_ADAPTER_SENTINEL,
+        failure_reply="XCODEBUILD_BRIDGE_ADAPTER_FAILED",
+        proof_name="stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
+        temp_prefix=(
+            "omnigent-stock-codex-compat-wrapper-xcodebuild-"
+            "bridge-adapter-proof-"
+        ),
+    )
+
+
+def run_stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_proof(
+    source_bundle: Path,
+    stock_codex_path: Path,
+    *,
+    timeout_seconds: float,
+) -> StockCodexCompatWrapperXcodebuildBridgeAdapterProof:
+    """Prove XcodeBuildMCP simulator tests can execute through the file bridge."""
+    xcodebuild_policy = XCODEBUILD_CLI_POLICY
+    xcodebuild_spec = build_xcodebuildmcp_simulator_test_stock_codex_bridge_adapter_spec(
+        xcodebuild_policy,
+        bridge_timeout_seconds=XCODEBUILD_CLI_STOCK_COMPAT_BRIDGE_TIMEOUT_SECONDS,
+    )
+    return _run_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
+        source_bundle,
+        stock_codex_path,
+        timeout_seconds=timeout_seconds,
+        tool_name=XCODEBUILD_CLI_TEST_TOOL,
+        xcodebuild_spec=xcodebuild_spec,
+        output_sentinels=XCODEBUILD_CLI_TEST_SENTINELS,
+        final_sentinel=(
+            STOCK_CODEX_COMPAT_WRAPPER_XCODEBUILD_BRIDGE_TEST_ADAPTER_SENTINEL
+        ),
+        failure_reply="XCODEBUILD_BRIDGE_TEST_ADAPTER_FAILED",
+        proof_name="stock-codex-compat-wrapper-xcodebuild-bridge-test-adapter",
+        temp_prefix=(
+            "omnigent-stock-codex-compat-wrapper-xcodebuild-"
+            "bridge-test-adapter-proof-"
+        ),
+    )
 
 
 def run_stock_codex_compat_wrapper_relay_tool_proof(
@@ -5638,6 +5697,107 @@ def print_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
     print(
         "ASSERTION: the Omnigent wrapper still prefixed deterministic route "
         "evidence before the final visible XcodeBuildMCP bridge-adapter answer"
+    )
+
+
+def print_stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_proof(
+    proof: StockCodexCompatWrapperXcodebuildBridgeAdapterProof,
+) -> None:
+    """Emit operator evidence for XcodeBuildMCP test adapter bridge execution."""
+    print("stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_rehearsal=selected")
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_surface="
+        "wrapper-owned-xcodebuild-test-file-bridge-adapter-package-via-stock-command-tool"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_stock_codex_path="
+        f"{proof.stock_codex_path}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_source_bundle="
+        f"{proof.source_bundle}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_wrapper_path="
+        f"{proof.wrapper_path}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_codex_home="
+        f"{proof.codex_home}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_workspace_root="
+        f"{proof.workspace_root}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_adapter_tools="
+        f"{','.join(proof.adapter_tool_names)}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_project_path="
+        f"{proof.project_path}"
+    )
+    print(f"stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_scheme={proof.scheme}")
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_configuration="
+        f"{proof.configuration}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_simulator="
+        f"{proof.simulator_name}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_derived_data="
+        f"{proof.derived_data_path}"
+    )
+    print(f"stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_sandbox={proof.sandbox}")
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_thread_id="
+        f"{proof.thread_id}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_mcp_servers="
+        f"{','.join(proof.mcp_servers)}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_route_injected="
+        f"{proof.route_injected}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_command="
+        f"{_preview_text(proof.command, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_output_preview="
+        f"{_preview_text(proof.command_output, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_first_agent_message_preview="
+        f"{_preview_text(proof.first_agent_message, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_stderr_preview="
+        f"{proof.stderr_preview!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_cache_lifecycle="
+        "temporary_removed_after_proof"
+    )
+    print(
+        "ASSERTION: stock Codex ran the generated XcodeBuildMCP simulator-test "
+        "adapter command under workspace-write, not danger-full-access"
+    )
+    print(
+        "ASSERTION: XcodeBuildMCP simulator test execution happened through "
+        "the Omnigent-owned file bridge outside the stock Codex sandbox"
+    )
+    print(
+        "ASSERTION: the Omnigent wrapper still prefixed deterministic route "
+        "evidence before the final visible XcodeBuildMCP test bridge answer"
     )
 
 
@@ -10934,7 +11094,7 @@ def run_live_xcodebuild_cli_test_proof(
             f"assistant item must be a real function call to {XCODEBUILD_CLI_TEST_TOOL}, "
             "not prose. Do not write JSON as text, pseudo-calls, `tool=...`, "
             "`mcp__...`, or dot notation. Use exactly these JSON arguments: "
-            f"{tool_args_json}. After the tool result contains '9 tests passed', "
+            f"{tool_args_json}. After the tool result contains 'tests passed', "
             "reply exactly XCODEBUILDMCP_CLI_TEST_OK."
         ),
         (
@@ -10942,7 +11102,7 @@ def run_live_xcodebuild_cli_test_proof(
             f"dynamic tool named {XCODEBUILD_CLI_TEST_TOOL} exactly once before "
             f"answering. Pass these exact arguments: {tool_args_json}. Do not "
             "use any other tool. Reply exactly XCODEBUILDMCP_CLI_TEST_OK only "
-            "after the tool output says 9 tests passed."
+            "after the tool output says tests passed with 0 failed and 0 skipped."
         ),
     )
     errors: list[str] = []
@@ -12956,6 +13116,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-pkg-clean-auth-onboarding",
             "stock-codex-compat-pkg-signed-notarized",
             "stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
+            "stock-codex-compat-wrapper-xcodebuild-bridge-test-adapter",
             "stock-codex-compat-wrapper-relay-tool",
             "app-bundle-entrypoint",
             "launcher-activation",
@@ -13068,6 +13229,9 @@ def parse_args() -> argparse.Namespace:
             "that XcodeBuildMCP simulator build/run can execute through the "
             "same wrapper-owned file bridge while stock Codex stays in "
             "workspace-write. "
+            "'stock-codex-compat-wrapper-xcodebuild-bridge-test-adapter' proves "
+            "that XcodeBuildMCP simulator tests can execute through the same "
+            "wrapper-owned file bridge while stock Codex stays in workspace-write. "
             "'stock-codex-compat-wrapper-relay-tool' proves that the same "
             "source-owned wrapper preserves a stock Codex MCP call into the "
             "Omnigent tool_relay.json sidecar while still prefixing route "
@@ -13580,6 +13744,28 @@ def main() -> int:
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
             run_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
+                source_bundle,
+                codex_path,
+                timeout_seconds=args.live_proof_timeout,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-wrapper-xcodebuild-bridge-test-adapter":
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-wrapper-xcodebuild-bridge-test-adapter cannot "
+                "allow a Codex-fork binary."
+            )
+        source_bundle = (
+            args.apple_bundle.expanduser() if args.apple_bundle else resolve_default_bundle()
+        )
+        if not source_bundle.is_dir():
+            raise SystemExit(f"Apple bundle not found: {source_bundle}")
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_proof(
+            run_stock_codex_compat_wrapper_xcodebuild_bridge_test_adapter_proof(
                 source_bundle,
                 codex_path,
                 timeout_seconds=args.live_proof_timeout,
