@@ -2867,6 +2867,7 @@ def test_stock_codex_compat_pkg_installer_lifecycle_uses_mounted_target(
     receipt_present = True
     mounted_target = tmp_path / "mounted-target"
     lifecycle_commands: list[list[str]] = []
+    installer_cli_calls: list[list[str]] = []
 
     def fake_prerequisites(**kwargs: object) -> Any:
         assert kwargs["sign_identity"] == "Developer ID Installer: Example (ABCDE12345)"
@@ -2996,11 +2997,28 @@ def test_stock_codex_compat_pkg_installer_lifecycle_uses_mounted_target(
         repo_root: Path,
         script_path: Path,
     ) -> dict[str, Any]:
-        assert args[0] == "--doctor"
-        assert Path(args[args.index("--repo-root") + 1]) == repo_root
         assert script_path == repo_root / "scripts" / "install_stock_codex_compat_launcher.py"
         assert env["HOME"]
         assert env.get("CODEX_HOME") is None
+        installer_cli_calls.append(args)
+        if args[0] == "--install-adapter-package":
+            adapter_package_dir = (
+                Path(env["HOME"])
+                / ".local"
+                / "omnigent"
+                / "stock-codex-compat"
+                / "adapter-package"
+            )
+            return {
+                "action": "adapter-package-installed",
+                "adapterPackageDir": str(adapter_package_dir),
+                "adapterBin": str(adapter_package_dir / "bin"),
+                "adapterManifest": str(adapter_package_dir / "adapter-manifest.json"),
+                "adapterToolNames": ["fetch_apple_docs"],
+                "mutatesFilesystem": True,
+            }
+        assert args[0] == "--doctor"
+        assert Path(args[args.index("--repo-root") + 1]) == repo_root
         return {"installAllowed": True, "mutatesFilesystem": False}
 
     monkeypatch.setattr(
@@ -3041,10 +3059,22 @@ def test_stock_codex_compat_pkg_installer_lifecycle_uses_mounted_target(
     assert proof.receipt_package_id == "ai.omnigent.stock-codex-compat"
     assert proof.receipt_version == "1.2.3"
     assert proof.receipt_required_payload_files_present == required_payload_files
+    assert proof.adapter_package_dir is not None
+    assert proof.adapter_package_dir.is_absolute()
+    assert proof.adapter_package_dir.parts[-4:] == (
+        ".local",
+        "omnigent",
+        "stock-codex-compat",
+        "adapter-package",
+    )
+    assert proof.adapter_package_action == "adapter-package-installed"
+    assert proof.adapter_package_mutates_filesystem is True
     assert proof.doctor_install_allowed is True
     assert proof.doctor_mutates_filesystem is False
     assert proof.cleanup_payload_removed is True
     assert proof.cleanup_receipt_forgotten is True
     assert proof.cleanup_receipt_absent is True
     assert proof.target_detached is True
+    assert installer_cli_calls[0][0] == "--install-adapter-package"
+    assert installer_cli_calls[1][0] == "--doctor"
     assert lifecycle_commands[0][0] == "/usr/sbin/installer"

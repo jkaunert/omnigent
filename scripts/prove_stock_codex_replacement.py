@@ -1460,6 +1460,9 @@ class StockCodexCompatPkgInstallerLifecycleProof:
     receipt_version: str | None
     receipt_required_payload_files_present: dict[str, bool] | None
     receipt_file_count: int | None
+    adapter_package_dir: Path | None
+    adapter_package_action: str | None
+    adapter_package_mutates_filesystem: bool | None
     installer_output_preview: str | None
     receipt_info_preview: str | None
     doctor_install_allowed: bool | None
@@ -9848,6 +9851,9 @@ def _blocked_stock_codex_compat_pkg_installer_lifecycle_proof(
         receipt_version=None,
         receipt_required_payload_files_present=None,
         receipt_file_count=None,
+        adapter_package_dir=None,
+        adapter_package_action=None,
+        adapter_package_mutates_filesystem=None,
         installer_output_preview=None,
         receipt_info_preview=None,
         doctor_install_allowed=None,
@@ -10084,6 +10090,13 @@ def run_stock_codex_compat_pkg_installer_lifecycle_proof(
             clean_home = root / "home"
             clean_tmp = root / "tmp"
             clean_bin_dir = clean_home / ".local" / "bin"
+            adapter_package_dir = (
+                clean_home
+                / ".local"
+                / "omnigent"
+                / "stock-codex-compat"
+                / "adapter-package"
+            )
             clean_bin_dir.mkdir(parents=True)
             clean_tmp.mkdir()
             env = os.environ.copy()
@@ -10104,6 +10117,27 @@ def run_stock_codex_compat_pkg_installer_lifecycle_proof(
             )
             env.pop("CODEX_HOME", None)
             env.pop(OMNIGENT_STOCK_CODEX_PATH_ENV, None)
+            adapter_payload = _run_stock_codex_compat_installer_cli_json(
+                ["--install-adapter-package"],
+                env=env,
+                repo_root=installed_runtime_root,
+                script_path=installer_script_path,
+            )
+            if adapter_payload.get("action") != "adapter-package-installed":
+                raise SystemExit(
+                    "Lifecycle-installed runtime did not install adapter package: "
+                    f"{adapter_payload!r}"
+                )
+            if adapter_payload.get("mutatesFilesystem") is not True:
+                raise SystemExit(
+                    "Lifecycle-installed runtime adapter package install did not mutate: "
+                    f"{adapter_payload!r}"
+                )
+            if Path(str(adapter_payload.get("adapterPackageDir"))) != adapter_package_dir:
+                raise SystemExit(
+                    "Lifecycle-installed runtime adapter package path mismatch.\n"
+                    f"expected={adapter_package_dir}\nactual={adapter_payload!r}"
+                )
             doctor_payload = _run_stock_codex_compat_installer_cli_json(
                 [
                     "--doctor",
@@ -10199,6 +10233,9 @@ def run_stock_codex_compat_pkg_installer_lifecycle_proof(
             receipt_version=receipt_version,
             receipt_required_payload_files_present=required_receipt_files,
             receipt_file_count=len(receipt_files),
+            adapter_package_dir=adapter_package_dir,
+            adapter_package_action=str(adapter_payload["action"]),
+            adapter_package_mutates_filesystem=bool(adapter_payload["mutatesFilesystem"]),
             installer_output_preview=_preview_text(
                 (installer_completed.stdout or "") + (installer_completed.stderr or ""),
                 limit=2000,
@@ -13142,6 +13179,18 @@ def print_stock_codex_compat_pkg_installer_lifecycle_proof(
         f"{json.dumps(proof.receipt_required_payload_files_present or {}, sort_keys=True)}"
     )
     print(
+        "stock_codex_compat_pkg_installer_lifecycle_adapter_package_dir="
+        f"{proof.adapter_package_dir}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_adapter_package_action="
+        f"{proof.adapter_package_action}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_adapter_package_mutates_filesystem="
+        f"{proof.adapter_package_mutates_filesystem}"
+    )
+    print(
         "stock_codex_compat_pkg_installer_lifecycle_doctor_install_allowed="
         f"{proof.doctor_install_allowed}"
     )
@@ -13199,8 +13248,9 @@ def print_stock_codex_compat_pkg_installer_lifecycle_proof(
     )
     print(
         "ASSERTION: the installer-installed runtime can run its clean-home "
-        "doctor, then the proof removes the payload, forgets the target-volume "
-        "receipt, and detaches the temporary image"
+        "adapter-package bootstrap and doctor, then the proof removes the "
+        "payload, forgets the target-volume receipt, and detaches the temporary "
+        "image"
     )
 
 
