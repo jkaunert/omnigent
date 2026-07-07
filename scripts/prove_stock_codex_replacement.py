@@ -283,6 +283,15 @@ STOCK_CODEX_COMPAT_WRAPPER_APPLE_DOCS_ADAPTER_SENTINEL = (
 STOCK_CODEX_COMPAT_WRAPPER_APPLE_DOCS_BRIDGE_ADAPTER_SENTINEL = (
     "STOCK_CODEX_COMPAT_WRAPPER_APPLE_DOCS_BRIDGE_ADAPTER_OK"
 )
+STOCK_CODEX_COMPAT_WRAPPER_BRIDGE_DIAGNOSTICS_SENTINEL = (
+    "STOCK_CODEX_COMPAT_WRAPPER_BRIDGE_DIAGNOSTICS_OK"
+)
+STOCK_CODEX_COMPAT_BRIDGE_DIAGNOSTIC_PREFIX = (
+    "OMNIGENT_ADAPTER_BRIDGE_DIAGNOSTIC "
+)
+STOCK_CODEX_COMPAT_BRIDGE_DIAGNOSTIC_INVALID_URL = (
+    "https://example.com/documentation/swift/string"
+)
 STOCK_CODEX_COMPAT_LAUNCHER_ACTIVATION_SENTINEL = (
     "STOCK_CODEX_COMPAT_LAUNCHER_ACTIVATION_OK"
 )
@@ -710,6 +719,38 @@ class StockCodexCompatWrapperAppleDocsBridgeAdapterProof:
     thread_id: str
     command: str
     command_output: str
+    first_agent_message: str
+    first_agent_message_before_wrapper: str
+    route_injected: bool
+    wrapper_evidence_path: Path
+    event_count: int
+    mcp_servers: tuple[str, ...]
+    stderr_preview: str
+
+
+@dataclass(frozen=True)
+class StockCodexCompatWrapperBridgeDiagnosticsProof:
+    """Bridge diagnostics proof result for stock Codex compatibility."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    source_bundle: Path
+    wrapper_path: Path
+    codex_home: Path
+    auth_path: Path
+    bridge_dir: Path
+    workspace_root: Path
+    adapter_bin: Path
+    adapter_manifest: Path
+    adapter_bridge_dir: Path
+    adapter_tool_names: tuple[str, ...]
+    invalid_url: str
+    sandbox: str
+    thread_id: str
+    command: str
+    command_exit_code: int
+    command_output: str
+    diagnostic_payload: dict[str, Any]
     first_agent_message: str
     first_agent_message_before_wrapper: str
     route_injected: bool
@@ -4106,6 +4147,284 @@ def run_stock_codex_compat_wrapper_apple_docs_bridge_adapter_proof(
         )
 
 
+def run_stock_codex_compat_wrapper_bridge_diagnostics_proof(
+    source_bundle: Path,
+    stock_codex_path: Path,
+    *,
+    timeout_seconds: float,
+) -> StockCodexCompatWrapperBridgeDiagnosticsProof:
+    """Prove failed file-bridge adapter calls preserve structured diagnostics."""
+    source_bundle = source_bundle.expanduser().resolve()
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    stock_codex_version = codex_version(stock_codex_path)
+    auth_path, auth_source = _stock_replacement_auth_source()
+    if not codex_native._codex_auth_json_has_available_credential(auth_path):
+        raise SystemExit(
+            "Current real Codex auth source is not available; cannot run live "
+            "stock-codex-compat-wrapper-bridge-diagnostics proof.\n"
+            f"auth_path={auth_path}\n"
+            f"auth_source={auth_source}"
+        )
+
+    docs_policy = replace(
+        APPLE_DOCS_CLI_POLICY,
+        timeout_seconds=APPLE_DOCS_STOCK_COMPAT_TIMEOUT_SECONDS,
+    )
+    docs_spec = build_fetch_apple_docs_stock_codex_bridge_adapter_spec(
+        docs_policy,
+        bridge_timeout_seconds=APPLE_DOCS_STOCK_COMPAT_BRIDGE_TIMEOUT_SECONDS,
+    )
+
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-wrapper-bridge-diagnostics-proof-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        codex_home = root / "codex-home"
+        temp_home = root / "home"
+        bridge_dir = root / "omnigent-bridge"
+        marketplace_root = root / "local-apple-workflow-marketplace"
+        wrapper_path = Path(stock_codex_compat_wrapper.__file__).resolve()
+        wrapper_evidence_path = root / "wrapper-evidence.json"
+        workspace_root = root / "workspace"
+        adapter_package = workspace_root / ".omnigent-adapter-package"
+        adapter_bridge_dir = workspace_root / ".omnigent-adapter-bridge"
+        codex_home.mkdir(mode=0o700)
+        temp_home.mkdir(mode=0o700)
+        workspace_root.mkdir(mode=0o700)
+        adapter_package_result = write_stock_codex_compat_adapter_package(
+            adapter_package,
+            (docs_spec,),
+        )
+        adapter_bin = adapter_package_result.adapter_bin
+        adapter_manifest = adapter_package_result.manifest_path
+        (codex_home / "auth.json").symlink_to(auth_path)
+
+        _write_stock_codex_compat_marketplace(
+            source_bundle=source_bundle,
+            marketplace_root=marketplace_root,
+        )
+        env = _stock_codex_compat_env(home=temp_home, codex_home=codex_home)
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "marketplace", "add", str(marketplace_root), "--json"],
+            env=env,
+        )
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "add", STOCK_CODEX_COMPAT_PLUGIN_ID, "--json"],
+            env=env,
+        )
+        plugin_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "list", "--json"],
+            env=env,
+        )
+        _validate_stock_codex_compat_plugin_state(
+            marketplace_list_output=_run_stock_codex_json(
+                stock_codex_path,
+                ["plugin", "marketplace", "list", "--json"],
+                env=env,
+            ),
+            plugin_list_output=plugin_list_output,
+            installed_plugin_path=(
+                codex_home
+                / "plugins"
+                / "cache"
+                / STOCK_CODEX_COMPAT_MARKETPLACE
+                / PLUGIN_NAME
+                / "0.1.1"
+            ),
+        )
+
+        write_mcp_bridge_config(bridge_dir)
+        write_policy_hook_config(
+            bridge_dir,
+            ap_server_url=STOCK_CODEX_COMPAT_AP_SERVER_URL,
+            ap_auth_headers={},
+        )
+        _inject_mcp_server_config(codex_home, bridge_dir, sys.executable)
+        _write_codex_policy_hooks_file(codex_home, bridge_dir, sys.executable)
+        mcp_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "list", "--json"],
+            env=env,
+        )
+        mcp_omnigent_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "get", "omnigent", "--json"],
+            env=env,
+        )
+        _hook_events, mcp_servers, _mcp_command, _mcp_args = _validate_stock_codex_compat_bridge(
+            codex_home=codex_home,
+            bridge_dir=bridge_dir,
+            mcp_list_output=mcp_list_output,
+            mcp_omnigent_output=mcp_omnigent_output,
+        )
+
+        invalid_url = STOCK_CODEX_COMPAT_BRIDGE_DIAGNOSTIC_INVALID_URL
+        adapter_command = f"{APPLE_DOCS_CLI_TOOL} --url {shlex.quote(invalid_url)}"
+        adapter_arguments = json.dumps({"url": invalid_url}, sort_keys=True)
+        prompt = (
+            "Wrapped stock Codex bridge diagnostics proof. The adapter manifest "
+            f"declares `{APPLE_DOCS_CLI_TOOL}` for capability `{docs_spec.capability}` "
+            f"with argument object `{adapter_arguments}`. Use the shell command "
+            f"tool exactly once to run `{adapter_command}`. The command is "
+            "expected to fail with exit code 64; do not retry, repair, or run "
+            "another command. After that one command finishes, reply exactly "
+            f"{STOCK_CODEX_COMPAT_WRAPPER_BRIDGE_DIAGNOSTICS_SENTINEL}. The "
+            "external proof harness, not you, validates the stderr diagnostic."
+        )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "omnigent.stock_codex_compat_wrapper",
+                "--stock-codex-path",
+                str(stock_codex_path),
+                "--route-prefix",
+                EXPECTED_ROUTE,
+                "--evidence-path",
+                str(wrapper_evidence_path),
+                "--adapter-bin",
+                str(adapter_bin),
+                "--adapter-manifest",
+                str(adapter_manifest),
+                "--adapter-bridge-dir",
+                str(adapter_bridge_dir),
+                "--",
+                "exec",
+                "--json",
+                "--dangerously-bypass-hook-trust",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "workspace-write",
+                "-C",
+                str(workspace_root),
+                prompt,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds if timeout_seconds > 0 else None,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
+        stderr_preview = _preview_text(completed.stderr, limit=2000)
+        if completed.returncode != 0:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-bridge-diagnostics command failed.\n"
+                f"exit={completed.returncode}\n"
+                f"stderr={stderr_preview}\n"
+                f"stdout_preview={_preview_text(completed.stdout, limit=2000)}"
+            )
+        events = _parse_stock_codex_exec_jsonl(completed.stdout)
+        thread_id, first_agent_message = _extract_stock_codex_thread_and_agent_message(
+            events,
+            proof_name="stock-codex-compat-wrapper-bridge-diagnostics",
+        )
+        if not first_agent_message.startswith(EXPECTED_ROUTE):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-bridge-diagnostics proof did not "
+                "emit deterministic route evidence before model output.\n"
+                f"expected_prefix={EXPECTED_ROUTE!r}\n"
+                f"first_agent_message={first_agent_message!r}"
+            )
+        command_item, diagnostic_payload = (
+            _validate_stock_codex_adapter_diagnostic_command_execution_events(
+                events,
+                command_name=APPLE_DOCS_CLI_TOOL,
+                command_argument=invalid_url,
+                expected_exit_code=64,
+            )
+        )
+        command_output = str(command_item["aggregated_output"])
+        if (
+            STOCK_CODEX_COMPAT_WRAPPER_BRIDGE_DIAGNOSTICS_SENTINEL
+            not in first_agent_message
+        ):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-bridge-diagnostics proof did not "
+                "return the expected sentinel after the failed adapter command.\n"
+                f"sentinel={STOCK_CODEX_COMPAT_WRAPPER_BRIDGE_DIAGNOSTICS_SENTINEL!r}\n"
+                f"first_agent_message={first_agent_message!r}\n"
+                f"command={command_item.get('command')!r}\n"
+                f"command_output_preview={_preview_text(command_output, limit=1000)!r}"
+            )
+        wrapper_evidence = _read_stock_codex_compat_wrapper_evidence(wrapper_evidence_path)
+        if wrapper_evidence["routeInjected"] is not True:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-bridge-diagnostics proof did not "
+                "prove wrapper-owned route injection.\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if wrapper_evidence.get("adapterBin") != str(adapter_bin):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-bridge-diagnostics proof did not "
+                "prove wrapper-owned adapter-bin injection.\n"
+                f"expected_adapter_bin={adapter_bin}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if wrapper_evidence.get("adapterManifest") != str(adapter_manifest):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-bridge-diagnostics proof did not "
+                "prove wrapper-owned adapter-manifest validation.\n"
+                f"expected_adapter_manifest={adapter_manifest}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if wrapper_evidence.get("adapterBridgeDir") != str(adapter_bridge_dir):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-bridge-diagnostics proof did not "
+                "prove wrapper-owned adapter bridge injection.\n"
+                f"expected_adapter_bridge_dir={adapter_bridge_dir}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        expected_tool_names = [APPLE_DOCS_CLI_TOOL]
+        if wrapper_evidence.get("adapterToolNames") != expected_tool_names:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-bridge-diagnostics proof did not "
+                "record the expected adapter tool names.\n"
+                f"expected_adapter_tool_names={expected_tool_names!r}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if tuple(expected_tool_names) != adapter_package_result.tool_names:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-bridge-diagnostics proof did not "
+                "use the production adapter package generator.\n"
+                f"expected_adapter_tool_names={expected_tool_names!r}\n"
+                f"package_tool_names={adapter_package_result.tool_names!r}"
+            )
+        return StockCodexCompatWrapperBridgeDiagnosticsProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            source_bundle=source_bundle,
+            wrapper_path=wrapper_path,
+            codex_home=codex_home,
+            auth_path=auth_path,
+            bridge_dir=bridge_dir,
+            workspace_root=workspace_root,
+            adapter_bin=adapter_bin,
+            adapter_manifest=adapter_manifest,
+            adapter_bridge_dir=adapter_bridge_dir,
+            adapter_tool_names=tuple(expected_tool_names),
+            invalid_url=invalid_url,
+            sandbox="workspace-write",
+            thread_id=thread_id,
+            command=str(command_item["command"]),
+            command_exit_code=int(command_item["exit_code"]),
+            command_output=command_output,
+            diagnostic_payload=diagnostic_payload,
+            first_agent_message=first_agent_message,
+            first_agent_message_before_wrapper=str(
+                wrapper_evidence["firstAgentMessageBefore"]
+            ),
+            route_injected=bool(wrapper_evidence["routeInjected"]),
+            wrapper_evidence_path=wrapper_evidence_path,
+            event_count=len(events),
+            mcp_servers=mcp_servers,
+            stderr_preview=stderr_preview,
+        )
+
+
 def _run_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
     source_bundle: Path,
     stock_codex_path: Path,
@@ -4974,6 +5293,108 @@ def _validate_stock_codex_adapter_command_execution_events(
     return item
 
 
+def _validate_stock_codex_adapter_diagnostic_command_execution_events(
+    events: list[dict[str, Any]],
+    *,
+    command_name: str,
+    command_argument: str,
+    expected_exit_code: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return a failed adapter command item plus its bridge diagnostic payload."""
+    completed_commands: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "command_execution":
+            continue
+        completed_commands.append(item)
+    if len(completed_commands) != 1:
+        raise SystemExit(
+            "Expected exactly one completed command_execution item in wrapped "
+            f"stock Codex bridge diagnostics proof; found {len(completed_commands)}."
+        )
+    item = completed_commands[0]
+    command = item.get("command")
+    output = item.get("aggregated_output")
+    if (
+        not isinstance(command, str)
+        or command_name not in command
+        or command_argument not in command
+    ):
+        raise SystemExit(
+            "Wrapped stock Codex did not run the diagnostic adapter command: "
+            f"{item!r}"
+        )
+    if item.get("exit_code") != expected_exit_code or item.get("status") not in {
+        "completed",
+        "failed",
+    }:
+        raise SystemExit(
+            "Wrapped stock Codex diagnostic adapter command did not preserve "
+            f"the expected nonzero exit code {expected_exit_code}: {item!r}"
+        )
+    if not isinstance(output, str):
+        raise SystemExit(
+            f"Wrapped stock Codex diagnostic adapter output was not text: {item!r}"
+        )
+    diagnostic_payloads: list[dict[str, Any]] = []
+    for line in output.splitlines():
+        if not line.startswith(STOCK_CODEX_COMPAT_BRIDGE_DIAGNOSTIC_PREFIX):
+            continue
+        raw_payload = line.removeprefix(STOCK_CODEX_COMPAT_BRIDGE_DIAGNOSTIC_PREFIX)
+        try:
+            parsed = json.loads(raw_payload)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(
+                "Wrapped stock Codex diagnostic adapter emitted invalid JSON "
+                f"diagnostic: {line!r}: {exc}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise SystemExit(
+                "Wrapped stock Codex diagnostic adapter diagnostic was not an "
+                f"object: {line!r}"
+            )
+        diagnostic_payloads.append(parsed)
+    if len(diagnostic_payloads) != 1:
+        raise SystemExit(
+            "Expected exactly one bridge diagnostic payload in command output; "
+            f"found {len(diagnostic_payloads)} output={output!r}"
+        )
+    diagnostic = diagnostic_payloads[0]
+    if diagnostic.get("source") != "omnigent-stock-codex-file-bridge":
+        raise SystemExit(f"Bridge diagnostic source mismatch: {diagnostic!r}")
+    if diagnostic.get("status") != "error":
+        raise SystemExit(f"Bridge diagnostic status mismatch: {diagnostic!r}")
+    if diagnostic.get("exitCode") != expected_exit_code:
+        raise SystemExit(f"Bridge diagnostic exit code mismatch: {diagnostic!r}")
+    details = diagnostic.get("diagnostics")
+    if not isinstance(details, dict):
+        raise SystemExit(f"Bridge diagnostic omitted diagnostics object: {diagnostic!r}")
+    if details.get("bridge") != "stock-codex-file-bridge":
+        raise SystemExit(f"Bridge diagnostic details omitted bridge name: {diagnostic!r}")
+    if details.get("tool") != command_name:
+        raise SystemExit(f"Bridge diagnostic details omitted tool name: {diagnostic!r}")
+    request_id = details.get("requestId")
+    if not isinstance(request_id, str) or not request_id:
+        raise SystemExit(f"Bridge diagnostic details omitted request id: {diagnostic!r}")
+    duration_ms = details.get("durationMs")
+    if not isinstance(duration_ms, int | float) or duration_ms < 0:
+        raise SystemExit(f"Bridge diagnostic details omitted duration: {diagnostic!r}")
+    for timestamp_field in ("startedAt", "completedAt"):
+        timestamp = details.get(timestamp_field)
+        if not isinstance(timestamp, str) or not timestamp.endswith("Z"):
+            raise SystemExit(
+                f"Bridge diagnostic details omitted {timestamp_field}: {diagnostic!r}"
+            )
+    if "developer.apple.com" not in output:
+        raise SystemExit(
+            "Wrapped stock Codex diagnostic adapter output omitted the policy "
+            f"failure message: {output!r}"
+        )
+    return item, diagnostic
+
+
 def _validate_stock_codex_omnigent_relay_tool_events(
     events: list[dict[str, Any]],
     *,
@@ -5564,6 +5985,98 @@ def print_stock_codex_compat_wrapper_apple_docs_bridge_adapter_proof(
     print(
         "ASSERTION: the Omnigent wrapper still prefixed deterministic route "
         "evidence before the final visible Apple-docs bridge-adapter answer"
+    )
+
+
+def print_stock_codex_compat_wrapper_bridge_diagnostics_proof(
+    proof: StockCodexCompatWrapperBridgeDiagnosticsProof,
+) -> None:
+    """Emit operator evidence for failed adapter bridge diagnostics."""
+    print("stock_codex_compat_wrapper_bridge_diagnostics_rehearsal=selected")
+    print(
+        "stock_codex_compat_wrapper_bridge_diagnostics_surface="
+        "wrapper-owned-file-bridge-error-diagnostics-via-stock-command-tool"
+    )
+    print(
+        "stock_codex_compat_wrapper_bridge_diagnostics_stock_codex_path="
+        f"{proof.stock_codex_path}"
+    )
+    print(
+        "stock_codex_compat_wrapper_bridge_diagnostics_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(
+        "stock_codex_compat_wrapper_bridge_diagnostics_source_bundle="
+        f"{proof.source_bundle}"
+    )
+    print(
+        "stock_codex_compat_wrapper_bridge_diagnostics_wrapper_path="
+        f"{proof.wrapper_path}"
+    )
+    print(
+        "stock_codex_compat_wrapper_bridge_diagnostics_workspace_root="
+        f"{proof.workspace_root}"
+    )
+    print(
+        "stock_codex_compat_wrapper_bridge_diagnostics_adapter_bridge_dir="
+        f"{proof.adapter_bridge_dir}"
+    )
+    print(
+        "stock_codex_compat_wrapper_bridge_diagnostics_adapter_tools="
+        f"{','.join(proof.adapter_tool_names)}"
+    )
+    print(
+        "stock_codex_compat_wrapper_bridge_diagnostics_invalid_url="
+        f"{proof.invalid_url}"
+    )
+    print(f"stock_codex_compat_wrapper_bridge_diagnostics_sandbox={proof.sandbox}")
+    print(
+        "stock_codex_compat_wrapper_bridge_diagnostics_thread_id="
+        f"{proof.thread_id}"
+    )
+    print(
+        "stock_codex_compat_wrapper_bridge_diagnostics_mcp_servers="
+        f"{','.join(proof.mcp_servers)}"
+    )
+    print(
+        "stock_codex_compat_wrapper_bridge_diagnostics_route_injected="
+        f"{proof.route_injected}"
+    )
+    print(
+        "stock_codex_compat_wrapper_bridge_diagnostics_command_exit_code="
+        f"{proof.command_exit_code}"
+    )
+    print(
+        "stock_codex_compat_wrapper_bridge_diagnostics_payload="
+        f"{json.dumps(proof.diagnostic_payload, sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_wrapper_bridge_diagnostics_command="
+        f"{_preview_text(proof.command, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_bridge_diagnostics_output_preview="
+        f"{_preview_text(proof.command_output, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_bridge_diagnostics_first_agent_message_preview="
+        f"{_preview_text(proof.first_agent_message, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_bridge_diagnostics_stderr_preview="
+        f"{proof.stderr_preview!r}"
+    )
+    print(
+        "ASSERTION: stock Codex preserved the failed adapter command_execution "
+        "with the expected nonzero exit code"
+    )
+    print(
+        "ASSERTION: the generated bridge command emitted structured diagnostic "
+        "JSON containing request id, tool name, timestamps, duration, and exit code"
+    )
+    print(
+        "ASSERTION: the Omnigent wrapper still prefixed deterministic route "
+        "evidence before the final visible diagnostics answer"
     )
 
 
@@ -13105,6 +13618,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-wrapper-adapter-arbitration",
             "stock-codex-compat-wrapper-apple-docs-adapter",
             "stock-codex-compat-wrapper-apple-docs-bridge-adapter",
+            "stock-codex-compat-wrapper-bridge-diagnostics",
             "stock-codex-compat-launcher-activation",
             "stock-codex-compat-launcher-doctor",
             "stock-codex-compat-clean-install",
@@ -13194,6 +13708,10 @@ def parse_args() -> argparse.Namespace:
             "'stock-codex-compat-wrapper-apple-docs-bridge-adapter' proves "
             "that the real Apple docs adapter can run through a wrapper-owned "
             "file bridge while stock Codex stays in workspace-write. "
+            "'stock-codex-compat-wrapper-bridge-diagnostics' proves that a "
+            "failed wrapper-owned file-bridge adapter command preserves a "
+            "nonzero command_execution exit code plus structured bridge "
+            "diagnostics in stock Codex output. "
             "'stock-codex-compat-launcher-activation' proves that a managed "
             "stock-Codex compatibility launcher can be PATH-selected as "
             "`codex`, resolve back to its manifest-pinned stock binary without "
@@ -13534,6 +14052,28 @@ def main() -> int:
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_stock_codex_compat_wrapper_apple_docs_bridge_adapter_proof(
             run_stock_codex_compat_wrapper_apple_docs_bridge_adapter_proof(
+                source_bundle,
+                codex_path,
+                timeout_seconds=args.live_proof_timeout,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-wrapper-bridge-diagnostics":
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-wrapper-bridge-diagnostics cannot allow a "
+                "Codex-fork binary."
+            )
+        source_bundle = (
+            args.apple_bundle.expanduser() if args.apple_bundle else resolve_default_bundle()
+        )
+        if not source_bundle.is_dir():
+            raise SystemExit(f"Apple bundle not found: {source_bundle}")
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_wrapper_bridge_diagnostics_proof(
+            run_stock_codex_compat_wrapper_bridge_diagnostics_proof(
                 source_bundle,
                 codex_path,
                 timeout_seconds=args.live_proof_timeout,

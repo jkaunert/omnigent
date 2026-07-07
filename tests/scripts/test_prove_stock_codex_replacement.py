@@ -757,6 +757,59 @@ def test_stock_codex_compat_wrapper_starts_file_bridge_runtime_for_manifest(
     assert evidence["adapterToolNames"] == ["fetch_apple_docs"]
 
 
+def test_stock_codex_bridge_diagnostics_validator_preserves_failure_payload() -> None:
+    output = "\n".join(
+        [
+            "Error: url must be an https://developer.apple.com documentation URL",
+            _MOD.STOCK_CODEX_COMPAT_BRIDGE_DIAGNOSTIC_PREFIX
+            + json.dumps(
+                {
+                    "source": "omnigent-stock-codex-file-bridge",
+                    "status": "error",
+                    "exitCode": 64,
+                    "diagnostics": {
+                        "bridge": "stock-codex-file-bridge",
+                        "requestId": "request-123",
+                        "tool": "fetch_apple_docs",
+                        "startedAt": "2026-07-07T00:00:00Z",
+                        "completedAt": "2026-07-07T00:00:01Z",
+                        "durationMs": 12.5,
+                    },
+                },
+                sort_keys=True,
+            ),
+        ]
+    )
+    events = [
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": (
+                    "/bin/zsh -lc 'fetch_apple_docs --url "
+                    "https://example.com/documentation/swift/string'"
+                ),
+                "aggregated_output": output,
+                "exit_code": 64,
+                "status": "failed",
+            },
+        }
+    ]
+
+    command_item, diagnostic = (
+        _MOD._validate_stock_codex_adapter_diagnostic_command_execution_events(
+            events,
+            command_name="fetch_apple_docs",
+            command_argument="https://example.com/documentation/swift/string",
+            expected_exit_code=64,
+        )
+    )
+
+    assert command_item["exit_code"] == 64
+    assert diagnostic["diagnostics"]["requestId"] == "request-123"
+    assert diagnostic["diagnostics"]["tool"] == "fetch_apple_docs"
+
+
 def test_stock_codex_compat_wrapper_rejects_missing_adapter_executable(
     tmp_path: Path,
 ) -> None:

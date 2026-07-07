@@ -240,6 +240,23 @@ def build_stock_codex_compat_file_bridge_command_source(
                     stream.write("\\n")
 
 
+        def _write_diagnostic(response: dict[str, object]) -> None:
+            if response.get("status") != "error":
+                return
+            diagnostics = response.get("diagnostics")
+            payload = {{
+                "source": "omnigent-stock-codex-file-bridge",
+                "status": response.get("status"),
+                "exitCode": response.get("exitCode"),
+                "diagnostics": diagnostics if isinstance(diagnostics, dict) else {{}},
+            }}
+            print(
+                "OMNIGENT_ADAPTER_BRIDGE_DIAGNOSTIC "
+                + json.dumps(payload, sort_keys=True),
+                file=sys.stderr,
+            )
+
+
         def main() -> int:
             bridge_dir_value = os.environ.get(_BRIDGE_DIR_ENV)
             if not bridge_dir_value:
@@ -295,6 +312,7 @@ def build_stock_codex_compat_file_bridge_command_source(
                         return 70
                     _write_stream(response.get("stdout"), sys.stdout)
                     _write_stream(response.get("stderr"), sys.stderr)
+                    _write_diagnostic(response)
                     exit_code = response.get("exitCode")
                     if not isinstance(exit_code, int):
                         print(

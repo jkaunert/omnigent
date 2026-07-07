@@ -139,3 +139,45 @@ def test_file_bridge_worker_rejects_unexpected_tool(tmp_path: Path) -> None:
     assert response["status"] == "error"
     assert response["exitCode"] == 64
     assert "unexpected tool" in str(response["stderr"])
+
+
+def test_file_bridge_worker_adds_error_diagnostics(tmp_path: Path) -> None:
+    bridge_dir = tmp_path / "bridge"
+    requests_dir = bridge_dir / "requests"
+    responses_dir = bridge_dir / "responses"
+
+    def handler(_arguments: Mapping[str, object]) -> AdapterBridgeResponse:
+        return AdapterBridgeResponse.error("Error: denied by policy", exit_code=64)
+
+    stop_event = threading.Event()
+    thread = FileBridgeAdapterWorker(
+        bridge_dir,
+        {"fetch_apple_docs": handler},
+    ).start(stop_event=stop_event)
+    try:
+        _write_request(
+            requests_dir,
+            "request-diagnostic",
+            {
+                "id": "request-diagnostic",
+                "tool": "fetch_apple_docs",
+                "arguments": {"url": "https://example.com/not-apple"},
+            },
+        )
+
+        response = _read_response(responses_dir, "request-diagnostic")
+    finally:
+        stop_event.set()
+        thread.join(timeout=5)
+
+    diagnostics = response.get("diagnostics")
+    assert response["status"] == "error"
+    assert response["exitCode"] == 64
+    assert "denied by policy" in str(response["stderr"])
+    assert isinstance(diagnostics, dict)
+    assert diagnostics["bridge"] == "stock-codex-file-bridge"
+    assert diagnostics["requestId"] == "request-diagnostic"
+    assert diagnostics["tool"] == "fetch_apple_docs"
+    assert isinstance(diagnostics["durationMs"], int | float)
+    assert str(diagnostics["startedAt"]).endswith("Z")
+    assert str(diagnostics["completedAt"]).endswith("Z")

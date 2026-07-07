@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -19,15 +20,19 @@ class AdapterBridgeResponse:
     stdout: str
     stderr: str
     exitCode: int
+    diagnostics: Mapping[str, object] | None = None
 
     def as_payload(self) -> dict[str, object]:
         """Return the JSON-serializable response payload."""
-        return {
+        payload: dict[str, object] = {
             "status": self.status,
             "stdout": self.stdout,
             "stderr": self.stderr,
             "exitCode": self.exitCode,
         }
+        if self.diagnostics is not None:
+            payload["diagnostics"] = dict(self.diagnostics)
+        return payload
 
     @classmethod
     def ok(cls, stdout: str, *, stderr: str = "", exit_code: int = 0) -> AdapterBridgeResponse:
@@ -51,6 +56,35 @@ class AdapterBridgeResponse:
             stdout=stdout,
             stderr=stderr,
             exitCode=returncode,
+        )
+
+    def with_error_diagnostics(
+        self,
+        *,
+        request_id: str,
+        tool_name: str | None,
+        started_at: datetime,
+        completed_at: datetime,
+        duration_ms: float,
+    ) -> AdapterBridgeResponse:
+        """Attach bridge diagnostics to failed responses without changing successes."""
+        if self.status != "error":
+            return self
+        diagnostics: dict[str, object] = {
+            "bridge": "stock-codex-file-bridge",
+            "requestId": request_id,
+            "startedAt": started_at.isoformat().replace("+00:00", "Z"),
+            "completedAt": completed_at.isoformat().replace("+00:00", "Z"),
+            "durationMs": round(duration_ms, 3),
+        }
+        if tool_name is not None:
+            diagnostics["tool"] = tool_name
+        return AdapterBridgeResponse(
+            status=self.status,
+            stdout=self.stdout,
+            stderr=self.stderr,
+            exitCode=self.exitCode,
+            diagnostics=diagnostics,
         )
 
 
@@ -103,6 +137,9 @@ class FileBridgeAdapterWorker:
         if response_path.exists():
             request_path.unlink(missing_ok=True)
             return
+        started_at = datetime.now(UTC)
+        started_monotonic = time.monotonic()
+        request: object | None = None
         try:
             request = json.loads(request_path.read_text(encoding="utf-8"))
             response = self._dispatch_request(request_id, request)
@@ -113,6 +150,14 @@ class FileBridgeAdapterWorker:
             )
         except Exception as exc:  # noqa: BLE001 - the bridge must fail closed per request.
             response = AdapterBridgeResponse.error(f"Error: {exc}", exit_code=70)
+        completed_at = datetime.now(UTC)
+        response = response.with_error_diagnostics(
+            request_id=request_id,
+            tool_name=_request_tool_name(request),
+            started_at=started_at,
+            completed_at=completed_at,
+            duration_ms=(time.monotonic() - started_monotonic) * 1000,
+        )
         write_adapter_bridge_response(responses_dir, request_id, response)
         request_path.unlink(missing_ok=True)
 
@@ -221,3 +266,10 @@ def require_string_argument(arguments: Mapping[str, object], name: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"adapter bridge request omitted {name}")
     return value
+
+
+def _request_tool_name(request: object | None) -> str | None:
+    if not isinstance(request, Mapping):
+        return None
+    tool_name = request.get("tool")
+    return tool_name if isinstance(tool_name, str) and tool_name else None

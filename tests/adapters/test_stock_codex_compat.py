@@ -197,6 +197,95 @@ def test_file_bridge_command_round_trips_request_response(tmp_path: Path) -> Non
     assert stderr == ""
 
 
+def test_file_bridge_command_emits_error_diagnostic(tmp_path: Path) -> None:
+    bridge_dir = tmp_path / "bridge"
+    requests_dir = bridge_dir / "requests"
+    responses_dir = bridge_dir / "responses"
+    requests_dir.mkdir(parents=True)
+    responses_dir.mkdir(parents=True)
+    spec = StockCodexCompatAdapterCommandSpec(
+        name="fetch_apple_docs",
+        capability="apple-docs",
+        description="Fetch Apple documentation through a file bridge.",
+        parameters={
+            "type": "object",
+            "properties": {"url": {"type": "string"}},
+            "required": ["url"],
+            "additionalProperties": False,
+        },
+        command_source=build_stock_codex_compat_file_bridge_command_source(
+            "fetch_apple_docs",
+            ("url",),
+            timeout_seconds=5,
+        ),
+    )
+    package = write_stock_codex_compat_adapter_package(tmp_path / "adapter-package", (spec,))
+    process = subprocess.Popen(
+        [
+            str(package.adapter_bin / spec.name),
+            "--url",
+            "https://example.com/not-apple",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ, ADAPTER_BRIDGE_DIR_ENV: str(bridge_dir)},
+    )
+    deadline = time.monotonic() + 5
+    request_path: Path | None = None
+    while time.monotonic() < deadline:
+        request_paths = sorted(requests_dir.glob("*.json"))
+        if request_paths:
+            request_path = request_paths[0]
+            break
+        time.sleep(0.05)
+    assert request_path is not None
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    response_path = responses_dir / f"{request['id']}.json"
+    response_tmp_path = responses_dir / f"{request['id']}.tmp"
+    response_tmp_path.write_text(
+        json.dumps(
+            {
+                "status": "error",
+                "stdout": "",
+                "stderr": "Error: url must be developer.apple.com\n",
+                "exitCode": 64,
+                "diagnostics": {
+                    "bridge": "stock-codex-file-bridge",
+                    "requestId": request["id"],
+                    "tool": "fetch_apple_docs",
+                    "startedAt": "2026-07-07T00:00:00Z",
+                    "completedAt": "2026-07-07T00:00:01Z",
+                    "durationMs": 1,
+                },
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.replace(response_tmp_path, response_path)
+
+    stdout, stderr = process.communicate(timeout=5)
+    diagnostic_lines = [
+        line
+        for line in stderr.splitlines()
+        if line.startswith("OMNIGENT_ADAPTER_BRIDGE_DIAGNOSTIC ")
+    ]
+    diagnostic = json.loads(
+        diagnostic_lines[0].removeprefix("OMNIGENT_ADAPTER_BRIDGE_DIAGNOSTIC ")
+    )
+
+    assert process.returncode == 64
+    assert stdout == ""
+    assert "url must be developer.apple.com" in stderr
+    assert diagnostic["source"] == "omnigent-stock-codex-file-bridge"
+    assert diagnostic["status"] == "error"
+    assert diagnostic["exitCode"] == 64
+    assert diagnostic["diagnostics"]["requestId"] == request["id"]
+    assert diagnostic["diagnostics"]["tool"] == "fetch_apple_docs"
+
+
 def test_wrapper_env_records_adapter_bridge_dir(tmp_path: Path) -> None:
     adapter_bin = tmp_path / "adapter-bin"
     adapter_bridge_dir = tmp_path / "adapter-bridge"
