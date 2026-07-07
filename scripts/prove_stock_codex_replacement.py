@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import contextlib
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -23,21 +24,31 @@ import shutil
 import signal
 import subprocess
 import sys
+import tarfile
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TypeVar
 from urllib.parse import urlparse
 
 from omnigent_client import OmnigentClient
 
-from omnigent import codex_native
+from omnigent import codex_native, codex_native_bridge, stock_codex_compat_wrapper
 from omnigent.adapters.apple_docs_cli import (
     APPLE_DOCS_CLI_URL,
     DEFAULT_APPLE_DOCS_CLI_POLICY,
+    build_fetch_apple_docs_stock_codex_adapter_spec,
+    build_fetch_apple_docs_stock_codex_bridge_adapter_spec,
     write_fetch_apple_docs_cli_tool,
+)
+from omnigent.adapters.stock_codex_compat import (
+    StockCodexCompatAdapterToolSpec,
+    write_stock_codex_compat_adapter_command,
+    write_stock_codex_compat_adapter_manifest,
+    write_stock_codex_compat_adapter_package,
 )
 from omnigent.adapters.xcodebuild_cli import (
     DEFAULT_XCODEBUILD_CLI_POLICY,
@@ -49,6 +60,7 @@ from omnigent.adapters.xcodebuild_cli import (
     XCODEBUILDMCP_CLI_TAP_COMMAND,
     XCODEBUILDMCP_CLI_TEST_COMMAND,
     XCODEBUILDMCP_CLI_TYPE_TEXT_COMMAND,
+    build_xcodebuildmcp_simulator_build_run_stock_codex_bridge_adapter_spec,
     write_xcodebuildmcp_simulator_build_run_tool,
     write_xcodebuildmcp_simulator_runtime_logs_tool,
     write_xcodebuildmcp_simulator_screenshot_tool,
@@ -73,6 +85,15 @@ from omnigent.chat import (
     _validate_agent_spec,
     _wait_for_server,
     run_prompt,
+)
+from omnigent.claude_native_bridge import start_tool_relay
+from omnigent.codex_native_app_server import (
+    _inject_mcp_server_config,
+    _write_codex_policy_hooks_file,
+)
+from omnigent.codex_native_bridge import (
+    write_mcp_bridge_config,
+    write_policy_hook_config,
 )
 from omnigent.inner.codex_executor import (
     OMNIGENT_STOCK_CODEX_PATH_ENV,
@@ -103,6 +124,10 @@ APPLE_MCP_SOSUMI_SERVER = APPLE_DOCS_CLI_POLICY.mcp_server_name
 APPLE_MCP_SOSUMI_TOOL = "sosumi__fetchAppleDocumentation"
 APPLE_MCP_SOSUMI_DOC_PATH = "/documentation/swift/string"
 APPLE_DOCS_CLI_TOOL = APPLE_DOCS_CLI_POLICY.tool_name
+APPLE_DOCS_STOCK_COMPAT_TIMEOUT_SECONDS = 120
+APPLE_DOCS_STOCK_COMPAT_BRIDGE_TIMEOUT_SECONDS = (
+    APPLE_DOCS_STOCK_COMPAT_TIMEOUT_SECONDS + 30
+)
 APPLE_MCP_SOSUMI_SENTINELS = (
     "title: String",
     "source: https://developer.apple.com/documentation/swift/string",
@@ -148,6 +173,9 @@ XCODEBUILD_CLI_SNAPSHOT_UI_TOOL = XCODEBUILD_CLI_POLICY.snapshot_ui_tool_name
 XCODEBUILD_CLI_RUNTIME_LOGS_TOOL = XCODEBUILD_CLI_POLICY.runtime_logs_tool_name
 XCODEBUILD_CLI_TYPE_TEXT_TOOL = XCODEBUILD_CLI_POLICY.type_text_tool_name
 XCODEBUILD_CLI_TAP_TOOL = XCODEBUILD_CLI_POLICY.tap_tool_name
+XCODEBUILD_CLI_STOCK_COMPAT_BRIDGE_TIMEOUT_SECONDS = (
+    XCODEBUILD_CLI_POLICY.timeout_seconds + 60
+)
 XCODEBUILD_CLI_TYPE_TEXT_PROOF_TEXT = "http://localhost:6767/gesture-proof"
 XCODEBUILD_CLI_TAP_PROOF_TEXT = "http://localhost:6767/gesture-proof"
 XCODEBUILD_CLI_TAP_POST_TEXT = "http://localhost:6767"
@@ -231,6 +259,61 @@ APP_BUNDLE_ENTRYPOINT_IDENTIFIER = "ai.omnigent.codex"
 APP_BUNDLE_ENTRYPOINT_EXECUTABLE = "omnigent-codex"
 APP_BUNDLE_ENTRYPOINT_SENTINEL = "OMNIGENT_CODEX_APP_BUNDLE_ENTRYPOINT_OK"
 APP_BUNDLE_ENTRYPOINT_PROBE_ARG = "--omnigent-app-bundle-probe"
+STOCK_CODEX_COMPAT_MARKETPLACE = "LocalAppleWorkflow"
+STOCK_CODEX_COMPAT_PLUGIN_ID = f"{PLUGIN_NAME}@{STOCK_CODEX_COMPAT_MARKETPLACE}"
+STOCK_CODEX_COMPAT_AP_SERVER_URL = "http://127.0.0.1:6767"
+STOCK_CODEX_COMPAT_LIVE_SENTINEL = "STOCK_CODEX_COMPAT_LIVE_OK"
+STOCK_CODEX_COMPAT_WRAPPER_TOOL_SENTINEL = "STOCK_CODEX_COMPAT_WRAPPER_TOOL_OK"
+STOCK_CODEX_COMPAT_WRAPPER_ADAPTER_TOOL_SENTINEL = (
+    "STOCK_CODEX_COMPAT_WRAPPER_ADAPTER_TOOL_OK"
+)
+STOCK_CODEX_COMPAT_ADAPTER_COMMAND_NAME = "omnigent-wrapper-adapter-probe"
+STOCK_CODEX_COMPAT_ADAPTER_COMMAND_ARGUMENT = "stock-codex-wrapper-adapter-proof"
+STOCK_CODEX_COMPAT_ADAPTER_OUTPUT_SENTINEL = "OMNIGENT_ADAPTER_TOOL_SENTINEL_64"
+STOCK_CODEX_COMPAT_WRAPPER_ADAPTER_ARBITRATION_SENTINEL = (
+    "STOCK_CODEX_COMPAT_WRAPPER_ADAPTER_ARBITRATION_OK"
+)
+STOCK_CODEX_COMPAT_WRAPPER_APPLE_DOCS_ADAPTER_SENTINEL = (
+    "STOCK_CODEX_COMPAT_WRAPPER_APPLE_DOCS_ADAPTER_OK"
+)
+STOCK_CODEX_COMPAT_WRAPPER_APPLE_DOCS_BRIDGE_ADAPTER_SENTINEL = (
+    "STOCK_CODEX_COMPAT_WRAPPER_APPLE_DOCS_BRIDGE_ADAPTER_OK"
+)
+STOCK_CODEX_COMPAT_LAUNCHER_ACTIVATION_SENTINEL = (
+    "STOCK_CODEX_COMPAT_LAUNCHER_ACTIVATION_OK"
+)
+STOCK_CODEX_COMPAT_WRAPPER_XCODEBUILD_BRIDGE_ADAPTER_SENTINEL = (
+    "STOCK_CODEX_COMPAT_WRAPPER_XCODEBUILD_BRIDGE_ADAPTER_OK"
+)
+STOCK_CODEX_COMPAT_ADAPTER_ROUTE_COMMAND_NAME = (
+    "omnigent-wrapper-route-adapter-probe"
+)
+STOCK_CODEX_COMPAT_ADAPTER_ROUTE_COMMAND_ARGUMENT = "route-selection-proof"
+STOCK_CODEX_COMPAT_ADAPTER_ROUTE_OUTPUT_SENTINEL = (
+    "OMNIGENT_ADAPTER_ARBITRATION_ROUTE_SENTINEL_88"
+)
+STOCK_CODEX_COMPAT_ADAPTER_RELEASE_COMMAND_NAME = (
+    "omnigent-wrapper-release-adapter-probe"
+)
+STOCK_CODEX_COMPAT_ADAPTER_RELEASE_COMMAND_ARGUMENT = "release-notes-proof"
+STOCK_CODEX_COMPAT_ADAPTER_RELEASE_OUTPUT_SENTINEL = (
+    "OMNIGENT_ADAPTER_ARBITRATION_RELEASE_SENTINEL_19"
+)
+STOCK_CODEX_COMPAT_WRAPPER_RELAY_TOOL_SENTINEL = (
+    "STOCK_CODEX_COMPAT_WRAPPER_RELAY_TOOL_OK"
+)
+STOCK_CODEX_COMPAT_RELAY_TOOL_NAME = "omnigent_wrapper_relay_probe"
+STOCK_CODEX_COMPAT_RELAY_TOOL_ARGUMENT = "stock-codex-wrapper-relay-proof"
+STOCK_CODEX_COMPAT_RELAY_TOOL_OUTPUT_SENTINEL = "OMNIGENT_RELAY_TOOL_SENTINEL_91"
+STOCK_CODEX_SUPPORTED_FEATURE_STAGES = frozenset(
+    {"stable", "experimental", "under development"}
+)
+STOCK_CODEX_FEATURES_REQUIRING_NONDEFAULT_SUPPORT = frozenset(
+    {"rollout_budget", "shell_zsh_fork", "unified_exec_zsh_fork"}
+)
+STOCK_CODEX_COMPAT_WRAPPER_EVIDENCE_ENV = (
+    stock_codex_compat_wrapper.WRAPPER_EVIDENCE_ENV
+)
 T = TypeVar("T")
 
 
@@ -423,6 +506,582 @@ class CleanAuthOnboardingProof:
     clean_unavailable_reason: str | None
     synthetic_codex_home: Path
     synthetic_available_reason: str | None
+
+
+@dataclass(frozen=True)
+class StockCodexCompatProof:
+    """Non-mutating proof result for stock Codex compatibility installation."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    source_bundle: Path
+    codex_home: Path
+    marketplace_root: Path
+    marketplace_name: str
+    plugin_id: str
+    plugin_source_path: Path
+    installed_plugin_path: Path
+    bridge_dir: Path
+    bridge_config_path: Path
+    policy_hook_config_path: Path
+    config_path: Path
+    hooks_path: Path
+    hook_events: tuple[str, ...]
+    mcp_servers: tuple[str, ...]
+    mcp_omnigent_command: str
+    mcp_omnigent_args: tuple[str, ...]
+    marketplace_list_output: dict[str, Any]
+    plugin_list_output: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class StockCodexCompatLiveProof:
+    """Live proof result for a stock Codex compatibility entrypoint."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    source_bundle: Path
+    codex_home: Path
+    auth_path: Path
+    bridge_dir: Path
+    workspace_root: Path
+    thread_id: str
+    first_agent_message: str
+    event_count: int
+    mcp_servers: tuple[str, ...]
+    stderr_preview: str
+
+
+@dataclass(frozen=True)
+class StockCodexCompatWrapperLiveProof:
+    """Live proof result for an Omnigent-owned wrapper around stock Codex."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    source_bundle: Path
+    wrapper_path: Path
+    codex_home: Path
+    auth_path: Path
+    bridge_dir: Path
+    workspace_root: Path
+    thread_id: str
+    first_agent_message: str
+    first_agent_message_before_wrapper: str
+    route_injected: bool
+    wrapper_evidence_path: Path
+    event_count: int
+    mcp_servers: tuple[str, ...]
+    stderr_preview: str
+
+
+@dataclass(frozen=True)
+class StockCodexCompatWrapperCommandToolProof:
+    """Tool-use proof result for an Omnigent-owned stock Codex wrapper."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    source_bundle: Path
+    wrapper_path: Path
+    codex_home: Path
+    auth_path: Path
+    bridge_dir: Path
+    workspace_root: Path
+    thread_id: str
+    command: str
+    command_output: str
+    first_agent_message: str
+    first_agent_message_before_wrapper: str
+    route_injected: bool
+    wrapper_evidence_path: Path
+    event_count: int
+    mcp_servers: tuple[str, ...]
+    stderr_preview: str
+
+
+@dataclass(frozen=True)
+class StockCodexCompatWrapperAdapterToolProof:
+    """Wrapper-owned adapter proof result for stock Codex compatibility."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    source_bundle: Path
+    wrapper_path: Path
+    codex_home: Path
+    auth_path: Path
+    bridge_dir: Path
+    workspace_root: Path
+    adapter_bin: Path
+    adapter_manifest: Path
+    adapter_tool_names: tuple[str, ...]
+    thread_id: str
+    command: str
+    command_output: str
+    first_agent_message: str
+    first_agent_message_before_wrapper: str
+    route_injected: bool
+    wrapper_evidence_path: Path
+    event_count: int
+    mcp_servers: tuple[str, ...]
+    stderr_preview: str
+
+
+@dataclass(frozen=True)
+class StockCodexCompatWrapperAdapterArbitrationProof:
+    """Multi-tool adapter arbitration proof result for stock Codex compatibility."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    source_bundle: Path
+    wrapper_path: Path
+    codex_home: Path
+    auth_path: Path
+    bridge_dir: Path
+    workspace_root: Path
+    adapter_bin: Path
+    adapter_manifest: Path
+    adapter_tool_names: tuple[str, ...]
+    selected_tool_name: str
+    rejected_tool_name: str
+    thread_id: str
+    command: str
+    command_output: str
+    first_agent_message: str
+    first_agent_message_before_wrapper: str
+    route_injected: bool
+    wrapper_evidence_path: Path
+    event_count: int
+    mcp_servers: tuple[str, ...]
+    stderr_preview: str
+
+
+@dataclass(frozen=True)
+class StockCodexCompatWrapperAppleDocsAdapterProof:
+    """Real Apple docs adapter proof result for stock Codex compatibility."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    source_bundle: Path
+    wrapper_path: Path
+    codex_home: Path
+    auth_path: Path
+    bridge_dir: Path
+    workspace_root: Path
+    adapter_bin: Path
+    adapter_manifest: Path
+    adapter_tool_names: tuple[str, ...]
+    docs_url: str
+    thread_id: str
+    command: str
+    command_output: str
+    first_agent_message: str
+    first_agent_message_before_wrapper: str
+    route_injected: bool
+    wrapper_evidence_path: Path
+    event_count: int
+    mcp_servers: tuple[str, ...]
+    stderr_preview: str
+
+
+@dataclass(frozen=True)
+class StockCodexCompatWrapperAppleDocsBridgeAdapterProof:
+    """Apple docs adapter bridge proof result for stock Codex compatibility."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    source_bundle: Path
+    wrapper_path: Path
+    codex_home: Path
+    auth_path: Path
+    bridge_dir: Path
+    workspace_root: Path
+    adapter_bin: Path
+    adapter_manifest: Path
+    adapter_bridge_dir: Path
+    adapter_tool_names: tuple[str, ...]
+    docs_url: str
+    sandbox: str
+    thread_id: str
+    command: str
+    command_output: str
+    first_agent_message: str
+    first_agent_message_before_wrapper: str
+    route_injected: bool
+    wrapper_evidence_path: Path
+    event_count: int
+    mcp_servers: tuple[str, ...]
+    stderr_preview: str
+
+
+@dataclass(frozen=True)
+class StockCodexCompatWrapperXcodebuildBridgeAdapterProof:
+    """XcodeBuildMCP bridge adapter proof result for stock Codex compatibility."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    source_bundle: Path
+    wrapper_path: Path
+    codex_home: Path
+    auth_path: Path
+    bridge_dir: Path
+    workspace_root: Path
+    adapter_bin: Path
+    adapter_manifest: Path
+    adapter_bridge_dir: Path
+    adapter_tool_names: tuple[str, ...]
+    project_path: Path
+    scheme: str
+    configuration: str
+    simulator_name: str
+    derived_data_path: Path
+    sandbox: str
+    thread_id: str
+    command: str
+    command_output: str
+    first_agent_message: str
+    first_agent_message_before_wrapper: str
+    route_injected: bool
+    wrapper_evidence_path: Path
+    event_count: int
+    mcp_servers: tuple[str, ...]
+    stderr_preview: str
+
+
+@dataclass(frozen=True)
+class StockCodexCompatWrapperRelayToolProof:
+    """Relay-tool proof result for an Omnigent-owned stock Codex wrapper."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    source_bundle: Path
+    wrapper_path: Path
+    codex_home: Path
+    auth_path: Path
+    bridge_dir: Path
+    workspace_root: Path
+    thread_id: str
+    relay_tool_name: str
+    relay_tool_arguments: dict[str, Any]
+    relay_output_preview: str
+    relay_event_types: tuple[str, ...]
+    enabled_features: tuple[str, ...]
+    skipped_features: tuple[str, ...]
+    prompt_input_mentions_relay_tool: bool
+    prompt_input_preview: str
+    first_agent_message: str
+    first_agent_message_before_wrapper: str
+    route_injected: bool
+    wrapper_evidence_path: Path
+    event_count: int
+    mcp_servers: tuple[str, ...]
+    stderr_preview: str
+
+
+@dataclass(frozen=True)
+class StockCodexCompatLauncherActivationProof:
+    """Proof result for the persistent stock-Codex compatibility launcher."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    launcher_path: Path
+    manifest_path: Path
+    repo_root: Path
+    uvx_path: Path
+    resolved_codex_path: Path
+    adapter_bin: Path
+    adapter_manifest: Path
+    adapter_bridge_dir: Path
+    adapter_tool_names: tuple[str, ...]
+    workspace_root: Path
+    sandbox: str
+    wrapper_evidence_path: Path
+    thread_id: str
+    command: str
+    command_output: str
+    first_agent_message: str
+    first_agent_message_before_wrapper: str
+    route_injected: bool
+    probe_output: str
+    uninstall_action: str
+    event_count: int
+    stderr_preview: str
+
+
+@dataclass(frozen=True)
+class StockCodexCompatLauncherDoctorProof:
+    """Non-mutating proof result for the compatibility launcher install plan."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    launcher_path: Path
+    manifest_path: Path
+    repo_root: Path
+    uvx_path: Path
+    adapter_bin: Path
+    adapter_manifest: Path
+    adapter_bridge_dir: Path
+    adapter_package_dir: Path
+    adapter_tool_names: tuple[str, ...]
+    install_allowed: bool
+    install_blocker: str | None
+    existing_target_state: str
+    existing_target_managed: bool
+    existing_target_realpath: Path | None
+    selected_command_path: Path | None
+    target_selected_on_path: bool
+    launcher_parent_on_path: bool
+    launcher_parent_exists: bool
+    nearest_existing_parent: Path
+    nearest_existing_parent_writable: bool
+    backup_existing_requested: bool
+    force_requested: bool
+    would_backup_existing: bool
+    backup_path: Path | None
+    rollback_command: str
+    install_command: str
+    mutates_filesystem: bool
+
+
+@dataclass(frozen=True)
+class StockCodexCompatCleanInstallProof:
+    """Clean-home proof result for repeatable stock-Codex compatibility install."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    clean_home: Path
+    clean_bin_dir: Path
+    launcher_path: Path
+    manifest_path: Path
+    adapter_package_dir: Path
+    adapter_bin: Path
+    adapter_manifest: Path
+    adapter_bridge_dir: Path
+    adapter_tool_names: tuple[str, ...]
+    repo_root: Path
+    uvx_path: Path
+    selected_command_path: Path
+    version_output: str
+    probe_output: str
+    adapter_package_action: str
+    install_action: str
+    rollback_action: str
+    doctor_install_allowed: bool
+    doctor_existing_target_state: str
+    doctor_existing_target_managed: bool
+    doctor_target_selected_on_path: bool
+    doctor_mutates_filesystem: bool
+    launcher_removed_after_rollback: bool
+    manifest_removed_after_rollback: bool
+
+
+@dataclass(frozen=True)
+class StockCodexCompatBundleInstallProof:
+    """Proof result for installing the compatibility launcher from a bundle artifact."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    bundle_path: Path
+    bundle_sha256: str
+    bundle_manifest_path: Path
+    extracted_bundle_root: Path
+    extracted_runtime_root: Path
+    installer_script_path: Path
+    clean_home: Path
+    clean_bin_dir: Path
+    launcher_path: Path
+    manifest_path: Path
+    adapter_package_dir: Path
+    adapter_bin: Path
+    adapter_manifest: Path
+    adapter_bridge_dir: Path
+    adapter_tool_names: tuple[str, ...]
+    uvx_path: Path
+    selected_command_path: Path
+    launcher_manifest_repo_root: Path
+    version_output: str
+    probe_output: str
+    adapter_package_action: str
+    install_action: str
+    rollback_action: str
+    doctor_install_allowed: bool
+    doctor_existing_target_state: str
+    doctor_existing_target_managed: bool
+    doctor_target_selected_on_path: bool
+    doctor_mutates_filesystem: bool
+    launcher_removed_after_rollback: bool
+    manifest_removed_after_rollback: bool
+
+
+@dataclass(frozen=True)
+class StockCodexCompatPkgStructureProof:
+    """Proof result for the unsigned stock-Codex compatibility pkg structure."""
+
+    package_path: Path
+    package_sha256: str
+    source_bundle_sha256: str
+    package_identifier: str
+    package_version: str
+    install_location: str
+    install_prefix: Path
+    runtime_root: Path
+    payload_file_count: int
+    required_payload_files: dict[str, bool]
+    script_names: tuple[str, ...]
+    archive_entries: tuple[str, ...]
+    signature_status: str
+    signed: bool
+    pkg_manifest_path: Path
+    bundle_manifest_path: Path
+    pkg_contract: dict[str, Any]
+    bundle_source_root: str
+
+
+@dataclass(frozen=True)
+class StockCodexCompatPkgRuntimeLiveProof:
+    """Live proof result for an expanded pkg runtime around stock Codex."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    source_bundle: Path
+    package_path: Path
+    package_sha256: str
+    source_bundle_sha256: str
+    package_identifier: str
+    package_version: str
+    install_prefix: Path
+    packaged_runtime_root: Path
+    expanded_payload_root: Path
+    expanded_runtime_root: Path
+    uvx_path: Path
+    wrapper_command: tuple[str, ...]
+    codex_home: Path
+    auth_path: Path
+    bridge_dir: Path
+    workspace_root: Path
+    enabled_features: tuple[str, ...]
+    thread_id: str
+    first_agent_message: str
+    first_agent_message_before_wrapper: str
+    route_injected: bool
+    wrapper_evidence_path: Path
+    event_count: int
+    mcp_servers: tuple[str, ...]
+    stderr_preview: str
+
+
+@dataclass(frozen=True)
+class StockCodexCompatPkgUserBootstrapProof:
+    """Proof result for per-user bootstrap from a pkg-installed runtime shape."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    package_path: Path
+    package_sha256: str
+    package_identifier: str
+    package_version: str
+    install_root: Path
+    installed_prefix: Path
+    installed_runtime_root: Path
+    installer_script_path: Path
+    pkg_manifest_path: Path
+    bundle_manifest_path: Path
+    clean_home: Path
+    clean_bin_dir: Path
+    launcher_path: Path
+    manifest_path: Path
+    adapter_package_dir: Path
+    adapter_bin: Path
+    adapter_manifest: Path
+    adapter_bridge_dir: Path
+    adapter_tool_names: tuple[str, ...]
+    uvx_path: Path
+    selected_command_path: Path
+    launcher_manifest_repo_root: Path
+    launcher_manifest_wrapper_entrypoint: str
+    launcher_manifest_adapter_tool_names: tuple[str, ...]
+    version_output: str
+    probe_output: str
+    adapter_package_action: str
+    install_action: str
+    update_action: str
+    rollback_command: str
+    rollback_action: str
+    doctor_install_allowed: bool
+    doctor_existing_target_state: str
+    doctor_existing_target_managed: bool
+    doctor_target_selected_on_path: bool
+    doctor_mutates_filesystem: bool
+    adapter_package_exists_after_install: bool
+    launcher_removed_after_rollback: bool
+    manifest_removed_after_rollback: bool
+
+
+@dataclass(frozen=True)
+class StockCodexCompatPkgCleanProvisionProof:
+    """Proof result for clean stock-Codex provisioning from a pkg-installed runtime."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    stock_codex_sha256: str
+    package_path: Path
+    package_sha256: str
+    package_identifier: str
+    package_version: str
+    install_root: Path
+    installed_prefix: Path
+    installed_runtime_root: Path
+    provisioner_script_path: Path
+    pkg_manifest_path: Path
+    bundle_manifest_path: Path
+    clean_home: Path
+    clean_cache_root: Path
+    channel_manifest_path: Path
+    channel_artifact_path: Path
+    payload_dir: Path
+    provisioned_codex_path: Path
+    provisioned_manifest_path: Path
+    provisioned_version: str
+    provisioned_sha256: str
+    provisioned_source_kind: str
+    provisioned_env_path: Path
+    omnigent_resolved_codex_path: Path
+    reuse_payload_dir: Path
+    reuse_provisioned_codex_path: Path
+    host_cache_root: Path
+    host_cache_referenced: bool
+
+
+@dataclass(frozen=True)
+class StockCodexCompatPkgCleanAuthProof:
+    """Proof result for clean auth onboarding from a pkg-installed runtime."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    stock_codex_sha256: str
+    package_path: Path
+    package_sha256: str
+    package_identifier: str
+    package_version: str
+    install_root: Path
+    installed_prefix: Path
+    installed_runtime_root: Path
+    provisioner_script_path: Path
+    clean_home: Path
+    clean_cache_root: Path
+    provisioned_codex_path: Path
+    provisioned_version: str
+    real_auth_path: Path
+    real_auth_source: str
+    real_auth_available: bool
+    real_auth_classifier_path: Path
+    real_auth_unavailable_reason: str | None
+    clean_codex_home: Path
+    clean_auth_classifier_path: Path
+    clean_unavailable_reason: str
+    synthetic_codex_home: Path
+    synthetic_auth_classifier_path: Path
+    synthetic_available_reason: str | None
+    onboarding_command: str
+    credential_material_leaked: bool
 
 
 class LiveProofTimeoutError(Exception):
@@ -1243,6 +1902,75 @@ def _codex_auth_reason_for_env(
         return codex_native._codex_auth_unavailable_reason()
 
 
+def _run_installed_runtime_auth_classifier(
+    *,
+    installed_runtime_root: Path,
+    home: Path,
+    codex_home: Path,
+    stock_codex_path: Path,
+) -> tuple[Path, str | None, str]:
+    """Run the packaged runtime's auth classifier in an isolated subprocess."""
+    classifier_code = (
+        "import json\n"
+        "from omnigent import codex_native\n"
+        "source = codex_native._resolve_codex_auth_source()\n"
+        "reason = codex_native._codex_auth_unavailable_reason()\n"
+        "print(json.dumps({"
+        "'authPath': str(source.auth_path), "
+        "'unavailableReason': reason"
+        "}, sort_keys=True))\n"
+    )
+    python_path_entries = [str(installed_runtime_root)]
+    if os.environ.get("PYTHONPATH"):
+        python_path_entries.append(os.environ["PYTHONPATH"])
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "CODEX_HOME": str(codex_home),
+            OMNIGENT_STOCK_CODEX_PATH_ENV: str(stock_codex_path),
+            "PYTHONPATH": os.pathsep.join(python_path_entries),
+        }
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", classifier_code],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=installed_runtime_root,
+        timeout=30,
+    )
+    combined_output = (completed.stdout or "") + (completed.stderr or "")
+    if completed.returncode != 0:
+        raise SystemExit(
+            "Installed runtime auth classifier failed.\n"
+            f"runtime={installed_runtime_root}\n"
+            f"exit={completed.returncode}\n"
+            f"stdout={completed.stdout}\n"
+            f"stderr={completed.stderr}"
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            "Installed runtime auth classifier did not emit JSON.\n"
+            f"stdout={completed.stdout}\nstderr={completed.stderr}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise SystemExit(
+            f"Installed runtime auth classifier emitted non-object JSON: {payload!r}"
+        )
+    auth_path = Path(_json_string(payload, "authPath")).expanduser().resolve()
+    reason_raw = payload.get("unavailableReason")
+    if reason_raw is not None and not isinstance(reason_raw, str):
+        raise SystemExit(
+            "Installed runtime auth classifier returned invalid reason: "
+            f"{payload!r}"
+        )
+    return auth_path, reason_raw, combined_output
+
+
 def print_clean_auth_onboarding_proof(proof: CleanAuthOnboardingProof) -> None:
     """Emit operator evidence for the clean Codex auth onboarding proof."""
     print("clean_auth_onboarding_rehearsal=selected")
@@ -1269,6 +1997,7028 @@ def print_clean_auth_onboarding_proof(proof: CleanAuthOnboardingProof) -> None:
     print(
         "ASSERTION: the current real Codex auth source is available for the "
         "existing preserved-CODEX_HOME proof path"
+    )
+
+
+def run_stock_codex_compat_proof(
+    source_bundle: Path,
+    stock_codex_path: Path,
+) -> StockCodexCompatProof:
+    """Prove stock Codex can carry the plugin plus Omnigent bridge config."""
+    source_bundle = source_bundle.expanduser().resolve()
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    stock_codex_version = codex_version(stock_codex_path)
+    with tempfile.TemporaryDirectory(prefix="omnigent-stock-codex-compat-proof-") as temp_root:
+        root = Path(temp_root).resolve()
+        codex_home = root / "codex-home"
+        temp_home = root / "home"
+        bridge_dir = root / "omnigent-bridge"
+        marketplace_root = root / "local-apple-workflow-marketplace"
+        codex_home.mkdir(mode=0o700)
+        temp_home.mkdir(mode=0o700)
+
+        plugin_source_path = _write_stock_codex_compat_marketplace(
+            source_bundle=source_bundle,
+            marketplace_root=marketplace_root,
+        )
+        env = _stock_codex_compat_env(home=temp_home, codex_home=codex_home)
+
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "marketplace", "add", str(marketplace_root), "--json"],
+            env=env,
+        )
+        plugin_add_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "add", STOCK_CODEX_COMPAT_PLUGIN_ID, "--json"],
+            env=env,
+        )
+        if not isinstance(plugin_add_output, dict):
+            raise SystemExit("Codex plugin add output was not a JSON object.")
+        marketplace_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "marketplace", "list", "--json"],
+            env=env,
+        )
+        plugin_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "list", "--json"],
+            env=env,
+        )
+        installed_plugin_path = Path(
+            str(
+                plugin_add_output.get(
+                    "installedPath",
+                    codex_home
+                    / "plugins"
+                    / "cache"
+                    / STOCK_CODEX_COMPAT_MARKETPLACE
+                    / PLUGIN_NAME
+                    / "0.1.1",
+                )
+            )
+        )
+        _validate_stock_codex_compat_plugin_state(
+            marketplace_list_output=marketplace_list_output,
+            plugin_list_output=plugin_list_output,
+            installed_plugin_path=installed_plugin_path,
+        )
+
+        write_mcp_bridge_config(bridge_dir)
+        write_policy_hook_config(
+            bridge_dir,
+            ap_server_url=STOCK_CODEX_COMPAT_AP_SERVER_URL,
+            ap_auth_headers={},
+        )
+        _inject_mcp_server_config(codex_home, bridge_dir, sys.executable)
+        _write_codex_policy_hooks_file(codex_home, bridge_dir, sys.executable)
+
+        mcp_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "list", "--json"],
+            env=env,
+        )
+        mcp_omnigent_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "get", "omnigent", "--json"],
+            env=env,
+        )
+        hook_events, mcp_servers, mcp_command, mcp_args = _validate_stock_codex_compat_bridge(
+            codex_home=codex_home,
+            bridge_dir=bridge_dir,
+            mcp_list_output=mcp_list_output,
+            mcp_omnigent_output=mcp_omnigent_output,
+        )
+
+        return StockCodexCompatProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            source_bundle=source_bundle,
+            codex_home=codex_home,
+            marketplace_root=marketplace_root,
+            marketplace_name=STOCK_CODEX_COMPAT_MARKETPLACE,
+            plugin_id=STOCK_CODEX_COMPAT_PLUGIN_ID,
+            plugin_source_path=plugin_source_path,
+            installed_plugin_path=installed_plugin_path,
+            bridge_dir=bridge_dir,
+            bridge_config_path=bridge_dir / "bridge.json",
+            policy_hook_config_path=bridge_dir / "policy_hook.json",
+            config_path=codex_home / "config.toml",
+            hooks_path=codex_home / "hooks.json",
+            hook_events=hook_events,
+            mcp_servers=mcp_servers,
+            mcp_omnigent_command=mcp_command,
+            mcp_omnigent_args=mcp_args,
+            marketplace_list_output=marketplace_list_output,
+            plugin_list_output=plugin_list_output,
+        )
+
+
+def _write_stock_codex_compat_marketplace(
+    *,
+    source_bundle: Path,
+    marketplace_root: Path,
+) -> Path:
+    """Write a disposable local Codex marketplace containing the Apple plugin."""
+    if not (source_bundle / ".codex-plugin" / "plugin.json").is_file():
+        raise SystemExit(f"Apple plugin manifest not found under {source_bundle}")
+    plugin_source_path = marketplace_root / "plugins" / PLUGIN_NAME
+    plugin_source_path.parent.mkdir(parents=True)
+    shutil.copytree(source_bundle, plugin_source_path)
+    manifest_path = marketplace_root / ".agents" / "plugins" / "marketplace.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest = {
+        "name": STOCK_CODEX_COMPAT_MARKETPLACE,
+        "interface": {"displayName": "Local Apple Workflow"},
+        "plugins": [
+            {
+                "name": PLUGIN_NAME,
+                "source": {"source": "local", "path": f"./plugins/{PLUGIN_NAME}"},
+                "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+                "category": "Engineering",
+            }
+        ],
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return plugin_source_path
+
+
+def _stock_codex_compat_default_adapter_tool_spec() -> StockCodexCompatAdapterToolSpec:
+    """Return the single adapter tool spec used by the baseline adapter proof."""
+    return StockCodexCompatAdapterToolSpec(
+        name=STOCK_CODEX_COMPAT_ADAPTER_COMMAND_NAME,
+        argument=STOCK_CODEX_COMPAT_ADAPTER_COMMAND_ARGUMENT,
+        output_sentinel=STOCK_CODEX_COMPAT_ADAPTER_OUTPUT_SENTINEL,
+        capability="adapter-proof",
+        description=(
+            "Return deterministic Omnigent adapter evidence for a wrapped "
+            "stock Codex proof."
+        ),
+    )
+
+
+def _stock_codex_compat_adapter_arbitration_tool_specs() -> tuple[
+    StockCodexCompatAdapterToolSpec,
+    StockCodexCompatAdapterToolSpec,
+]:
+    """Return the selected and rejected adapter specs for arbitration proof."""
+    return (
+        StockCodexCompatAdapterToolSpec(
+            name=STOCK_CODEX_COMPAT_ADAPTER_ROUTE_COMMAND_NAME,
+            argument=STOCK_CODEX_COMPAT_ADAPTER_ROUTE_COMMAND_ARGUMENT,
+            output_sentinel=STOCK_CODEX_COMPAT_ADAPTER_ROUTE_OUTPUT_SENTINEL,
+            capability="route-selection",
+            description="Return deterministic route-selection adapter evidence.",
+        ),
+        StockCodexCompatAdapterToolSpec(
+            name=STOCK_CODEX_COMPAT_ADAPTER_RELEASE_COMMAND_NAME,
+            argument=STOCK_CODEX_COMPAT_ADAPTER_RELEASE_COMMAND_ARGUMENT,
+            output_sentinel=STOCK_CODEX_COMPAT_ADAPTER_RELEASE_OUTPUT_SENTINEL,
+            capability="release-notes",
+            description="Return deterministic release-notes adapter evidence.",
+        ),
+    )
+
+
+def _write_stock_codex_compat_adapter_command(
+    adapter_bin: Path,
+    spec: StockCodexCompatAdapterToolSpec,
+) -> Path:
+    """Write one deterministic wrapper-owned adapter command for a live proof."""
+    return write_stock_codex_compat_adapter_command(adapter_bin, spec)
+
+
+def _write_stock_codex_compat_adapter_probe(adapter_bin: Path) -> Path:
+    """Write the deterministic single-tool adapter command for the live proof."""
+    return _write_stock_codex_compat_adapter_command(
+        adapter_bin,
+        _stock_codex_compat_default_adapter_tool_spec(),
+    )
+
+
+def _write_stock_codex_compat_adapter_manifest(
+    adapter_package: Path,
+    adapter_bin: Path,
+    *,
+    tool_specs: tuple[StockCodexCompatAdapterToolSpec, ...] | None = None,
+) -> Path:
+    """Write a deterministic adapter package manifest for the live proof."""
+    if tool_specs is None:
+        tool_specs = (_stock_codex_compat_default_adapter_tool_spec(),)
+    return write_stock_codex_compat_adapter_manifest(
+        adapter_package,
+        adapter_bin,
+        tool_specs,
+    )
+
+
+def _stock_codex_compat_env(*, home: Path, codex_home: Path) -> dict[str, str]:
+    """Return an isolated environment for stock Codex compatibility probes."""
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["CODEX_HOME"] = str(codex_home)
+    return env
+
+
+def _run_stock_codex_json(
+    stock_codex_path: Path,
+    args: list[str],
+    *,
+    env: Mapping[str, str],
+    timeout: float = 30.0,
+) -> dict[str, Any] | list[dict[str, Any]]:
+    """Run a stock Codex JSON inspection command and parse its payload."""
+    completed = subprocess.run(
+        [str(stock_codex_path), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=dict(env),
+    )
+    if completed.returncode != 0:
+        raise SystemExit(
+            "Stock Codex compatibility command failed.\n"
+            f"command={shlex.join([str(stock_codex_path), *args])}\n"
+            f"exit={completed.returncode}\n"
+            f"stdout={completed.stdout}\n"
+            f"stderr={completed.stderr}"
+        )
+    try:
+        payload = json.loads(completed.stdout or "null")
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            "Stock Codex compatibility command did not emit JSON.\n"
+            f"command={shlex.join([str(stock_codex_path), *args])}\n"
+            f"stdout={completed.stdout}\n"
+            f"stderr={completed.stderr}"
+        ) from exc
+    if not isinstance(payload, (dict, list)):
+        raise SystemExit(
+            "Stock Codex compatibility command returned an unexpected JSON root.\n"
+            f"command={shlex.join([str(stock_codex_path), *args])}\n"
+            f"type={type(payload).__name__}"
+        )
+    return payload
+
+
+def _stock_codex_supported_feature_names(
+    stock_codex_path: Path,
+    *,
+    env: Mapping[str, str],
+) -> tuple[str, ...]:
+    """Return stock Codex features that can be enabled for an isolated proof run."""
+    completed = subprocess.run(
+        [str(stock_codex_path), "features", "list"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30.0,
+        env=dict(env),
+    )
+    if completed.returncode != 0:
+        raise SystemExit(
+            "Stock Codex compatibility proof could not inspect feature flags.\n"
+            f"exit={completed.returncode}\n"
+            f"stdout={completed.stdout}\n"
+            f"stderr={completed.stderr}"
+        )
+    features: list[str] = []
+    for line in completed.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parsed = re.match(
+            r"^(?P<name>\S+)\s+"
+            r"(?P<stage>stable|experimental|under development|deprecated|removed)\s+"
+            r"(?:true|false)$",
+            stripped,
+        )
+        if not parsed:
+            continue
+        feature_name = parsed.group("name")
+        if (
+            parsed.group("stage") in STOCK_CODEX_SUPPORTED_FEATURE_STAGES
+            and feature_name not in STOCK_CODEX_FEATURES_REQUIRING_NONDEFAULT_SUPPORT
+        ):
+            features.append(feature_name)
+    if not features:
+        raise SystemExit(
+            "Stock Codex compatibility proof found no enableable feature flags in "
+            f"`codex features list` output:\n{completed.stdout}"
+        )
+    return tuple(features)
+
+
+def _stock_codex_enable_feature_args(features: tuple[str, ...]) -> list[str]:
+    """Render repeatable ``--enable`` args for a stock Codex feature set."""
+    args: list[str] = []
+    for feature in features:
+        args.extend(["--enable", feature])
+    return args
+
+
+def _validate_stock_codex_compat_plugin_state(
+    *,
+    marketplace_list_output: dict[str, Any] | list[dict[str, Any]],
+    plugin_list_output: dict[str, Any] | list[dict[str, Any]],
+    installed_plugin_path: Path,
+) -> None:
+    """Fail closed unless stock Codex sees the installed Apple plugin."""
+    if not isinstance(marketplace_list_output, dict):
+        raise SystemExit("Codex marketplace list output was not a JSON object.")
+    marketplaces = marketplace_list_output.get("marketplaces")
+    if not isinstance(marketplaces, list):
+        raise SystemExit("Codex marketplace list output did not contain marketplaces.")
+    marketplace_names = {
+        item.get("name") for item in marketplaces if isinstance(item, dict)
+    }
+    if STOCK_CODEX_COMPAT_MARKETPLACE not in marketplace_names:
+        raise SystemExit(
+            "Stock Codex did not register the local Apple workflow marketplace.\n"
+            f"marketplaces={sorted(str(name) for name in marketplace_names)}"
+        )
+    if not isinstance(plugin_list_output, dict):
+        raise SystemExit("Codex plugin list output was not a JSON object.")
+    installed = plugin_list_output.get("installed")
+    if not isinstance(installed, list):
+        raise SystemExit("Codex plugin list output did not contain installed plugins.")
+    matching = [
+        item
+        for item in installed
+        if isinstance(item, dict) and item.get("pluginId") == STOCK_CODEX_COMPAT_PLUGIN_ID
+    ]
+    if not matching:
+        raise SystemExit(
+            "Stock Codex did not report the Apple workflow plugin as installed.\n"
+            f"expected={STOCK_CODEX_COMPAT_PLUGIN_ID}"
+        )
+    if matching[0].get("enabled") is not True:
+        raise SystemExit(
+            "Stock Codex installed the Apple workflow plugin but did not enable it.\n"
+            f"plugin={matching[0]!r}"
+        )
+    if not installed_plugin_path.is_dir():
+        raise SystemExit(f"Installed Apple workflow plugin path missing: {installed_plugin_path}")
+
+
+def _validate_stock_codex_compat_bridge(
+    *,
+    codex_home: Path,
+    bridge_dir: Path,
+    mcp_list_output: dict[str, Any] | list[dict[str, Any]],
+    mcp_omnigent_output: dict[str, Any] | list[dict[str, Any]],
+) -> tuple[tuple[str, ...], tuple[str, ...], str, tuple[str, ...]]:
+    """Fail closed unless stock Codex sees the Omnigent MCP and hook bridge."""
+    config_path = codex_home / "config.toml"
+    hooks_path = codex_home / "hooks.json"
+    bridge_config_path = bridge_dir / "bridge.json"
+    policy_hook_config_path = bridge_dir / "policy_hook.json"
+    missing = [
+        path
+        for path in (config_path, hooks_path, bridge_config_path, policy_hook_config_path)
+        if not path.is_file()
+    ]
+    if missing:
+        raise SystemExit(f"Stock Codex compatibility bridge files missing: {missing!r}")
+    if not isinstance(mcp_list_output, list):
+        raise SystemExit("Codex mcp list output was not a JSON list.")
+    mcp_servers = tuple(
+        sorted(
+            str(item.get("name"))
+            for item in mcp_list_output
+            if isinstance(item, dict) and item.get("name")
+        )
+    )
+    if "omnigent" not in mcp_servers:
+        raise SystemExit(f"Codex mcp list did not include omnigent; servers={mcp_servers!r}")
+    if not isinstance(mcp_omnigent_output, dict):
+        raise SystemExit("Codex mcp get omnigent output was not a JSON object.")
+    if mcp_omnigent_output.get("name") != "omnigent":
+        raise SystemExit(f"Codex mcp get returned the wrong server: {mcp_omnigent_output!r}")
+    transport = mcp_omnigent_output.get("transport")
+    if not isinstance(transport, dict):
+        raise SystemExit(f"Codex mcp get omnigent omitted transport: {mcp_omnigent_output!r}")
+    command = transport.get("command")
+    args = transport.get("args")
+    if not isinstance(command, str) or not isinstance(args, list):
+        raise SystemExit(f"Codex mcp get omnigent returned malformed transport: {transport!r}")
+    args_tuple = tuple(str(arg) for arg in args)
+    required_args = ("-I", "-m", "omnigent.claude_native_bridge", "serve-mcp", "--bridge-dir")
+    if not all(arg in args_tuple for arg in required_args) or str(bridge_dir) not in args_tuple:
+        raise SystemExit(f"Omnigent MCP bridge args did not match expected shape: {args_tuple!r}")
+
+    hooks_payload = json.loads(hooks_path.read_text(encoding="utf-8"))
+    hooks = hooks_payload.get("hooks") if isinstance(hooks_payload, dict) else None
+    if not isinstance(hooks, dict):
+        raise SystemExit(f"Codex hooks.json has unexpected shape: {hooks_payload!r}")
+    expected_events = ("PostToolUse", "PreToolUse", "UserPromptSubmit")
+    for event in expected_events:
+        entries = hooks.get(event)
+        if not isinstance(entries, list) or not entries:
+            raise SystemExit(f"Codex hooks.json missing {event} hook: {hooks_payload!r}")
+        command_text = entries[0]["hooks"][0]["command"]
+        if "omnigent.codex_native_hook" not in command_text or str(bridge_dir) not in command_text:
+            raise SystemExit(
+                f"Codex {event} hook command does not target Omnigent: {command_text}"
+            )
+    return expected_events, mcp_servers, command, args_tuple
+
+
+def print_stock_codex_compat_proof(proof: StockCodexCompatProof) -> None:
+    """Emit operator evidence for the stock Codex compatibility proof."""
+    print("stock_codex_compat_rehearsal=selected")
+    print(f"stock_codex_compat_stock_codex_path={proof.stock_codex_path}")
+    print(f"stock_codex_compat_stock_codex_version={proof.stock_codex_version}")
+    print(f"stock_codex_compat_source_bundle={proof.source_bundle}")
+    print(f"stock_codex_compat_codex_home={proof.codex_home}")
+    print(f"stock_codex_compat_marketplace_root={proof.marketplace_root}")
+    print(f"stock_codex_compat_marketplace_name={proof.marketplace_name}")
+    print(f"stock_codex_compat_plugin_id={proof.plugin_id}")
+    print(f"stock_codex_compat_plugin_source={proof.plugin_source_path}")
+    print(f"stock_codex_compat_installed_plugin={proof.installed_plugin_path}")
+    print(f"stock_codex_compat_config={proof.config_path}")
+    print(f"stock_codex_compat_bridge_dir={proof.bridge_dir}")
+    print(f"stock_codex_compat_bridge_config={proof.bridge_config_path}")
+    print(f"stock_codex_compat_policy_hook_config={proof.policy_hook_config_path}")
+    print(f"stock_codex_compat_hooks={proof.hooks_path}")
+    print(f"stock_codex_compat_hook_events={','.join(proof.hook_events)}")
+    print(f"stock_codex_compat_mcp_servers={','.join(proof.mcp_servers)}")
+    print(f"stock_codex_compat_mcp_omnigent_command={proof.mcp_omnigent_command}")
+    print(f"stock_codex_compat_mcp_omnigent_args={json.dumps(list(proof.mcp_omnigent_args))}")
+    print("stock_codex_compat_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: stock Codex installed and enabled the Apple workflow plugin "
+        "from a disposable local marketplace without mutating persistent CODEX_HOME"
+    )
+    print(
+        "ASSERTION: stock Codex read the Omnigent MCP bridge through its own "
+        "mcp list/get commands from an isolated CODEX_HOME"
+    )
+    print(
+        "ASSERTION: the isolated CODEX_HOME carries Omnigent PreToolUse, "
+        "PostToolUse, and UserPromptSubmit policy hooks"
+    )
+    print(
+        "ASSERTION: this is an install/config compatibility gate; live "
+        "route-before-model parity still requires a separate stock-entrypoint "
+        "session proof"
+    )
+
+
+def run_stock_codex_compat_live_proof(
+    source_bundle: Path,
+    stock_codex_path: Path,
+    *,
+    workspace_root: Path,
+    timeout_seconds: float,
+) -> StockCodexCompatLiveProof:
+    """Prove a stock Codex entrypoint emits route evidence through the bridge."""
+    source_bundle = source_bundle.expanduser().resolve()
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    workspace_root = workspace_root.expanduser().resolve()
+    stock_codex_version = codex_version(stock_codex_path)
+    auth_path, auth_source = _stock_replacement_auth_source()
+    if not codex_native._codex_auth_json_has_available_credential(auth_path):
+        raise SystemExit(
+            "Current real Codex auth source is not available; cannot run live "
+            "stock-codex-compat proof.\n"
+            f"auth_path={auth_path}\n"
+            f"auth_source={auth_source}"
+        )
+
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-live-proof-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        codex_home = root / "codex-home"
+        temp_home = root / "home"
+        bridge_dir = root / "omnigent-bridge"
+        marketplace_root = root / "local-apple-workflow-marketplace"
+        codex_home.mkdir(mode=0o700)
+        temp_home.mkdir(mode=0o700)
+        (codex_home / "auth.json").symlink_to(auth_path)
+
+        _write_stock_codex_compat_marketplace(
+            source_bundle=source_bundle,
+            marketplace_root=marketplace_root,
+        )
+        env = _stock_codex_compat_env(home=temp_home, codex_home=codex_home)
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "marketplace", "add", str(marketplace_root), "--json"],
+            env=env,
+        )
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "add", STOCK_CODEX_COMPAT_PLUGIN_ID, "--json"],
+            env=env,
+        )
+        plugin_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "list", "--json"],
+            env=env,
+        )
+        _validate_stock_codex_compat_plugin_state(
+            marketplace_list_output=_run_stock_codex_json(
+                stock_codex_path,
+                ["plugin", "marketplace", "list", "--json"],
+                env=env,
+            ),
+            plugin_list_output=plugin_list_output,
+            installed_plugin_path=(
+                codex_home
+                / "plugins"
+                / "cache"
+                / STOCK_CODEX_COMPAT_MARKETPLACE
+                / PLUGIN_NAME
+                / "0.1.1"
+            ),
+        )
+
+        write_mcp_bridge_config(bridge_dir)
+        write_policy_hook_config(
+            bridge_dir,
+            ap_server_url=STOCK_CODEX_COMPAT_AP_SERVER_URL,
+            ap_auth_headers={},
+        )
+        _inject_mcp_server_config(codex_home, bridge_dir, sys.executable)
+        _write_codex_policy_hooks_file(codex_home, bridge_dir, sys.executable)
+        mcp_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "list", "--json"],
+            env=env,
+        )
+        mcp_omnigent_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "get", "omnigent", "--json"],
+            env=env,
+        )
+        _hook_events, mcp_servers, _mcp_command, _mcp_args = _validate_stock_codex_compat_bridge(
+            codex_home=codex_home,
+            bridge_dir=bridge_dir,
+            mcp_list_output=mcp_list_output,
+            mcp_omnigent_output=mcp_omnigent_output,
+        )
+
+        prompt = (
+            "No-tool stock-codex-compat live proof for a SwiftUI workflow. "
+            "Do not inspect files, do not run commands, and do not explain. "
+            "If an installed compatibility layer already inserted route "
+            "evidence before this instruction, preserve that route evidence "
+            f"first. Then reply exactly {STOCK_CODEX_COMPAT_LIVE_SENTINEL}."
+        )
+        completed = subprocess.run(
+            [
+                str(stock_codex_path),
+                "exec",
+                "--json",
+                "--dangerously-bypass-hook-trust",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "read-only",
+                "-C",
+                str(workspace_root),
+                prompt,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds if timeout_seconds > 0 else None,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
+        stderr_preview = _preview_text(completed.stderr, limit=2000)
+        if completed.returncode != 0:
+            raise SystemExit(
+                "Live stock-codex-compat command failed.\n"
+                f"exit={completed.returncode}\n"
+                f"stderr={stderr_preview}\n"
+                f"stdout_preview={_preview_text(completed.stdout, limit=2000)}"
+            )
+        events = _parse_stock_codex_exec_jsonl(completed.stdout)
+        thread_id, first_agent_message = _validate_stock_codex_compat_live_events(events)
+        if not first_agent_message.startswith(EXPECTED_ROUTE):
+            raise SystemExit(
+                "Live stock-codex-compat proof did not emit deterministic route "
+                "evidence before model output.\n"
+                f"expected_prefix={EXPECTED_ROUTE!r}\n"
+                f"first_agent_message={first_agent_message!r}\n"
+                f"sentinel={STOCK_CODEX_COMPAT_LIVE_SENTINEL!r}\n"
+                "diagnosis=current Omnigent Codex policy hook can block "
+                "UserPromptSubmit but does not rewrite or prepend prompt context "
+                "for a stock Codex entrypoint."
+            )
+        return StockCodexCompatLiveProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            source_bundle=source_bundle,
+            codex_home=codex_home,
+            auth_path=auth_path,
+            bridge_dir=bridge_dir,
+            workspace_root=workspace_root,
+            thread_id=thread_id,
+            first_agent_message=first_agent_message,
+            event_count=len(events),
+            mcp_servers=mcp_servers,
+            stderr_preview=stderr_preview,
+        )
+
+
+def run_stock_codex_compat_wrapper_live_proof(
+    source_bundle: Path,
+    stock_codex_path: Path,
+    *,
+    workspace_root: Path,
+    timeout_seconds: float,
+) -> StockCodexCompatWrapperLiveProof:
+    """Prove an Omnigent-owned wrapper can prefix route evidence around stock Codex."""
+    source_bundle = source_bundle.expanduser().resolve()
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    workspace_root = workspace_root.expanduser().resolve()
+    stock_codex_version = codex_version(stock_codex_path)
+    auth_path, auth_source = _stock_replacement_auth_source()
+    if not codex_native._codex_auth_json_has_available_credential(auth_path):
+        raise SystemExit(
+            "Current real Codex auth source is not available; cannot run live "
+            "stock-codex-compat-wrapper proof.\n"
+            f"auth_path={auth_path}\n"
+            f"auth_source={auth_source}"
+        )
+
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-wrapper-live-proof-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        codex_home = root / "codex-home"
+        temp_home = root / "home"
+        bridge_dir = root / "omnigent-bridge"
+        marketplace_root = root / "local-apple-workflow-marketplace"
+        wrapper_path = Path(stock_codex_compat_wrapper.__file__).resolve()
+        wrapper_evidence_path = root / "wrapper-evidence.json"
+        codex_home.mkdir(mode=0o700)
+        temp_home.mkdir(mode=0o700)
+        (codex_home / "auth.json").symlink_to(auth_path)
+
+        _write_stock_codex_compat_marketplace(
+            source_bundle=source_bundle,
+            marketplace_root=marketplace_root,
+        )
+        env = _stock_codex_compat_env(home=temp_home, codex_home=codex_home)
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "marketplace", "add", str(marketplace_root), "--json"],
+            env=env,
+        )
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "add", STOCK_CODEX_COMPAT_PLUGIN_ID, "--json"],
+            env=env,
+        )
+        plugin_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "list", "--json"],
+            env=env,
+        )
+        _validate_stock_codex_compat_plugin_state(
+            marketplace_list_output=_run_stock_codex_json(
+                stock_codex_path,
+                ["plugin", "marketplace", "list", "--json"],
+                env=env,
+            ),
+            plugin_list_output=plugin_list_output,
+            installed_plugin_path=(
+                codex_home
+                / "plugins"
+                / "cache"
+                / STOCK_CODEX_COMPAT_MARKETPLACE
+                / PLUGIN_NAME
+                / "0.1.1"
+            ),
+        )
+
+        write_mcp_bridge_config(bridge_dir)
+        write_policy_hook_config(
+            bridge_dir,
+            ap_server_url=STOCK_CODEX_COMPAT_AP_SERVER_URL,
+            ap_auth_headers={},
+        )
+        _inject_mcp_server_config(codex_home, bridge_dir, sys.executable)
+        _write_codex_policy_hooks_file(codex_home, bridge_dir, sys.executable)
+        mcp_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "list", "--json"],
+            env=env,
+        )
+        mcp_omnigent_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "get", "omnigent", "--json"],
+            env=env,
+        )
+        _hook_events, mcp_servers, _mcp_command, _mcp_args = _validate_stock_codex_compat_bridge(
+            codex_home=codex_home,
+            bridge_dir=bridge_dir,
+            mcp_list_output=mcp_list_output,
+            mcp_omnigent_output=mcp_omnigent_output,
+        )
+
+        prompt = (
+            "No-tool stock-codex-compat wrapper live proof for a SwiftUI workflow. "
+            "Do not inspect files, do not run commands, and do not explain. "
+            f"Reply exactly {STOCK_CODEX_COMPAT_LIVE_SENTINEL}."
+        )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "omnigent.stock_codex_compat_wrapper",
+                "--stock-codex-path",
+                str(stock_codex_path),
+                "--route-prefix",
+                EXPECTED_ROUTE,
+                "--evidence-path",
+                str(wrapper_evidence_path),
+                "--",
+                "exec",
+                "--json",
+                "--dangerously-bypass-hook-trust",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "read-only",
+                "-C",
+                str(workspace_root),
+                prompt,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds if timeout_seconds > 0 else None,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
+        stderr_preview = _preview_text(completed.stderr, limit=2000)
+        if completed.returncode != 0:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper command failed.\n"
+                f"exit={completed.returncode}\n"
+                f"stderr={stderr_preview}\n"
+                f"stdout_preview={_preview_text(completed.stdout, limit=2000)}"
+            )
+        events = _parse_stock_codex_exec_jsonl(completed.stdout)
+        thread_id, first_agent_message = _validate_stock_codex_compat_live_events(events)
+        if not first_agent_message.startswith(EXPECTED_ROUTE):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper proof did not emit deterministic "
+                "route evidence before model output.\n"
+                f"expected_prefix={EXPECTED_ROUTE!r}\n"
+                f"first_agent_message={first_agent_message!r}\n"
+                f"sentinel={STOCK_CODEX_COMPAT_LIVE_SENTINEL!r}\n"
+                "diagnosis=the Omnigent wrapper did not prefix the first "
+                "stock Codex agent message."
+            )
+        wrapper_evidence = _read_stock_codex_compat_wrapper_evidence(wrapper_evidence_path)
+        if wrapper_evidence["routeInjected"] is not True:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper proof did not prove wrapper-owned "
+                "route injection.\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        return StockCodexCompatWrapperLiveProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            source_bundle=source_bundle,
+            wrapper_path=wrapper_path,
+            codex_home=codex_home,
+            auth_path=auth_path,
+            bridge_dir=bridge_dir,
+            workspace_root=workspace_root,
+            thread_id=thread_id,
+            first_agent_message=first_agent_message,
+            first_agent_message_before_wrapper=str(
+                wrapper_evidence["firstAgentMessageBefore"]
+            ),
+            route_injected=bool(wrapper_evidence["routeInjected"]),
+            wrapper_evidence_path=wrapper_evidence_path,
+            event_count=len(events),
+            mcp_servers=mcp_servers,
+            stderr_preview=stderr_preview,
+        )
+
+
+def run_stock_codex_compat_wrapper_command_tool_proof(
+    source_bundle: Path,
+    stock_codex_path: Path,
+    *,
+    timeout_seconds: float,
+) -> StockCodexCompatWrapperCommandToolProof:
+    """Prove the wrapper preserves stock Codex command tool execution events."""
+    source_bundle = source_bundle.expanduser().resolve()
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    stock_codex_version = codex_version(stock_codex_path)
+    auth_path, auth_source = _stock_replacement_auth_source()
+    if not codex_native._codex_auth_json_has_available_credential(auth_path):
+        raise SystemExit(
+            "Current real Codex auth source is not available; cannot run live "
+            "stock-codex-compat-wrapper-command-tool proof.\n"
+            f"auth_path={auth_path}\n"
+            f"auth_source={auth_source}"
+        )
+
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-wrapper-tool-proof-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        codex_home = root / "codex-home"
+        temp_home = root / "home"
+        bridge_dir = root / "omnigent-bridge"
+        marketplace_root = root / "local-apple-workflow-marketplace"
+        wrapper_path = Path(stock_codex_compat_wrapper.__file__).resolve()
+        wrapper_evidence_path = root / "wrapper-evidence.json"
+        workspace_root = root / "workspace"
+        codex_home.mkdir(mode=0o700)
+        temp_home.mkdir(mode=0o700)
+        workspace_root.mkdir(mode=0o700)
+        (workspace_root / "tool-proof.txt").write_text(
+            f"{TOOL_SENTINEL}\n",
+            encoding="utf-8",
+        )
+        (codex_home / "auth.json").symlink_to(auth_path)
+
+        _write_stock_codex_compat_marketplace(
+            source_bundle=source_bundle,
+            marketplace_root=marketplace_root,
+        )
+        env = _stock_codex_compat_env(home=temp_home, codex_home=codex_home)
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "marketplace", "add", str(marketplace_root), "--json"],
+            env=env,
+        )
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "add", STOCK_CODEX_COMPAT_PLUGIN_ID, "--json"],
+            env=env,
+        )
+        plugin_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "list", "--json"],
+            env=env,
+        )
+        _validate_stock_codex_compat_plugin_state(
+            marketplace_list_output=_run_stock_codex_json(
+                stock_codex_path,
+                ["plugin", "marketplace", "list", "--json"],
+                env=env,
+            ),
+            plugin_list_output=plugin_list_output,
+            installed_plugin_path=(
+                codex_home
+                / "plugins"
+                / "cache"
+                / STOCK_CODEX_COMPAT_MARKETPLACE
+                / PLUGIN_NAME
+                / "0.1.1"
+            ),
+        )
+
+        write_mcp_bridge_config(bridge_dir)
+        write_policy_hook_config(
+            bridge_dir,
+            ap_server_url=STOCK_CODEX_COMPAT_AP_SERVER_URL,
+            ap_auth_headers={},
+        )
+        _inject_mcp_server_config(codex_home, bridge_dir, sys.executable)
+        _write_codex_policy_hooks_file(codex_home, bridge_dir, sys.executable)
+        mcp_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "list", "--json"],
+            env=env,
+        )
+        mcp_omnigent_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "get", "omnigent", "--json"],
+            env=env,
+        )
+        _hook_events, mcp_servers, _mcp_command, _mcp_args = _validate_stock_codex_compat_bridge(
+            codex_home=codex_home,
+            bridge_dir=bridge_dir,
+            mcp_list_output=mcp_list_output,
+            mcp_omnigent_output=mcp_omnigent_output,
+        )
+
+        prompt = (
+            "Wrapped stock Codex command tool proof. Use the shell command tool "
+            "exactly once to run `cat tool-proof.txt`. Do not inspect any other "
+            "files. Reply exactly "
+            f"{STOCK_CODEX_COMPAT_WRAPPER_TOOL_SENTINEL} if the output contains "
+            f"{TOOL_SENTINEL}; otherwise reply TOOL_MISSING."
+        )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "omnigent.stock_codex_compat_wrapper",
+                "--stock-codex-path",
+                str(stock_codex_path),
+                "--route-prefix",
+                EXPECTED_ROUTE,
+                "--evidence-path",
+                str(wrapper_evidence_path),
+                "--",
+                "exec",
+                "--json",
+                "--dangerously-bypass-hook-trust",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "read-only",
+                "-C",
+                str(workspace_root),
+                prompt,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds if timeout_seconds > 0 else None,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
+        stderr_preview = _preview_text(completed.stderr, limit=2000)
+        if completed.returncode != 0:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-command-tool command failed.\n"
+                f"exit={completed.returncode}\n"
+                f"stderr={stderr_preview}\n"
+                f"stdout_preview={_preview_text(completed.stdout, limit=2000)}"
+            )
+        events = _parse_stock_codex_exec_jsonl(completed.stdout)
+        thread_id, first_agent_message = _validate_stock_codex_agent_message(
+            events,
+            expected_sentinel=STOCK_CODEX_COMPAT_WRAPPER_TOOL_SENTINEL,
+            proof_name="stock-codex-compat-wrapper-command-tool",
+        )
+        if not first_agent_message.startswith(EXPECTED_ROUTE):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-command-tool proof did not emit "
+                "deterministic route evidence before model output.\n"
+                f"expected_prefix={EXPECTED_ROUTE!r}\n"
+                f"first_agent_message={first_agent_message!r}"
+            )
+        command_item = _validate_stock_codex_command_execution_events(events)
+        wrapper_evidence = _read_stock_codex_compat_wrapper_evidence(wrapper_evidence_path)
+        if wrapper_evidence["routeInjected"] is not True:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-command-tool proof did not prove "
+                "wrapper-owned route injection.\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        return StockCodexCompatWrapperCommandToolProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            source_bundle=source_bundle,
+            wrapper_path=wrapper_path,
+            codex_home=codex_home,
+            auth_path=auth_path,
+            bridge_dir=bridge_dir,
+            workspace_root=workspace_root,
+            thread_id=thread_id,
+            command=str(command_item["command"]),
+            command_output=str(command_item["aggregated_output"]),
+            first_agent_message=first_agent_message,
+            first_agent_message_before_wrapper=str(
+                wrapper_evidence["firstAgentMessageBefore"]
+            ),
+            route_injected=bool(wrapper_evidence["routeInjected"]),
+            wrapper_evidence_path=wrapper_evidence_path,
+            event_count=len(events),
+            mcp_servers=mcp_servers,
+            stderr_preview=stderr_preview,
+        )
+
+
+def run_stock_codex_compat_wrapper_adapter_tool_proof(
+    source_bundle: Path,
+    stock_codex_path: Path,
+    *,
+    timeout_seconds: float,
+) -> StockCodexCompatWrapperAdapterToolProof:
+    """Prove the wrapper can expose an Omnigent-owned adapter command to stock Codex."""
+    source_bundle = source_bundle.expanduser().resolve()
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    stock_codex_version = codex_version(stock_codex_path)
+    auth_path, auth_source = _stock_replacement_auth_source()
+    if not codex_native._codex_auth_json_has_available_credential(auth_path):
+        raise SystemExit(
+            "Current real Codex auth source is not available; cannot run live "
+            "stock-codex-compat-wrapper-adapter-tool proof.\n"
+            f"auth_path={auth_path}\n"
+            f"auth_source={auth_source}"
+        )
+
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-wrapper-adapter-tool-proof-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        codex_home = root / "codex-home"
+        temp_home = root / "home"
+        bridge_dir = root / "omnigent-bridge"
+        marketplace_root = root / "local-apple-workflow-marketplace"
+        wrapper_path = Path(stock_codex_compat_wrapper.__file__).resolve()
+        wrapper_evidence_path = root / "wrapper-evidence.json"
+        workspace_root = root / "workspace"
+        adapter_package = root / "adapter-package"
+        codex_home.mkdir(mode=0o700)
+        temp_home.mkdir(mode=0o700)
+        workspace_root.mkdir(mode=0o700)
+        adapter_package_result = write_stock_codex_compat_adapter_package(
+            adapter_package,
+            (_stock_codex_compat_default_adapter_tool_spec(),),
+        )
+        adapter_bin = adapter_package_result.adapter_bin
+        adapter_manifest = adapter_package_result.manifest_path
+        (codex_home / "auth.json").symlink_to(auth_path)
+
+        _write_stock_codex_compat_marketplace(
+            source_bundle=source_bundle,
+            marketplace_root=marketplace_root,
+        )
+        env = _stock_codex_compat_env(home=temp_home, codex_home=codex_home)
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "marketplace", "add", str(marketplace_root), "--json"],
+            env=env,
+        )
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "add", STOCK_CODEX_COMPAT_PLUGIN_ID, "--json"],
+            env=env,
+        )
+        plugin_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "list", "--json"],
+            env=env,
+        )
+        _validate_stock_codex_compat_plugin_state(
+            marketplace_list_output=_run_stock_codex_json(
+                stock_codex_path,
+                ["plugin", "marketplace", "list", "--json"],
+                env=env,
+            ),
+            plugin_list_output=plugin_list_output,
+            installed_plugin_path=(
+                codex_home
+                / "plugins"
+                / "cache"
+                / STOCK_CODEX_COMPAT_MARKETPLACE
+                / PLUGIN_NAME
+                / "0.1.1"
+            ),
+        )
+
+        write_mcp_bridge_config(bridge_dir)
+        write_policy_hook_config(
+            bridge_dir,
+            ap_server_url=STOCK_CODEX_COMPAT_AP_SERVER_URL,
+            ap_auth_headers={},
+        )
+        _inject_mcp_server_config(codex_home, bridge_dir, sys.executable)
+        _write_codex_policy_hooks_file(codex_home, bridge_dir, sys.executable)
+        mcp_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "list", "--json"],
+            env=env,
+        )
+        mcp_omnigent_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "get", "omnigent", "--json"],
+            env=env,
+        )
+        _hook_events, mcp_servers, _mcp_command, _mcp_args = _validate_stock_codex_compat_bridge(
+            codex_home=codex_home,
+            bridge_dir=bridge_dir,
+            mcp_list_output=mcp_list_output,
+            mcp_omnigent_output=mcp_omnigent_output,
+        )
+
+        adapter_command = (
+            f"{STOCK_CODEX_COMPAT_ADAPTER_COMMAND_NAME} "
+            f"--message {STOCK_CODEX_COMPAT_ADAPTER_COMMAND_ARGUMENT}"
+        )
+        adapter_arguments = json.dumps(
+            {"message": STOCK_CODEX_COMPAT_ADAPTER_COMMAND_ARGUMENT},
+            sort_keys=True,
+        )
+        prompt = (
+            "Wrapped stock Codex Omnigent adapter package proof. Use the shell "
+            f"command tool exactly once to run `{adapter_command}` with adapter "
+            f"argument object `{adapter_arguments}`. Do not inspect files and "
+            "do not use any other tool. Reply exactly "
+            f"{STOCK_CODEX_COMPAT_WRAPPER_ADAPTER_TOOL_SENTINEL} if stdout "
+            f"contains {STOCK_CODEX_COMPAT_ADAPTER_OUTPUT_SENTINEL}; otherwise "
+            "reply ADAPTER_TOOL_MISSING."
+        )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "omnigent.stock_codex_compat_wrapper",
+                "--stock-codex-path",
+                str(stock_codex_path),
+                "--route-prefix",
+                EXPECTED_ROUTE,
+                "--evidence-path",
+                str(wrapper_evidence_path),
+                "--adapter-bin",
+                str(adapter_bin),
+                "--adapter-manifest",
+                str(adapter_manifest),
+                "--",
+                "exec",
+                "--json",
+                "--dangerously-bypass-hook-trust",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "read-only",
+                "-C",
+                str(workspace_root),
+                prompt,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds if timeout_seconds > 0 else None,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
+        stderr_preview = _preview_text(completed.stderr, limit=2000)
+        if completed.returncode != 0:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-adapter-tool command failed.\n"
+                f"exit={completed.returncode}\n"
+                f"stderr={stderr_preview}\n"
+                f"stdout_preview={_preview_text(completed.stdout, limit=2000)}"
+            )
+        events = _parse_stock_codex_exec_jsonl(completed.stdout)
+        thread_id, first_agent_message = _validate_stock_codex_agent_message(
+            events,
+            expected_sentinel=STOCK_CODEX_COMPAT_WRAPPER_ADAPTER_TOOL_SENTINEL,
+            proof_name="stock-codex-compat-wrapper-adapter-tool",
+        )
+        if not first_agent_message.startswith(EXPECTED_ROUTE):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-adapter-tool proof did not emit "
+                "deterministic route evidence before model output.\n"
+                f"expected_prefix={EXPECTED_ROUTE!r}\n"
+                f"first_agent_message={first_agent_message!r}"
+            )
+        command_item = _validate_stock_codex_adapter_command_execution_events(events)
+        wrapper_evidence = _read_stock_codex_compat_wrapper_evidence(wrapper_evidence_path)
+        if wrapper_evidence["routeInjected"] is not True:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-adapter-tool proof did not prove "
+                "wrapper-owned route injection.\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if wrapper_evidence.get("adapterBin") != str(adapter_bin):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-adapter-tool proof did not prove "
+                "wrapper-owned adapter-bin injection.\n"
+                f"expected_adapter_bin={adapter_bin}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if wrapper_evidence.get("adapterManifest") != str(adapter_manifest):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-adapter-tool proof did not prove "
+                "wrapper-owned adapter-manifest validation.\n"
+                f"expected_adapter_manifest={adapter_manifest}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        expected_tool_names = [STOCK_CODEX_COMPAT_ADAPTER_COMMAND_NAME]
+        if wrapper_evidence.get("adapterToolNames") != expected_tool_names:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-adapter-tool proof did not record "
+                "the expected adapter tool names.\n"
+                f"expected_adapter_tool_names={expected_tool_names!r}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if tuple(expected_tool_names) != adapter_package_result.tool_names:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-adapter-tool proof did not use "
+                "the production adapter package generator.\n"
+                f"expected_adapter_tool_names={expected_tool_names!r}\n"
+                f"package_tool_names={adapter_package_result.tool_names!r}"
+            )
+        return StockCodexCompatWrapperAdapterToolProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            source_bundle=source_bundle,
+            wrapper_path=wrapper_path,
+            codex_home=codex_home,
+            auth_path=auth_path,
+            bridge_dir=bridge_dir,
+            workspace_root=workspace_root,
+            adapter_bin=adapter_bin,
+            adapter_manifest=adapter_manifest,
+            adapter_tool_names=tuple(expected_tool_names),
+            thread_id=thread_id,
+            command=str(command_item["command"]),
+            command_output=str(command_item["aggregated_output"]),
+            first_agent_message=first_agent_message,
+            first_agent_message_before_wrapper=str(
+                wrapper_evidence["firstAgentMessageBefore"]
+            ),
+            route_injected=bool(wrapper_evidence["routeInjected"]),
+            wrapper_evidence_path=wrapper_evidence_path,
+            event_count=len(events),
+            mcp_servers=mcp_servers,
+            stderr_preview=stderr_preview,
+        )
+
+
+def run_stock_codex_compat_wrapper_adapter_arbitration_proof(
+    source_bundle: Path,
+    stock_codex_path: Path,
+    *,
+    timeout_seconds: float,
+) -> StockCodexCompatWrapperAdapterArbitrationProof:
+    """Prove a multi-tool adapter package can select one wrapper-owned adapter."""
+    source_bundle = source_bundle.expanduser().resolve()
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    stock_codex_version = codex_version(stock_codex_path)
+    auth_path, auth_source = _stock_replacement_auth_source()
+    if not codex_native._codex_auth_json_has_available_credential(auth_path):
+        raise SystemExit(
+            "Current real Codex auth source is not available; cannot run live "
+            "stock-codex-compat-wrapper-adapter-arbitration proof.\n"
+            f"auth_path={auth_path}\n"
+            f"auth_source={auth_source}"
+        )
+
+    selected_spec, rejected_spec = _stock_codex_compat_adapter_arbitration_tool_specs()
+    tool_specs = (selected_spec, rejected_spec)
+
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-wrapper-adapter-arbitration-proof-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        codex_home = root / "codex-home"
+        temp_home = root / "home"
+        bridge_dir = root / "omnigent-bridge"
+        marketplace_root = root / "local-apple-workflow-marketplace"
+        wrapper_path = Path(stock_codex_compat_wrapper.__file__).resolve()
+        wrapper_evidence_path = root / "wrapper-evidence.json"
+        workspace_root = root / "workspace"
+        adapter_package = root / "adapter-package"
+        codex_home.mkdir(mode=0o700)
+        temp_home.mkdir(mode=0o700)
+        workspace_root.mkdir(mode=0o700)
+        adapter_package_result = write_stock_codex_compat_adapter_package(
+            adapter_package,
+            tool_specs,
+        )
+        adapter_bin = adapter_package_result.adapter_bin
+        adapter_manifest = adapter_package_result.manifest_path
+        (codex_home / "auth.json").symlink_to(auth_path)
+
+        _write_stock_codex_compat_marketplace(
+            source_bundle=source_bundle,
+            marketplace_root=marketplace_root,
+        )
+        env = _stock_codex_compat_env(home=temp_home, codex_home=codex_home)
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "marketplace", "add", str(marketplace_root), "--json"],
+            env=env,
+        )
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "add", STOCK_CODEX_COMPAT_PLUGIN_ID, "--json"],
+            env=env,
+        )
+        plugin_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "list", "--json"],
+            env=env,
+        )
+        _validate_stock_codex_compat_plugin_state(
+            marketplace_list_output=_run_stock_codex_json(
+                stock_codex_path,
+                ["plugin", "marketplace", "list", "--json"],
+                env=env,
+            ),
+            plugin_list_output=plugin_list_output,
+            installed_plugin_path=(
+                codex_home
+                / "plugins"
+                / "cache"
+                / STOCK_CODEX_COMPAT_MARKETPLACE
+                / PLUGIN_NAME
+                / "0.1.1"
+            ),
+        )
+
+        write_mcp_bridge_config(bridge_dir)
+        write_policy_hook_config(
+            bridge_dir,
+            ap_server_url=STOCK_CODEX_COMPAT_AP_SERVER_URL,
+            ap_auth_headers={},
+        )
+        _inject_mcp_server_config(codex_home, bridge_dir, sys.executable)
+        _write_codex_policy_hooks_file(codex_home, bridge_dir, sys.executable)
+        mcp_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "list", "--json"],
+            env=env,
+        )
+        mcp_omnigent_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "get", "omnigent", "--json"],
+            env=env,
+        )
+        _hook_events, mcp_servers, _mcp_command, _mcp_args = _validate_stock_codex_compat_bridge(
+            codex_home=codex_home,
+            bridge_dir=bridge_dir,
+            mcp_list_output=mcp_list_output,
+            mcp_omnigent_output=mcp_omnigent_output,
+        )
+
+        selected_command = f"{selected_spec.name} --message {selected_spec.argument}"
+        rejected_command = f"{rejected_spec.name} --message {rejected_spec.argument}"
+        manifest_preview = json.dumps(
+            [
+                {
+                    "name": spec.name,
+                    "capability": spec.capability,
+                    "argumentObject": {"message": spec.argument},
+                }
+                for spec in tool_specs
+            ],
+            sort_keys=True,
+        )
+        prompt = (
+            "Wrapped stock Codex multi-adapter arbitration proof. The adapter "
+            f"manifest declares these tools: `{manifest_preview}`. The requested "
+            f"capability is `{selected_spec.capability}`. Use the shell command "
+            f"tool exactly once to run `{selected_command}`. Do not run "
+            f"`{rejected_command}` and do not inspect files. Reply exactly "
+            f"{STOCK_CODEX_COMPAT_WRAPPER_ADAPTER_ARBITRATION_SENTINEL} if stdout "
+            f"contains {selected_spec.output_sentinel} and does not contain "
+            f"{rejected_spec.output_sentinel}; otherwise reply ADAPTER_ARBITRATION_FAILED."
+        )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "omnigent.stock_codex_compat_wrapper",
+                "--stock-codex-path",
+                str(stock_codex_path),
+                "--route-prefix",
+                EXPECTED_ROUTE,
+                "--evidence-path",
+                str(wrapper_evidence_path),
+                "--adapter-bin",
+                str(adapter_bin),
+                "--adapter-manifest",
+                str(adapter_manifest),
+                "--",
+                "exec",
+                "--json",
+                "--dangerously-bypass-hook-trust",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "read-only",
+                "-C",
+                str(workspace_root),
+                prompt,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds if timeout_seconds > 0 else None,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
+        stderr_preview = _preview_text(completed.stderr, limit=2000)
+        if completed.returncode != 0:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-adapter-arbitration command failed.\n"
+                f"exit={completed.returncode}\n"
+                f"stderr={stderr_preview}\n"
+                f"stdout_preview={_preview_text(completed.stdout, limit=2000)}"
+            )
+        events = _parse_stock_codex_exec_jsonl(completed.stdout)
+        thread_id, first_agent_message = _validate_stock_codex_agent_message(
+            events,
+            expected_sentinel=STOCK_CODEX_COMPAT_WRAPPER_ADAPTER_ARBITRATION_SENTINEL,
+            proof_name="stock-codex-compat-wrapper-adapter-arbitration",
+        )
+        if not first_agent_message.startswith(EXPECTED_ROUTE):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-adapter-arbitration proof did not "
+                "emit deterministic route evidence before model output.\n"
+                f"expected_prefix={EXPECTED_ROUTE!r}\n"
+                f"first_agent_message={first_agent_message!r}"
+            )
+        command_item = _validate_stock_codex_adapter_command_execution_events(
+            events,
+            command_name=selected_spec.name,
+            command_argument=selected_spec.argument,
+            output_sentinel=selected_spec.output_sentinel,
+            forbidden_command_names=(rejected_spec.name,),
+            forbidden_output_sentinels=(rejected_spec.output_sentinel,),
+        )
+        wrapper_evidence = _read_stock_codex_compat_wrapper_evidence(wrapper_evidence_path)
+        if wrapper_evidence["routeInjected"] is not True:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-adapter-arbitration proof did not "
+                "prove wrapper-owned route injection.\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if wrapper_evidence.get("adapterBin") != str(adapter_bin):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-adapter-arbitration proof did not "
+                "prove wrapper-owned adapter-bin injection.\n"
+                f"expected_adapter_bin={adapter_bin}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if wrapper_evidence.get("adapterManifest") != str(adapter_manifest):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-adapter-arbitration proof did not "
+                "prove wrapper-owned adapter-manifest validation.\n"
+                f"expected_adapter_manifest={adapter_manifest}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        expected_tool_names = [spec.name for spec in tool_specs]
+        if wrapper_evidence.get("adapterToolNames") != expected_tool_names:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-adapter-arbitration proof did not "
+                "record the expected adapter tool names.\n"
+                f"expected_adapter_tool_names={expected_tool_names!r}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if tuple(expected_tool_names) != adapter_package_result.tool_names:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-adapter-arbitration proof did not "
+                "use the production adapter package generator.\n"
+                f"expected_adapter_tool_names={expected_tool_names!r}\n"
+                f"package_tool_names={adapter_package_result.tool_names!r}"
+            )
+        return StockCodexCompatWrapperAdapterArbitrationProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            source_bundle=source_bundle,
+            wrapper_path=wrapper_path,
+            codex_home=codex_home,
+            auth_path=auth_path,
+            bridge_dir=bridge_dir,
+            workspace_root=workspace_root,
+            adapter_bin=adapter_bin,
+            adapter_manifest=adapter_manifest,
+            adapter_tool_names=tuple(expected_tool_names),
+            selected_tool_name=selected_spec.name,
+            rejected_tool_name=rejected_spec.name,
+            thread_id=thread_id,
+            command=str(command_item["command"]),
+            command_output=str(command_item["aggregated_output"]),
+            first_agent_message=first_agent_message,
+            first_agent_message_before_wrapper=str(
+                wrapper_evidence["firstAgentMessageBefore"]
+            ),
+            route_injected=bool(wrapper_evidence["routeInjected"]),
+            wrapper_evidence_path=wrapper_evidence_path,
+            event_count=len(events),
+            mcp_servers=mcp_servers,
+            stderr_preview=stderr_preview,
+        )
+
+
+def run_stock_codex_compat_wrapper_apple_docs_adapter_proof(
+    source_bundle: Path,
+    stock_codex_path: Path,
+    *,
+    timeout_seconds: float,
+) -> StockCodexCompatWrapperAppleDocsAdapterProof:
+    """Prove a real Apple docs adapter runs through the stock-Codex wrapper package."""
+    source_bundle = source_bundle.expanduser().resolve()
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    stock_codex_version = codex_version(stock_codex_path)
+    auth_path, auth_source = _stock_replacement_auth_source()
+    if not codex_native._codex_auth_json_has_available_credential(auth_path):
+        raise SystemExit(
+            "Current real Codex auth source is not available; cannot run live "
+            "stock-codex-compat-wrapper-apple-docs-adapter proof.\n"
+            f"auth_path={auth_path}\n"
+            f"auth_source={auth_source}"
+        )
+
+    sosumi_cli_path = shutil.which("sosumi")
+    docs_command_prefix = (
+        (sosumi_cli_path, "fetch")
+        if sosumi_cli_path is not None
+        else APPLE_DOCS_CLI_POLICY.command_prefix
+    )
+    docs_policy = replace(
+        APPLE_DOCS_CLI_POLICY,
+        command_prefix=docs_command_prefix,
+        timeout_seconds=APPLE_DOCS_STOCK_COMPAT_TIMEOUT_SECONDS,
+    )
+    docs_spec = build_fetch_apple_docs_stock_codex_adapter_spec(docs_policy)
+
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-wrapper-apple-docs-adapter-proof-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        codex_home = root / "codex-home"
+        temp_home = root / "home"
+        bridge_dir = root / "omnigent-bridge"
+        marketplace_root = root / "local-apple-workflow-marketplace"
+        wrapper_path = Path(stock_codex_compat_wrapper.__file__).resolve()
+        wrapper_evidence_path = root / "wrapper-evidence.json"
+        workspace_root = root / "workspace"
+        adapter_package = root / "adapter-package"
+        codex_home.mkdir(mode=0o700)
+        temp_home.mkdir(mode=0o700)
+        workspace_root.mkdir(mode=0o700)
+        adapter_package_result = write_stock_codex_compat_adapter_package(
+            adapter_package,
+            (docs_spec,),
+        )
+        adapter_bin = adapter_package_result.adapter_bin
+        adapter_manifest = adapter_package_result.manifest_path
+        (codex_home / "auth.json").symlink_to(auth_path)
+
+        _write_stock_codex_compat_marketplace(
+            source_bundle=source_bundle,
+            marketplace_root=marketplace_root,
+        )
+        env = _stock_codex_compat_env(home=temp_home, codex_home=codex_home)
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "marketplace", "add", str(marketplace_root), "--json"],
+            env=env,
+        )
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "add", STOCK_CODEX_COMPAT_PLUGIN_ID, "--json"],
+            env=env,
+        )
+        plugin_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "list", "--json"],
+            env=env,
+        )
+        _validate_stock_codex_compat_plugin_state(
+            marketplace_list_output=_run_stock_codex_json(
+                stock_codex_path,
+                ["plugin", "marketplace", "list", "--json"],
+                env=env,
+            ),
+            plugin_list_output=plugin_list_output,
+            installed_plugin_path=(
+                codex_home
+                / "plugins"
+                / "cache"
+                / STOCK_CODEX_COMPAT_MARKETPLACE
+                / PLUGIN_NAME
+                / "0.1.1"
+            ),
+        )
+
+        write_mcp_bridge_config(bridge_dir)
+        write_policy_hook_config(
+            bridge_dir,
+            ap_server_url=STOCK_CODEX_COMPAT_AP_SERVER_URL,
+            ap_auth_headers={},
+        )
+        _inject_mcp_server_config(codex_home, bridge_dir, sys.executable)
+        _write_codex_policy_hooks_file(codex_home, bridge_dir, sys.executable)
+        mcp_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "list", "--json"],
+            env=env,
+        )
+        mcp_omnigent_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "get", "omnigent", "--json"],
+            env=env,
+        )
+        _hook_events, mcp_servers, _mcp_command, _mcp_args = _validate_stock_codex_compat_bridge(
+            codex_home=codex_home,
+            bridge_dir=bridge_dir,
+            mcp_list_output=mcp_list_output,
+            mcp_omnigent_output=mcp_omnigent_output,
+        )
+
+        adapter_command = f"{APPLE_DOCS_CLI_TOOL} --url {shlex.quote(APPLE_DOCS_CLI_URL)}"
+        adapter_arguments = json.dumps({"url": APPLE_DOCS_CLI_URL}, sort_keys=True)
+        expected_output = ", ".join(APPLE_MCP_SOSUMI_SENTINELS)
+        prompt = (
+            "Wrapped stock Codex real Apple docs adapter proof. The adapter "
+            f"manifest declares `{APPLE_DOCS_CLI_TOOL}` for capability "
+            f"`{docs_spec.capability}` with argument object `{adapter_arguments}`. "
+            "Use the shell command tool exactly once to run "
+            f"`{adapter_command}`. Do not use dynamicTools, MCP tools, or any "
+            "other command. Reply exactly "
+            f"{STOCK_CODEX_COMPAT_WRAPPER_APPLE_DOCS_ADAPTER_SENTINEL} if stdout "
+            f"contains {expected_output}; otherwise reply APPLE_DOCS_ADAPTER_FAILED."
+        )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "omnigent.stock_codex_compat_wrapper",
+                "--stock-codex-path",
+                str(stock_codex_path),
+                "--route-prefix",
+                EXPECTED_ROUTE,
+                "--evidence-path",
+                str(wrapper_evidence_path),
+                "--adapter-bin",
+                str(adapter_bin),
+                "--adapter-manifest",
+                str(adapter_manifest),
+                "--",
+                "exec",
+                "--json",
+                "--dangerously-bypass-hook-trust",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "danger-full-access",
+                "-C",
+                str(workspace_root),
+                prompt,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds if timeout_seconds > 0 else None,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
+        stderr_preview = _preview_text(completed.stderr, limit=2000)
+        if completed.returncode != 0:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-apple-docs-adapter command failed.\n"
+                f"exit={completed.returncode}\n"
+                f"stderr={stderr_preview}\n"
+                f"stdout_preview={_preview_text(completed.stdout, limit=2000)}"
+            )
+        events = _parse_stock_codex_exec_jsonl(completed.stdout)
+        thread_id, first_agent_message = _extract_stock_codex_thread_and_agent_message(
+            events,
+            proof_name="stock-codex-compat-wrapper-apple-docs-adapter",
+        )
+        if not first_agent_message.startswith(EXPECTED_ROUTE):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-apple-docs-adapter proof did not "
+                "emit deterministic route evidence before model output.\n"
+                f"expected_prefix={EXPECTED_ROUTE!r}\n"
+                f"first_agent_message={first_agent_message!r}"
+            )
+        command_item = _validate_stock_codex_adapter_command_execution_events(
+            events,
+            command_name=APPLE_DOCS_CLI_TOOL,
+            command_argument=APPLE_DOCS_CLI_URL,
+            output_sentinel=APPLE_MCP_SOSUMI_SENTINELS[0],
+        )
+        command_output = str(command_item["aggregated_output"])
+        for output_sentinel in APPLE_MCP_SOSUMI_SENTINELS:
+            if output_sentinel not in command_output:
+                raise SystemExit(
+                    "Wrapped stock Codex Apple docs adapter output missed expected "
+                    f"sentinel {output_sentinel!r}: {command_item!r}"
+                )
+        if (
+            STOCK_CODEX_COMPAT_WRAPPER_APPLE_DOCS_ADAPTER_SENTINEL
+            not in first_agent_message
+        ):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-apple-docs-adapter proof did not "
+                "return the expected sentinel after the adapter command.\n"
+                f"sentinel={STOCK_CODEX_COMPAT_WRAPPER_APPLE_DOCS_ADAPTER_SENTINEL!r}\n"
+                f"first_agent_message={first_agent_message!r}\n"
+                f"command={command_item.get('command')!r}\n"
+                f"command_output_preview={_preview_text(command_output, limit=1000)!r}"
+            )
+        wrapper_evidence = _read_stock_codex_compat_wrapper_evidence(wrapper_evidence_path)
+        if wrapper_evidence["routeInjected"] is not True:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-apple-docs-adapter proof did not "
+                "prove wrapper-owned route injection.\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if wrapper_evidence.get("adapterBin") != str(adapter_bin):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-apple-docs-adapter proof did not "
+                "prove wrapper-owned adapter-bin injection.\n"
+                f"expected_adapter_bin={adapter_bin}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if wrapper_evidence.get("adapterManifest") != str(adapter_manifest):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-apple-docs-adapter proof did not "
+                "prove wrapper-owned adapter-manifest validation.\n"
+                f"expected_adapter_manifest={adapter_manifest}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        expected_tool_names = [APPLE_DOCS_CLI_TOOL]
+        if wrapper_evidence.get("adapterToolNames") != expected_tool_names:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-apple-docs-adapter proof did not "
+                "record the expected adapter tool names.\n"
+                f"expected_adapter_tool_names={expected_tool_names!r}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if tuple(expected_tool_names) != adapter_package_result.tool_names:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-apple-docs-adapter proof did not "
+                "use the production adapter package generator.\n"
+                f"expected_adapter_tool_names={expected_tool_names!r}\n"
+                f"package_tool_names={adapter_package_result.tool_names!r}"
+            )
+        return StockCodexCompatWrapperAppleDocsAdapterProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            source_bundle=source_bundle,
+            wrapper_path=wrapper_path,
+            codex_home=codex_home,
+            auth_path=auth_path,
+            bridge_dir=bridge_dir,
+            workspace_root=workspace_root,
+            adapter_bin=adapter_bin,
+            adapter_manifest=adapter_manifest,
+            adapter_tool_names=tuple(expected_tool_names),
+            docs_url=APPLE_DOCS_CLI_URL,
+            thread_id=thread_id,
+            command=str(command_item["command"]),
+            command_output=command_output,
+            first_agent_message=first_agent_message,
+            first_agent_message_before_wrapper=str(
+                wrapper_evidence["firstAgentMessageBefore"]
+            ),
+            route_injected=bool(wrapper_evidence["routeInjected"]),
+            wrapper_evidence_path=wrapper_evidence_path,
+            event_count=len(events),
+            mcp_servers=mcp_servers,
+            stderr_preview=stderr_preview,
+        )
+
+
+def run_stock_codex_compat_wrapper_apple_docs_bridge_adapter_proof(
+    source_bundle: Path,
+    stock_codex_path: Path,
+    *,
+    timeout_seconds: float,
+) -> StockCodexCompatWrapperAppleDocsBridgeAdapterProof:
+    """Prove the Apple docs adapter can run through a wrapper-owned file bridge."""
+    source_bundle = source_bundle.expanduser().resolve()
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    stock_codex_version = codex_version(stock_codex_path)
+    auth_path, auth_source = _stock_replacement_auth_source()
+    if not codex_native._codex_auth_json_has_available_credential(auth_path):
+        raise SystemExit(
+            "Current real Codex auth source is not available; cannot run live "
+            "stock-codex-compat-wrapper-apple-docs-bridge-adapter proof.\n"
+            f"auth_path={auth_path}\n"
+            f"auth_source={auth_source}"
+        )
+
+    sosumi_cli_path = shutil.which("sosumi")
+    docs_command_prefix = (
+        (sosumi_cli_path, "fetch")
+        if sosumi_cli_path is not None
+        else APPLE_DOCS_CLI_POLICY.command_prefix
+    )
+    docs_policy = replace(
+        APPLE_DOCS_CLI_POLICY,
+        command_prefix=docs_command_prefix,
+        timeout_seconds=APPLE_DOCS_STOCK_COMPAT_TIMEOUT_SECONDS,
+    )
+    docs_spec = build_fetch_apple_docs_stock_codex_bridge_adapter_spec(
+        docs_policy,
+        bridge_timeout_seconds=APPLE_DOCS_STOCK_COMPAT_BRIDGE_TIMEOUT_SECONDS,
+    )
+
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-wrapper-apple-docs-bridge-adapter-proof-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        codex_home = root / "codex-home"
+        temp_home = root / "home"
+        bridge_dir = root / "omnigent-bridge"
+        marketplace_root = root / "local-apple-workflow-marketplace"
+        wrapper_path = Path(stock_codex_compat_wrapper.__file__).resolve()
+        wrapper_evidence_path = root / "wrapper-evidence.json"
+        workspace_root = root / "workspace"
+        adapter_package = workspace_root / ".omnigent-adapter-package"
+        adapter_bridge_dir = workspace_root / ".omnigent-adapter-bridge"
+        codex_home.mkdir(mode=0o700)
+        temp_home.mkdir(mode=0o700)
+        workspace_root.mkdir(mode=0o700)
+        adapter_package_result = write_stock_codex_compat_adapter_package(
+            adapter_package,
+            (docs_spec,),
+        )
+        adapter_bin = adapter_package_result.adapter_bin
+        adapter_manifest = adapter_package_result.manifest_path
+        (codex_home / "auth.json").symlink_to(auth_path)
+
+        _write_stock_codex_compat_marketplace(
+            source_bundle=source_bundle,
+            marketplace_root=marketplace_root,
+        )
+        env = _stock_codex_compat_env(home=temp_home, codex_home=codex_home)
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "marketplace", "add", str(marketplace_root), "--json"],
+            env=env,
+        )
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "add", STOCK_CODEX_COMPAT_PLUGIN_ID, "--json"],
+            env=env,
+        )
+        plugin_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "list", "--json"],
+            env=env,
+        )
+        _validate_stock_codex_compat_plugin_state(
+            marketplace_list_output=_run_stock_codex_json(
+                stock_codex_path,
+                ["plugin", "marketplace", "list", "--json"],
+                env=env,
+            ),
+            plugin_list_output=plugin_list_output,
+            installed_plugin_path=(
+                codex_home
+                / "plugins"
+                / "cache"
+                / STOCK_CODEX_COMPAT_MARKETPLACE
+                / PLUGIN_NAME
+                / "0.1.1"
+            ),
+        )
+
+        write_mcp_bridge_config(bridge_dir)
+        write_policy_hook_config(
+            bridge_dir,
+            ap_server_url=STOCK_CODEX_COMPAT_AP_SERVER_URL,
+            ap_auth_headers={},
+        )
+        _inject_mcp_server_config(codex_home, bridge_dir, sys.executable)
+        _write_codex_policy_hooks_file(codex_home, bridge_dir, sys.executable)
+        mcp_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "list", "--json"],
+            env=env,
+        )
+        mcp_omnigent_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "get", "omnigent", "--json"],
+            env=env,
+        )
+        _hook_events, mcp_servers, _mcp_command, _mcp_args = _validate_stock_codex_compat_bridge(
+            codex_home=codex_home,
+            bridge_dir=bridge_dir,
+            mcp_list_output=mcp_list_output,
+            mcp_omnigent_output=mcp_omnigent_output,
+        )
+
+        adapter_command = f"{APPLE_DOCS_CLI_TOOL} --url {shlex.quote(APPLE_DOCS_CLI_URL)}"
+        adapter_arguments = json.dumps({"url": APPLE_DOCS_CLI_URL}, sort_keys=True)
+        expected_output = ", ".join(APPLE_MCP_SOSUMI_SENTINELS)
+        prompt = (
+            "Wrapped stock Codex real Apple docs bridge-adapter proof. The "
+            f"adapter manifest declares `{APPLE_DOCS_CLI_TOOL}` for capability "
+            f"`{docs_spec.capability}` with argument object `{adapter_arguments}`. "
+            "Use the shell command tool exactly once to run "
+            f"`{adapter_command}`. Do not use dynamicTools, MCP tools, or any "
+            "other command. Reply exactly "
+            f"{STOCK_CODEX_COMPAT_WRAPPER_APPLE_DOCS_BRIDGE_ADAPTER_SENTINEL} "
+            f"if stdout contains {expected_output}; otherwise reply "
+            "APPLE_DOCS_BRIDGE_ADAPTER_FAILED."
+        )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "omnigent.stock_codex_compat_wrapper",
+                "--stock-codex-path",
+                str(stock_codex_path),
+                "--route-prefix",
+                EXPECTED_ROUTE,
+                "--evidence-path",
+                str(wrapper_evidence_path),
+                "--adapter-bin",
+                str(adapter_bin),
+                "--adapter-manifest",
+                str(adapter_manifest),
+                "--adapter-bridge-dir",
+                str(adapter_bridge_dir),
+                "--",
+                "exec",
+                "--json",
+                "--dangerously-bypass-hook-trust",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "workspace-write",
+                "-C",
+                str(workspace_root),
+                prompt,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds if timeout_seconds > 0 else None,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
+        stderr_preview = _preview_text(completed.stderr, limit=2000)
+        if completed.returncode != 0:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-apple-docs-bridge-adapter "
+                "command failed.\n"
+                f"exit={completed.returncode}\n"
+                f"stderr={stderr_preview}\n"
+                f"stdout_preview={_preview_text(completed.stdout, limit=2000)}"
+            )
+        events = _parse_stock_codex_exec_jsonl(completed.stdout)
+        thread_id, first_agent_message = _extract_stock_codex_thread_and_agent_message(
+            events,
+            proof_name="stock-codex-compat-wrapper-apple-docs-bridge-adapter",
+        )
+        if not first_agent_message.startswith(EXPECTED_ROUTE):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-apple-docs-bridge-adapter proof "
+                "did not emit deterministic route evidence before model output.\n"
+                f"expected_prefix={EXPECTED_ROUTE!r}\n"
+                f"first_agent_message={first_agent_message!r}"
+            )
+        command_item = _validate_stock_codex_adapter_command_execution_events(
+            events,
+            command_name=APPLE_DOCS_CLI_TOOL,
+            command_argument=APPLE_DOCS_CLI_URL,
+            output_sentinel=APPLE_MCP_SOSUMI_SENTINELS[0],
+        )
+        command_output = str(command_item["aggregated_output"])
+        for output_sentinel in APPLE_MCP_SOSUMI_SENTINELS:
+            if output_sentinel not in command_output:
+                raise SystemExit(
+                    "Wrapped stock Codex Apple docs bridge adapter output missed "
+                    f"expected sentinel {output_sentinel!r}: {command_item!r}"
+                )
+        if (
+            STOCK_CODEX_COMPAT_WRAPPER_APPLE_DOCS_BRIDGE_ADAPTER_SENTINEL
+            not in first_agent_message
+        ):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-apple-docs-bridge-adapter proof "
+                "did not return the expected sentinel after the adapter command.\n"
+                f"sentinel="
+                f"{STOCK_CODEX_COMPAT_WRAPPER_APPLE_DOCS_BRIDGE_ADAPTER_SENTINEL!r}\n"
+                f"first_agent_message={first_agent_message!r}\n"
+                f"command={command_item.get('command')!r}\n"
+                f"command_output_preview={_preview_text(command_output, limit=1000)!r}"
+            )
+        wrapper_evidence = _read_stock_codex_compat_wrapper_evidence(wrapper_evidence_path)
+        if wrapper_evidence["routeInjected"] is not True:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-apple-docs-bridge-adapter proof "
+                "did not prove wrapper-owned route injection.\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if wrapper_evidence.get("adapterBin") != str(adapter_bin):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-apple-docs-bridge-adapter proof "
+                "did not prove wrapper-owned adapter-bin injection.\n"
+                f"expected_adapter_bin={adapter_bin}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if wrapper_evidence.get("adapterManifest") != str(adapter_manifest):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-apple-docs-bridge-adapter proof "
+                "did not prove wrapper-owned adapter-manifest validation.\n"
+                f"expected_adapter_manifest={adapter_manifest}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if wrapper_evidence.get("adapterBridgeDir") != str(adapter_bridge_dir):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-apple-docs-bridge-adapter proof "
+                "did not prove wrapper-owned adapter bridge injection.\n"
+                f"expected_adapter_bridge_dir={adapter_bridge_dir}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        expected_tool_names = [APPLE_DOCS_CLI_TOOL]
+        if wrapper_evidence.get("adapterToolNames") != expected_tool_names:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-apple-docs-bridge-adapter proof "
+                "did not record the expected adapter tool names.\n"
+                f"expected_adapter_tool_names={expected_tool_names!r}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if tuple(expected_tool_names) != adapter_package_result.tool_names:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-apple-docs-bridge-adapter proof "
+                "did not use the production adapter package generator.\n"
+                f"expected_adapter_tool_names={expected_tool_names!r}\n"
+                f"package_tool_names={adapter_package_result.tool_names!r}"
+            )
+        return StockCodexCompatWrapperAppleDocsBridgeAdapterProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            source_bundle=source_bundle,
+            wrapper_path=wrapper_path,
+            codex_home=codex_home,
+            auth_path=auth_path,
+            bridge_dir=bridge_dir,
+            workspace_root=workspace_root,
+            adapter_bin=adapter_bin,
+            adapter_manifest=adapter_manifest,
+            adapter_bridge_dir=adapter_bridge_dir,
+            adapter_tool_names=tuple(expected_tool_names),
+            docs_url=APPLE_DOCS_CLI_URL,
+            sandbox="workspace-write",
+            thread_id=thread_id,
+            command=str(command_item["command"]),
+            command_output=command_output,
+            first_agent_message=first_agent_message,
+            first_agent_message_before_wrapper=str(
+                wrapper_evidence["firstAgentMessageBefore"]
+            ),
+            route_injected=bool(wrapper_evidence["routeInjected"]),
+            wrapper_evidence_path=wrapper_evidence_path,
+            event_count=len(events),
+            mcp_servers=mcp_servers,
+            stderr_preview=stderr_preview,
+        )
+
+
+def run_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
+    source_bundle: Path,
+    stock_codex_path: Path,
+    *,
+    timeout_seconds: float,
+) -> StockCodexCompatWrapperXcodebuildBridgeAdapterProof:
+    """Prove XcodeBuildMCP build/run can execute through a wrapper-owned file bridge."""
+    source_bundle = source_bundle.expanduser().resolve()
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    stock_codex_version = codex_version(stock_codex_path)
+    auth_path, auth_source = _stock_replacement_auth_source()
+    if not codex_native._codex_auth_json_has_available_credential(auth_path):
+        raise SystemExit(
+            "Current real Codex auth source is not available; cannot run live "
+            "stock-codex-compat-wrapper-xcodebuild-bridge-adapter proof.\n"
+            f"auth_path={auth_path}\n"
+            f"auth_source={auth_source}"
+        )
+
+    xcodebuild_policy = XCODEBUILD_CLI_POLICY
+    xcodebuild_spec = (
+        build_xcodebuildmcp_simulator_build_run_stock_codex_bridge_adapter_spec(
+            xcodebuild_policy,
+            bridge_timeout_seconds=XCODEBUILD_CLI_STOCK_COMPAT_BRIDGE_TIMEOUT_SECONDS,
+        )
+    )
+    xcodebuild_workspace_root = resolve_xcodebuild_mcp_workspace_root()
+    project_path = (
+        xcodebuild_workspace_root / APPLE_MCP_XCODEBUILD_PROJECT_RELATIVE_PATH
+    )
+    simulator_name = resolve_xcodebuild_mcp_simulator_name()
+
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-wrapper-xcodebuild-bridge-adapter-proof-"
+    ) as temp_root:
+        unresolved_root = Path(temp_root)
+        root = Path(temp_root).resolve()
+        codex_home = root / "codex-home"
+        temp_home = root / "home"
+        bridge_dir = root / "omnigent-bridge"
+        marketplace_root = root / "local-apple-workflow-marketplace"
+        wrapper_path = Path(stock_codex_compat_wrapper.__file__).resolve()
+        wrapper_evidence_path = root / "wrapper-evidence.json"
+        workspace_root = root / "workspace"
+        adapter_package = workspace_root / ".omnigent-adapter-package"
+        adapter_bridge_dir = workspace_root / ".omnigent-adapter-bridge"
+        derived_data_path = unresolved_root / "xcodebuild-bridge-deriveddata"
+        codex_home.mkdir(mode=0o700)
+        temp_home.mkdir(mode=0o700)
+        workspace_root.mkdir(mode=0o700)
+        adapter_package_result = write_stock_codex_compat_adapter_package(
+            adapter_package,
+            (xcodebuild_spec,),
+        )
+        adapter_bin = adapter_package_result.adapter_bin
+        adapter_manifest = adapter_package_result.manifest_path
+        (codex_home / "auth.json").symlink_to(auth_path)
+
+        _write_stock_codex_compat_marketplace(
+            source_bundle=source_bundle,
+            marketplace_root=marketplace_root,
+        )
+        env = _stock_codex_compat_env(home=temp_home, codex_home=codex_home)
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "marketplace", "add", str(marketplace_root), "--json"],
+            env=env,
+        )
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "add", STOCK_CODEX_COMPAT_PLUGIN_ID, "--json"],
+            env=env,
+        )
+        plugin_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "list", "--json"],
+            env=env,
+        )
+        _validate_stock_codex_compat_plugin_state(
+            marketplace_list_output=_run_stock_codex_json(
+                stock_codex_path,
+                ["plugin", "marketplace", "list", "--json"],
+                env=env,
+            ),
+            plugin_list_output=plugin_list_output,
+            installed_plugin_path=(
+                codex_home
+                / "plugins"
+                / "cache"
+                / STOCK_CODEX_COMPAT_MARKETPLACE
+                / PLUGIN_NAME
+                / "0.1.1"
+            ),
+        )
+
+        write_mcp_bridge_config(bridge_dir)
+        write_policy_hook_config(
+            bridge_dir,
+            ap_server_url=STOCK_CODEX_COMPAT_AP_SERVER_URL,
+            ap_auth_headers={},
+        )
+        _inject_mcp_server_config(codex_home, bridge_dir, sys.executable)
+        _write_codex_policy_hooks_file(codex_home, bridge_dir, sys.executable)
+        mcp_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "list", "--json"],
+            env=env,
+        )
+        mcp_omnigent_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "get", "omnigent", "--json"],
+            env=env,
+        )
+        _hook_events, mcp_servers, _mcp_command, _mcp_args = _validate_stock_codex_compat_bridge(
+            codex_home=codex_home,
+            bridge_dir=bridge_dir,
+            mcp_list_output=mcp_list_output,
+            mcp_omnigent_output=mcp_omnigent_output,
+        )
+
+        tool_args = {
+            "project_path": str(project_path),
+            "scheme": APPLE_MCP_XCODEBUILD_SCHEME,
+            "configuration": APPLE_MCP_XCODEBUILD_CONFIGURATION,
+            "simulator_name": simulator_name,
+            "derived_data_path": str(derived_data_path),
+        }
+        adapter_command = " ".join(
+            [
+                XCODEBUILD_CLI_TOOL,
+                "--project_path",
+                shlex.quote(tool_args["project_path"]),
+                "--scheme",
+                shlex.quote(tool_args["scheme"]),
+                "--configuration",
+                shlex.quote(tool_args["configuration"]),
+                "--simulator_name",
+                shlex.quote(tool_args["simulator_name"]),
+                "--derived_data_path",
+                shlex.quote(tool_args["derived_data_path"]),
+            ]
+        )
+        expected_output = ", ".join(XCODEBUILD_CLI_RUN_SENTINELS)
+        prompt = (
+            "Wrapped stock Codex XcodeBuildMCP bridge-adapter proof. The "
+            f"adapter manifest declares `{XCODEBUILD_CLI_TOOL}` for capability "
+            f"`{xcodebuild_spec.capability}` with argument object "
+            f"`{json.dumps(tool_args, sort_keys=True)}`. Use the shell command "
+            f"tool exactly once to run `{adapter_command}`. Do not use "
+            "dynamicTools, MCP tools, or any other command. Reply exactly "
+            f"{STOCK_CODEX_COMPAT_WRAPPER_XCODEBUILD_BRIDGE_ADAPTER_SENTINEL} "
+            f"if stdout contains {expected_output}; otherwise reply "
+            "XCODEBUILD_BRIDGE_ADAPTER_FAILED."
+        )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "omnigent.stock_codex_compat_wrapper",
+                "--stock-codex-path",
+                str(stock_codex_path),
+                "--route-prefix",
+                EXPECTED_ROUTE,
+                "--evidence-path",
+                str(wrapper_evidence_path),
+                "--adapter-bin",
+                str(adapter_bin),
+                "--adapter-manifest",
+                str(adapter_manifest),
+                "--adapter-bridge-dir",
+                str(adapter_bridge_dir),
+                "--",
+                "exec",
+                "--json",
+                "--dangerously-bypass-hook-trust",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "workspace-write",
+                "-C",
+                str(workspace_root),
+                prompt,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds if timeout_seconds > 0 else None,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
+        stderr_preview = _preview_text(completed.stderr, limit=2000)
+        if completed.returncode != 0:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-xcodebuild-bridge-adapter "
+                "command failed.\n"
+                f"exit={completed.returncode}\n"
+                f"stderr={stderr_preview}\n"
+                f"stdout_preview={_preview_text(completed.stdout, limit=2000)}"
+            )
+        events = _parse_stock_codex_exec_jsonl(completed.stdout)
+        thread_id, first_agent_message = _extract_stock_codex_thread_and_agent_message(
+            events,
+            proof_name="stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
+        )
+        if not first_agent_message.startswith(EXPECTED_ROUTE):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-xcodebuild-bridge-adapter proof "
+                "did not emit deterministic route evidence before model output.\n"
+                f"expected_prefix={EXPECTED_ROUTE!r}\n"
+                f"first_agent_message={first_agent_message!r}"
+            )
+        command_item = _validate_stock_codex_adapter_command_execution_events(
+            events,
+            command_name=XCODEBUILD_CLI_TOOL,
+            command_argument=str(project_path),
+            output_sentinel=XCODEBUILD_CLI_RUN_SENTINELS[0],
+        )
+        command_output = str(command_item["aggregated_output"])
+        for output_sentinel in XCODEBUILD_CLI_RUN_SENTINELS:
+            if output_sentinel not in command_output:
+                raise SystemExit(
+                    "Wrapped stock Codex XcodeBuildMCP bridge adapter output "
+                    f"missed expected sentinel {output_sentinel!r}: {command_item!r}"
+                )
+        if (
+            STOCK_CODEX_COMPAT_WRAPPER_XCODEBUILD_BRIDGE_ADAPTER_SENTINEL
+            not in first_agent_message
+        ):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-xcodebuild-bridge-adapter proof "
+                "did not return the expected sentinel after the adapter command.\n"
+                f"sentinel="
+                f"{STOCK_CODEX_COMPAT_WRAPPER_XCODEBUILD_BRIDGE_ADAPTER_SENTINEL!r}\n"
+                f"first_agent_message={first_agent_message!r}\n"
+                f"command={command_item.get('command')!r}\n"
+                f"command_output_preview={_preview_text(command_output, limit=1000)!r}"
+            )
+        wrapper_evidence = _read_stock_codex_compat_wrapper_evidence(wrapper_evidence_path)
+        if wrapper_evidence["routeInjected"] is not True:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-xcodebuild-bridge-adapter proof "
+                "did not prove wrapper-owned route injection.\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if wrapper_evidence.get("adapterBin") != str(adapter_bin):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-xcodebuild-bridge-adapter proof "
+                "did not prove wrapper-owned adapter-bin injection.\n"
+                f"expected_adapter_bin={adapter_bin}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if wrapper_evidence.get("adapterManifest") != str(adapter_manifest):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-xcodebuild-bridge-adapter proof "
+                "did not prove wrapper-owned adapter-manifest validation.\n"
+                f"expected_adapter_manifest={adapter_manifest}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if wrapper_evidence.get("adapterBridgeDir") != str(adapter_bridge_dir):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-xcodebuild-bridge-adapter proof "
+                "did not prove wrapper-owned adapter bridge injection.\n"
+                f"expected_adapter_bridge_dir={adapter_bridge_dir}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        expected_tool_names = [XCODEBUILD_CLI_TOOL]
+        if wrapper_evidence.get("adapterToolNames") != expected_tool_names:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-xcodebuild-bridge-adapter proof "
+                "did not record the expected adapter tool names.\n"
+                f"expected_adapter_tool_names={expected_tool_names!r}\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        if tuple(expected_tool_names) != adapter_package_result.tool_names:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-xcodebuild-bridge-adapter proof "
+                "did not use the production adapter package generator.\n"
+                f"expected_adapter_tool_names={expected_tool_names!r}\n"
+                f"package_tool_names={adapter_package_result.tool_names!r}"
+            )
+        return StockCodexCompatWrapperXcodebuildBridgeAdapterProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            source_bundle=source_bundle,
+            wrapper_path=wrapper_path,
+            codex_home=codex_home,
+            auth_path=auth_path,
+            bridge_dir=bridge_dir,
+            workspace_root=workspace_root,
+            adapter_bin=adapter_bin,
+            adapter_manifest=adapter_manifest,
+            adapter_bridge_dir=adapter_bridge_dir,
+            adapter_tool_names=tuple(expected_tool_names),
+            project_path=project_path,
+            scheme=APPLE_MCP_XCODEBUILD_SCHEME,
+            configuration=APPLE_MCP_XCODEBUILD_CONFIGURATION,
+            simulator_name=simulator_name,
+            derived_data_path=derived_data_path,
+            sandbox="workspace-write",
+            thread_id=thread_id,
+            command=str(command_item["command"]),
+            command_output=command_output,
+            first_agent_message=first_agent_message,
+            first_agent_message_before_wrapper=str(
+                wrapper_evidence["firstAgentMessageBefore"]
+            ),
+            route_injected=bool(wrapper_evidence["routeInjected"]),
+            wrapper_evidence_path=wrapper_evidence_path,
+            event_count=len(events),
+            mcp_servers=mcp_servers,
+            stderr_preview=stderr_preview,
+        )
+
+
+def run_stock_codex_compat_wrapper_relay_tool_proof(
+    source_bundle: Path,
+    stock_codex_path: Path,
+    *,
+    timeout_seconds: float,
+) -> StockCodexCompatWrapperRelayToolProof:
+    """Prove the wrapper preserves an Omnigent relay MCP tool call."""
+    source_bundle = source_bundle.expanduser().resolve()
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    stock_codex_version = codex_version(stock_codex_path)
+    auth_path, auth_source = _stock_replacement_auth_source()
+    if not codex_native._codex_auth_json_has_available_credential(auth_path):
+        raise SystemExit(
+            "Current real Codex auth source is not available; cannot run live "
+            "stock-codex-compat-wrapper-relay-tool proof.\n"
+            f"auth_path={auth_path}\n"
+            f"auth_source={auth_source}"
+        )
+
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-wrapper-relay-tool-proof-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        previous_bridge_root = codex_native_bridge._BRIDGE_ROOT
+        codex_native_bridge._BRIDGE_ROOT = root / ".omnigent" / "codex-native"
+        codex_home = root / "codex-home"
+        temp_home = root / "home"
+        bridge_dir = codex_native_bridge.bridge_dir_for_bridge_id(
+            "stock-codex-wrapper-relay-proof"
+        )
+        marketplace_root = root / "local-apple-workflow-marketplace"
+        wrapper_path = Path(stock_codex_compat_wrapper.__file__).resolve()
+        wrapper_evidence_path = root / "wrapper-evidence.json"
+        workspace_root = root / "workspace"
+        codex_home.mkdir(mode=0o700)
+        temp_home.mkdir(mode=0o700)
+        workspace_root.mkdir(mode=0o700)
+        (codex_home / "auth.json").symlink_to(auth_path)
+
+        _write_stock_codex_compat_marketplace(
+            source_bundle=source_bundle,
+            marketplace_root=marketplace_root,
+        )
+        env = _stock_codex_compat_env(home=temp_home, codex_home=codex_home)
+        enabled_features = _stock_codex_supported_feature_names(stock_codex_path, env=env)
+        feature_args = _stock_codex_enable_feature_args(enabled_features)
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "marketplace", "add", str(marketplace_root), "--json"],
+            env=env,
+        )
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "add", STOCK_CODEX_COMPAT_PLUGIN_ID, "--json"],
+            env=env,
+        )
+        plugin_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "list", "--json"],
+            env=env,
+        )
+        _validate_stock_codex_compat_plugin_state(
+            marketplace_list_output=_run_stock_codex_json(
+                stock_codex_path,
+                ["plugin", "marketplace", "list", "--json"],
+                env=env,
+            ),
+            plugin_list_output=plugin_list_output,
+            installed_plugin_path=(
+                codex_home
+                / "plugins"
+                / "cache"
+                / STOCK_CODEX_COMPAT_MARKETPLACE
+                / PLUGIN_NAME
+                / "0.1.1"
+            ),
+        )
+
+        write_mcp_bridge_config(bridge_dir)
+        write_policy_hook_config(
+            bridge_dir,
+            ap_server_url=STOCK_CODEX_COMPAT_AP_SERVER_URL,
+            ap_auth_headers={},
+        )
+        _inject_mcp_server_config(codex_home, bridge_dir, sys.executable)
+        _write_codex_policy_hooks_file(codex_home, bridge_dir, sys.executable)
+        mcp_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "list", "--json"],
+            env=env,
+        )
+        mcp_omnigent_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "get", "omnigent", "--json"],
+            env=env,
+        )
+        _hook_events, mcp_servers, _mcp_command, _mcp_args = _validate_stock_codex_compat_bridge(
+            codex_home=codex_home,
+            bridge_dir=bridge_dir,
+            mcp_list_output=mcp_list_output,
+            mcp_omnigent_output=mcp_omnigent_output,
+        )
+
+        relay_calls: list[dict[str, Any]] = []
+        loop = asyncio.new_event_loop()
+        loop_ready = threading.Event()
+
+        def run_loop() -> None:
+            asyncio.set_event_loop(loop)
+            loop_ready.set()
+            loop.run_forever()
+
+        loop_thread = threading.Thread(
+            target=run_loop,
+            name="omnigent-stock-codex-relay-proof-loop",
+            daemon=True,
+        )
+        loop_thread.start()
+        if not loop_ready.wait(timeout=5.0):
+            raise SystemExit("Timed out starting relay event loop for stock Codex proof.")
+
+        async def relay_executor(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            relay_calls.append({"name": name, "arguments": dict(arguments)})
+            if name != STOCK_CODEX_COMPAT_RELAY_TOOL_NAME:
+                return {"error": f"unexpected relay tool: {name}"}
+            if arguments.get("message") != STOCK_CODEX_COMPAT_RELAY_TOOL_ARGUMENT:
+                return {
+                    "error": "unexpected relay tool arguments",
+                    "arguments": arguments,
+                }
+            return {
+                "source": "omnigent-relay",
+                "sentinel": STOCK_CODEX_COMPAT_RELAY_TOOL_OUTPUT_SENTINEL,
+                "arguments": arguments,
+            }
+
+        relay = None
+        try:
+            try:
+                relay = start_tool_relay(
+                    bridge_dir=bridge_dir,
+                    tools=[
+                        {
+                            "name": STOCK_CODEX_COMPAT_RELAY_TOOL_NAME,
+                            "description": (
+                                "Return deterministic Omnigent relay evidence for the "
+                                "stock Codex compatibility wrapper proof."
+                            ),
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "message": {
+                                        "type": "string",
+                                        "description": "Relay proof message.",
+                                    }
+                                },
+                                "required": ["message"],
+                                "additionalProperties": False,
+                            },
+                        }
+                    ],
+                    tool_executor=relay_executor,
+                    loop=loop,
+                )
+            finally:
+                codex_native_bridge._BRIDGE_ROOT = previous_bridge_root
+            qualified_tool_name = f"mcp__omnigent__{STOCK_CODEX_COMPAT_RELAY_TOOL_NAME}"
+            alt_qualified_tool_name = f"omnigent__{STOCK_CODEX_COMPAT_RELAY_TOOL_NAME}"
+            prompt_input = subprocess.run(
+                [
+                    str(stock_codex_path),
+                    "debug",
+                    "prompt-input",
+                    *feature_args,
+                    "Omnigent relay prompt-input visibility probe.",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60.0,
+                env=env,
+                stdin=subprocess.DEVNULL,
+            )
+            prompt_input_preview = _preview_text(
+                prompt_input.stdout or prompt_input.stderr,
+                limit=2000,
+            )
+            if prompt_input.returncode != 0:
+                raise SystemExit(
+                    "Stock Codex debug prompt-input failed for relay-tool proof.\n"
+                    f"exit={prompt_input.returncode}\n"
+                    f"stdout_preview={_preview_text(prompt_input.stdout, limit=2000)}\n"
+                    f"stderr_preview={_preview_text(prompt_input.stderr, limit=2000)}"
+                )
+            prompt_input_mentions_relay_tool = any(
+                name in prompt_input.stdout
+                for name in (
+                    STOCK_CODEX_COMPAT_RELAY_TOOL_NAME,
+                    qualified_tool_name,
+                    alt_qualified_tool_name,
+                )
+            )
+            relay_arguments_json = json.dumps(
+                {"message": STOCK_CODEX_COMPAT_RELAY_TOOL_ARGUMENT},
+                sort_keys=True,
+            )
+            prompt = (
+                "Wrapped stock Codex Omnigent relay tool proof. Use the real MCP "
+                f"tool `{qualified_tool_name}` exactly once. If this Codex build "
+                "shows a different MCP prefix, the same tool may appear as "
+                f"`{alt_qualified_tool_name}` or `{STOCK_CODEX_COMPAT_RELAY_TOOL_NAME}`. "
+                "If the MCP tool is deferred, first use `tool_search` to search "
+                f"for `{STOCK_CODEX_COMPAT_RELAY_TOOL_NAME}`, then call the exposed "
+                "tool. "
+                "Use JSON arguments "
+                f"{relay_arguments_json}. Do not use the shell command tool, do "
+                "not inspect files, and do not write a pseudo-call in text. "
+                "Only the actual persisted MCP tool call counts. Reply exactly "
+                f"{STOCK_CODEX_COMPAT_WRAPPER_RELAY_TOOL_SENTINEL} if the tool "
+                f"output contains {STOCK_CODEX_COMPAT_RELAY_TOOL_OUTPUT_SENTINEL}; "
+                "otherwise reply RELAY_TOOL_MISSING."
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "omnigent.stock_codex_compat_wrapper",
+                    "--stock-codex-path",
+                    str(stock_codex_path),
+                    "--route-prefix",
+                    EXPECTED_ROUTE,
+                    "--evidence-path",
+                    str(wrapper_evidence_path),
+                    "--",
+                    "exec",
+                    *feature_args,
+                    "--json",
+                    "--dangerously-bypass-hook-trust",
+                    "--skip-git-repo-check",
+                    "--sandbox",
+                    "read-only",
+                    "-C",
+                    str(workspace_root),
+                    prompt,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds if timeout_seconds > 0 else None,
+                env=env,
+                stdin=subprocess.DEVNULL,
+            )
+        finally:
+            if relay is not None:
+                relay.close()
+            loop.call_soon_threadsafe(loop.stop)
+            loop_thread.join(timeout=5.0)
+            loop.close()
+        stderr_preview = _preview_text(completed.stderr, limit=2000)
+        if completed.returncode != 0:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-relay-tool command failed.\n"
+                f"exit={completed.returncode}\n"
+                f"stderr={stderr_preview}\n"
+                f"stdout_preview={_preview_text(completed.stdout, limit=2000)}"
+            )
+        events = _parse_stock_codex_exec_jsonl(completed.stdout)
+        relay_evidence = _validate_stock_codex_omnigent_relay_tool_events(
+            events,
+            tool_name=STOCK_CODEX_COMPAT_RELAY_TOOL_NAME,
+            output_sentinel=STOCK_CODEX_COMPAT_RELAY_TOOL_OUTPUT_SENTINEL,
+            executor_calls=relay_calls,
+        )
+        thread_id, first_agent_message = _validate_stock_codex_agent_message(
+            events,
+            expected_sentinel=STOCK_CODEX_COMPAT_WRAPPER_RELAY_TOOL_SENTINEL,
+            proof_name="stock-codex-compat-wrapper-relay-tool",
+        )
+        if not first_agent_message.startswith(EXPECTED_ROUTE):
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-relay-tool proof did not emit "
+                "deterministic route evidence before model output.\n"
+                f"expected_prefix={EXPECTED_ROUTE!r}\n"
+                f"first_agent_message={first_agent_message!r}"
+            )
+        wrapper_evidence = _read_stock_codex_compat_wrapper_evidence(wrapper_evidence_path)
+        if wrapper_evidence["routeInjected"] is not True:
+            raise SystemExit(
+                "Live stock-codex-compat-wrapper-relay-tool proof did not prove "
+                "wrapper-owned route injection.\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+        return StockCodexCompatWrapperRelayToolProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            source_bundle=source_bundle,
+            wrapper_path=wrapper_path,
+            codex_home=codex_home,
+            auth_path=auth_path,
+            bridge_dir=bridge_dir,
+            workspace_root=workspace_root,
+            thread_id=thread_id,
+            relay_tool_name=STOCK_CODEX_COMPAT_RELAY_TOOL_NAME,
+            relay_tool_arguments=dict(relay_evidence["arguments"]),
+            relay_output_preview=str(relay_evidence["output_preview"]),
+            relay_event_types=tuple(relay_evidence["event_types"]),
+            enabled_features=enabled_features,
+            skipped_features=tuple(sorted(STOCK_CODEX_FEATURES_REQUIRING_NONDEFAULT_SUPPORT)),
+            prompt_input_mentions_relay_tool=prompt_input_mentions_relay_tool,
+            prompt_input_preview=prompt_input_preview,
+            first_agent_message=first_agent_message,
+            first_agent_message_before_wrapper=str(
+                wrapper_evidence["firstAgentMessageBefore"]
+            ),
+            route_injected=bool(wrapper_evidence["routeInjected"]),
+            wrapper_evidence_path=wrapper_evidence_path,
+            event_count=len(events),
+            mcp_servers=mcp_servers,
+            stderr_preview=stderr_preview,
+        )
+
+
+def _read_stock_codex_compat_wrapper_evidence(evidence_path: Path) -> dict[str, Any]:
+    """Read and validate temporary evidence written by the Omnigent wrapper."""
+    if not evidence_path.is_file():
+        raise SystemExit(f"Stock Codex wrapper evidence file missing: {evidence_path}")
+    try:
+        payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Stock Codex wrapper evidence is not JSON: {evidence_path}") from exc
+    if not isinstance(payload, dict):
+        raise SystemExit(f"Stock Codex wrapper evidence root is not an object: {payload!r}")
+    if not isinstance(payload.get("firstAgentMessageBefore"), str):
+        raise SystemExit(f"Stock Codex wrapper evidence missing pre-wrapper text: {payload!r}")
+    if not isinstance(payload.get("routeInjected"), bool):
+        raise SystemExit(f"Stock Codex wrapper evidence missing injection flag: {payload!r}")
+    if payload.get("routePresentAfter") is not True:
+        raise SystemExit(f"Stock Codex wrapper evidence did not preserve route: {payload!r}")
+    return payload
+
+
+def _parse_stock_codex_exec_jsonl(stdout: str) -> list[dict[str, Any]]:
+    """Parse ``codex exec --json`` output into event dictionaries."""
+    events: list[dict[str, Any]] = []
+    for index, line in enumerate(stdout.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"codex exec JSONL line {index} is not valid JSON: {line}") from exc
+        if not isinstance(event, dict):
+            raise SystemExit(f"codex exec JSONL line {index} is not an object: {line}")
+        events.append(event)
+    if not events:
+        raise SystemExit("codex exec --json produced no events.")
+    return events
+
+
+def _validate_stock_codex_compat_live_events(events: list[dict[str, Any]]) -> tuple[str, str]:
+    """Return live proof thread id and first assistant message or fail closed."""
+    return _validate_stock_codex_agent_message(
+        events,
+        expected_sentinel=STOCK_CODEX_COMPAT_LIVE_SENTINEL,
+        proof_name="stock-codex-compat-live",
+    )
+
+
+def _extract_stock_codex_thread_and_agent_message(
+    events: list[dict[str, Any]],
+    *,
+    proof_name: str,
+) -> tuple[str, str]:
+    """Return proof thread id and first assistant message or fail closed."""
+    thread_id = ""
+    first_agent_message = ""
+    for event in events:
+        if event.get("type") == "thread.started" and not thread_id:
+            raw_thread_id = event.get("thread_id")
+            if isinstance(raw_thread_id, str):
+                thread_id = raw_thread_id
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "agent_message":
+            continue
+        text = item.get("text")
+        if isinstance(text, str):
+            first_agent_message = text
+            break
+    if not thread_id:
+        raise SystemExit(f"Live {proof_name} proof did not report a thread id.")
+    return thread_id, first_agent_message
+
+
+def _validate_stock_codex_agent_message(
+    events: list[dict[str, Any]],
+    *,
+    expected_sentinel: str,
+    proof_name: str,
+) -> tuple[str, str]:
+    """Return proof thread id and first assistant message or fail closed."""
+    thread_id, first_agent_message = _extract_stock_codex_thread_and_agent_message(
+        events,
+        proof_name=proof_name,
+    )
+    if expected_sentinel not in first_agent_message:
+        raise SystemExit(
+            f"Live {proof_name} proof did not return the expected sentinel.\n"
+            f"sentinel={expected_sentinel!r}\n"
+            f"first_agent_message={first_agent_message!r}"
+        )
+    return thread_id, first_agent_message
+
+
+def _validate_stock_codex_command_execution_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return the completed command execution item or fail closed."""
+    completed_commands: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "command_execution":
+            continue
+        completed_commands.append(item)
+    if len(completed_commands) != 1:
+        raise SystemExit(
+            "Expected exactly one completed command_execution item in wrapped "
+            f"stock Codex proof; found {len(completed_commands)}."
+        )
+    item = completed_commands[0]
+    command = item.get("command")
+    output = item.get("aggregated_output")
+    if not isinstance(command, str) or "cat tool-proof.txt" not in command:
+        raise SystemExit(f"Wrapped stock Codex command did not read tool-proof.txt: {item!r}")
+    if item.get("exit_code") != 0 or item.get("status") != "completed":
+        raise SystemExit(f"Wrapped stock Codex command did not complete cleanly: {item!r}")
+    if not isinstance(output, str) or TOOL_SENTINEL not in output:
+        raise SystemExit(
+            f"Wrapped stock Codex command output missed sentinel {TOOL_SENTINEL!r}: {item!r}"
+        )
+    return item
+
+
+def _validate_stock_codex_adapter_command_execution_events(
+    events: list[dict[str, Any]],
+    *,
+    command_name: str = STOCK_CODEX_COMPAT_ADAPTER_COMMAND_NAME,
+    command_argument: str = STOCK_CODEX_COMPAT_ADAPTER_COMMAND_ARGUMENT,
+    output_sentinel: str = STOCK_CODEX_COMPAT_ADAPTER_OUTPUT_SENTINEL,
+    forbidden_command_names: tuple[str, ...] = (),
+    forbidden_output_sentinels: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Return the completed wrapper adapter command item or fail closed."""
+    completed_commands: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "command_execution":
+            continue
+        completed_commands.append(item)
+    if len(completed_commands) != 1:
+        raise SystemExit(
+            "Expected exactly one completed command_execution item in wrapped "
+            f"stock Codex adapter proof; found {len(completed_commands)}."
+        )
+    item = completed_commands[0]
+    command = item.get("command")
+    output = item.get("aggregated_output")
+    if (
+        not isinstance(command, str)
+        or command_name not in command
+        or command_argument not in command
+    ):
+        raise SystemExit(f"Wrapped stock Codex did not run the adapter command: {item!r}")
+    for forbidden_name in forbidden_command_names:
+        if forbidden_name in command:
+            raise SystemExit(
+                "Wrapped stock Codex ran a rejected adapter command; "
+                f"forbidden_name={forbidden_name!r} item={item!r}"
+            )
+    if item.get("exit_code") != 0 or item.get("status") != "completed":
+        raise SystemExit(f"Wrapped stock Codex adapter command did not complete cleanly: {item!r}")
+    if not isinstance(output, str) or output_sentinel not in output:
+        raise SystemExit(
+            "Wrapped stock Codex adapter command output missed sentinel "
+            f"{output_sentinel!r}: {item!r}"
+        )
+    for forbidden_sentinel in forbidden_output_sentinels:
+        if forbidden_sentinel in output:
+            raise SystemExit(
+                "Wrapped stock Codex output contained a rejected adapter sentinel; "
+                f"forbidden_sentinel={forbidden_sentinel!r} item={item!r}"
+            )
+    return item
+
+
+def _validate_stock_codex_omnigent_relay_tool_events(
+    events: list[dict[str, Any]],
+    *,
+    tool_name: str,
+    output_sentinel: str,
+    executor_calls: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Validate one Omnigent relay tool call and its stock Codex JSONL evidence."""
+    if len(executor_calls) != 1:
+        raise SystemExit(
+            "Expected exactly one Omnigent relay executor call in wrapped "
+            f"stock Codex proof; found {len(executor_calls)}."
+        )
+    executor_call = executor_calls[0]
+    if executor_call.get("name") != tool_name:
+        raise SystemExit(f"Wrapped stock Codex called the wrong relay tool: {executor_call!r}")
+    arguments = executor_call.get("arguments")
+    if not isinstance(arguments, dict):
+        raise SystemExit(f"Wrapped stock Codex relay call omitted arguments: {executor_call!r}")
+
+    qualified_tool_name = f"mcp__omnigent__{tool_name}"
+    completed_tool_items: list[dict[str, Any]] = []
+    tool_name_items: list[dict[str, Any]] = []
+    sentinel_items: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        if item_type in {"agent_message", "command_execution"}:
+            continue
+        encoded = json.dumps(item, sort_keys=True)
+        if tool_name in encoded or qualified_tool_name in encoded:
+            tool_name_items.append(item)
+            completed_tool_items.append(item)
+        if output_sentinel in encoded:
+            sentinel_items.append(item)
+            if item not in completed_tool_items:
+                completed_tool_items.append(item)
+
+    if len(tool_name_items) != 1:
+        raise SystemExit(
+            "Expected exactly one completed stock Codex JSONL tool item naming "
+            f"{tool_name!r}; found {len(tool_name_items)}."
+        )
+    if not sentinel_items:
+        raise SystemExit(
+            "Wrapped stock Codex JSONL did not preserve the Omnigent relay "
+            f"tool output sentinel {output_sentinel!r}."
+        )
+    event_types = tuple(
+        str(item.get("type"))
+        for item in completed_tool_items
+        if isinstance(item.get("type"), str)
+    )
+    return {
+        "arguments": arguments,
+        "event_types": event_types,
+        "output_preview": _preview_text(
+            json.dumps(sentinel_items[0], sort_keys=True),
+            limit=500,
+        ),
+    }
+
+
+def _preview_text(value: str, *, limit: int) -> str:
+    """Return a compact one-field diagnostic preview."""
+    if len(value) <= limit:
+        return value
+    return f"{value[:limit]}...[truncated]"
+
+
+def print_stock_codex_compat_live_proof(proof: StockCodexCompatLiveProof) -> None:
+    """Emit operator evidence for a successful stock Codex live compatibility proof."""
+    print("stock_codex_compat_live_rehearsal=selected")
+    print(f"stock_codex_compat_live_stock_codex_path={proof.stock_codex_path}")
+    print(f"stock_codex_compat_live_stock_codex_version={proof.stock_codex_version}")
+    print(f"stock_codex_compat_live_source_bundle={proof.source_bundle}")
+    print(f"stock_codex_compat_live_codex_home={proof.codex_home}")
+    print(f"stock_codex_compat_live_auth_path={proof.auth_path}")
+    print(f"stock_codex_compat_live_bridge_dir={proof.bridge_dir}")
+    print(f"stock_codex_compat_live_workspace_root={proof.workspace_root}")
+    print(f"stock_codex_compat_live_thread_id={proof.thread_id}")
+    print(f"stock_codex_compat_live_event_count={proof.event_count}")
+    print(f"stock_codex_compat_live_mcp_servers={','.join(proof.mcp_servers)}")
+    print(
+        "stock_codex_compat_live_first_agent_message_preview="
+        f"{_preview_text(proof.first_agent_message, limit=500)!r}"
+    )
+    print(f"stock_codex_compat_live_stderr_preview={proof.stderr_preview!r}")
+    print("stock_codex_compat_live_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: stock Codex live entrypoint emitted deterministic route "
+        "evidence before model output through the installed compatibility bridge"
+    )
+
+
+def print_stock_codex_compat_wrapper_live_proof(
+    proof: StockCodexCompatWrapperLiveProof,
+) -> None:
+    """Emit operator evidence for the Omnigent-owned stock Codex wrapper proof."""
+    print("stock_codex_compat_wrapper_live_rehearsal=selected")
+    print(
+        "stock_codex_compat_wrapper_live_route_surface="
+        "omnigent-wrapper-jsonl-first-agent-message-prefix"
+    )
+    print(f"stock_codex_compat_wrapper_live_stock_codex_path={proof.stock_codex_path}")
+    print(f"stock_codex_compat_wrapper_live_stock_codex_version={proof.stock_codex_version}")
+    print(f"stock_codex_compat_wrapper_live_source_bundle={proof.source_bundle}")
+    print(f"stock_codex_compat_wrapper_live_wrapper_path={proof.wrapper_path}")
+    print(f"stock_codex_compat_wrapper_live_codex_home={proof.codex_home}")
+    print(f"stock_codex_compat_wrapper_live_auth_path={proof.auth_path}")
+    print(f"stock_codex_compat_wrapper_live_bridge_dir={proof.bridge_dir}")
+    print(f"stock_codex_compat_wrapper_live_workspace_root={proof.workspace_root}")
+    print(f"stock_codex_compat_wrapper_live_thread_id={proof.thread_id}")
+    print(f"stock_codex_compat_wrapper_live_event_count={proof.event_count}")
+    print(f"stock_codex_compat_wrapper_live_mcp_servers={','.join(proof.mcp_servers)}")
+    print(f"stock_codex_compat_wrapper_live_route_injected={proof.route_injected}")
+    print(f"stock_codex_compat_wrapper_live_evidence_path={proof.wrapper_evidence_path}")
+    print(
+        "stock_codex_compat_wrapper_live_pre_wrapper_message_preview="
+        f"{_preview_text(proof.first_agent_message_before_wrapper, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_live_first_agent_message_preview="
+        f"{_preview_text(proof.first_agent_message, limit=500)!r}"
+    )
+    print(f"stock_codex_compat_wrapper_live_stderr_preview={proof.stderr_preview!r}")
+    print("stock_codex_compat_wrapper_live_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: an Omnigent-owned wrapper around stock Codex prefixed "
+        "deterministic route evidence before visible model output"
+    )
+    print(
+        "ASSERTION: the wrapped stock Codex process still used the isolated "
+        "plugin, MCP bridge, policy-hook config, and stock auth profile"
+    )
+
+
+def print_stock_codex_compat_wrapper_command_tool_proof(
+    proof: StockCodexCompatWrapperCommandToolProof,
+) -> None:
+    """Emit operator evidence for wrapped stock Codex command tool execution."""
+    print("stock_codex_compat_wrapper_command_tool_rehearsal=selected")
+    print(
+        "stock_codex_compat_wrapper_command_tool_surface="
+        "stock-codex-exec-json-command-execution"
+    )
+    print(f"stock_codex_compat_wrapper_command_tool_stock_codex_path={proof.stock_codex_path}")
+    print(
+        "stock_codex_compat_wrapper_command_tool_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(f"stock_codex_compat_wrapper_command_tool_source_bundle={proof.source_bundle}")
+    print(f"stock_codex_compat_wrapper_command_tool_wrapper_path={proof.wrapper_path}")
+    print(f"stock_codex_compat_wrapper_command_tool_codex_home={proof.codex_home}")
+    print(f"stock_codex_compat_wrapper_command_tool_auth_path={proof.auth_path}")
+    print(f"stock_codex_compat_wrapper_command_tool_bridge_dir={proof.bridge_dir}")
+    print(f"stock_codex_compat_wrapper_command_tool_workspace_root={proof.workspace_root}")
+    print(f"stock_codex_compat_wrapper_command_tool_thread_id={proof.thread_id}")
+    print(f"stock_codex_compat_wrapper_command_tool_event_count={proof.event_count}")
+    print(
+        "stock_codex_compat_wrapper_command_tool_mcp_servers="
+        f"{','.join(proof.mcp_servers)}"
+    )
+    print(f"stock_codex_compat_wrapper_command_tool_route_injected={proof.route_injected}")
+    print(f"stock_codex_compat_wrapper_command_tool_evidence_path={proof.wrapper_evidence_path}")
+    print(
+        "stock_codex_compat_wrapper_command_tool_command="
+        f"{_preview_text(proof.command, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_command_tool_output_preview="
+        f"{_preview_text(proof.command_output, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_command_tool_pre_wrapper_message_preview="
+        f"{_preview_text(proof.first_agent_message_before_wrapper, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_command_tool_first_agent_message_preview="
+        f"{_preview_text(proof.first_agent_message, limit=500)!r}"
+    )
+    print(f"stock_codex_compat_wrapper_command_tool_stderr_preview={proof.stderr_preview!r}")
+    print("stock_codex_compat_wrapper_command_tool_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: wrapped stock Codex executed one read-only command tool "
+        "and preserved its command_execution event"
+    )
+    print(
+        "ASSERTION: the Omnigent wrapper still prefixed deterministic route "
+        "evidence before the final visible tool-result answer"
+    )
+
+
+def print_stock_codex_compat_wrapper_adapter_tool_proof(
+    proof: StockCodexCompatWrapperAdapterToolProof,
+) -> None:
+    """Emit operator evidence for wrapper-owned adapter command execution."""
+    print("stock_codex_compat_wrapper_adapter_tool_rehearsal=selected")
+    print(
+        "stock_codex_compat_wrapper_adapter_tool_surface="
+        "wrapper-owned-adapter-package-via-stock-command-tool"
+    )
+    print(f"stock_codex_compat_wrapper_adapter_tool_stock_codex_path={proof.stock_codex_path}")
+    print(
+        "stock_codex_compat_wrapper_adapter_tool_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(f"stock_codex_compat_wrapper_adapter_tool_source_bundle={proof.source_bundle}")
+    print(f"stock_codex_compat_wrapper_adapter_tool_wrapper_path={proof.wrapper_path}")
+    print(f"stock_codex_compat_wrapper_adapter_tool_codex_home={proof.codex_home}")
+    print(f"stock_codex_compat_wrapper_adapter_tool_auth_path={proof.auth_path}")
+    print(f"stock_codex_compat_wrapper_adapter_tool_bridge_dir={proof.bridge_dir}")
+    print(f"stock_codex_compat_wrapper_adapter_tool_workspace_root={proof.workspace_root}")
+    print(f"stock_codex_compat_wrapper_adapter_tool_adapter_bin={proof.adapter_bin}")
+    print(
+        "stock_codex_compat_wrapper_adapter_tool_adapter_manifest="
+        f"{proof.adapter_manifest}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_tool_adapter_tools="
+        f"{','.join(proof.adapter_tool_names)}"
+    )
+    print(f"stock_codex_compat_wrapper_adapter_tool_thread_id={proof.thread_id}")
+    print(f"stock_codex_compat_wrapper_adapter_tool_event_count={proof.event_count}")
+    print(
+        "stock_codex_compat_wrapper_adapter_tool_mcp_servers="
+        f"{','.join(proof.mcp_servers)}"
+    )
+    print(f"stock_codex_compat_wrapper_adapter_tool_route_injected={proof.route_injected}")
+    print(f"stock_codex_compat_wrapper_adapter_tool_evidence_path={proof.wrapper_evidence_path}")
+    print(
+        "stock_codex_compat_wrapper_adapter_tool_command="
+        f"{_preview_text(proof.command, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_tool_output_preview="
+        f"{_preview_text(proof.command_output, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_tool_pre_wrapper_message_preview="
+        f"{_preview_text(proof.first_agent_message_before_wrapper, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_tool_first_agent_message_preview="
+        f"{_preview_text(proof.first_agent_message, limit=500)!r}"
+    )
+    print(f"stock_codex_compat_wrapper_adapter_tool_stderr_preview={proof.stderr_preview!r}")
+    print("stock_codex_compat_wrapper_adapter_tool_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: the Omnigent wrapper exposed a wrapper-owned adapter "
+        "package command to stock Codex through a validated manifest and PATH"
+    )
+    print(
+        "ASSERTION: wrapped stock Codex executed that adapter command once "
+        "and preserved the command_execution event"
+    )
+    print(
+        "ASSERTION: the Omnigent wrapper still prefixed deterministic route "
+        "evidence before the final visible adapter-result answer"
+    )
+
+
+def print_stock_codex_compat_wrapper_adapter_arbitration_proof(
+    proof: StockCodexCompatWrapperAdapterArbitrationProof,
+) -> None:
+    """Emit operator evidence for multi-tool adapter arbitration."""
+    print("stock_codex_compat_wrapper_adapter_arbitration_rehearsal=selected")
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_surface="
+        "wrapper-owned-multi-tool-adapter-package-via-stock-command-tool"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_stock_codex_path="
+        f"{proof.stock_codex_path}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_source_bundle="
+        f"{proof.source_bundle}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_wrapper_path="
+        f"{proof.wrapper_path}"
+    )
+    print(
+        f"stock_codex_compat_wrapper_adapter_arbitration_codex_home={proof.codex_home}"
+    )
+    print(
+        f"stock_codex_compat_wrapper_adapter_arbitration_auth_path={proof.auth_path}"
+    )
+    print(
+        f"stock_codex_compat_wrapper_adapter_arbitration_bridge_dir={proof.bridge_dir}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_workspace_root="
+        f"{proof.workspace_root}"
+    )
+    print(
+        f"stock_codex_compat_wrapper_adapter_arbitration_adapter_bin={proof.adapter_bin}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_adapter_manifest="
+        f"{proof.adapter_manifest}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_adapter_tools="
+        f"{','.join(proof.adapter_tool_names)}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_selected_tool="
+        f"{proof.selected_tool_name}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_rejected_tool="
+        f"{proof.rejected_tool_name}"
+    )
+    print(
+        f"stock_codex_compat_wrapper_adapter_arbitration_thread_id={proof.thread_id}"
+    )
+    print(
+        f"stock_codex_compat_wrapper_adapter_arbitration_event_count={proof.event_count}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_mcp_servers="
+        f"{','.join(proof.mcp_servers)}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_route_injected="
+        f"{proof.route_injected}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_evidence_path="
+        f"{proof.wrapper_evidence_path}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_command="
+        f"{_preview_text(proof.command, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_output_preview="
+        f"{_preview_text(proof.command_output, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_pre_wrapper_message_preview="
+        f"{_preview_text(proof.first_agent_message_before_wrapper, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_first_agent_message_preview="
+        f"{_preview_text(proof.first_agent_message, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_stderr_preview="
+        f"{proof.stderr_preview!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_adapter_arbitration_cache_lifecycle="
+        "temporary_removed_after_proof"
+    )
+    print(
+        "ASSERTION: the Omnigent wrapper validated a generated multi-tool "
+        "adapter package before launching stock Codex"
+    )
+    print(
+        "ASSERTION: wrapped stock Codex selected the route adapter, rejected "
+        "the release adapter, and preserved exactly one command_execution event"
+    )
+    print(
+        "ASSERTION: the Omnigent wrapper still prefixed deterministic route "
+        "evidence before the final visible adapter-arbitration answer"
+    )
+
+
+def print_stock_codex_compat_wrapper_apple_docs_adapter_proof(
+    proof: StockCodexCompatWrapperAppleDocsAdapterProof,
+) -> None:
+    """Emit operator evidence for real Apple docs adapter execution."""
+    print("stock_codex_compat_wrapper_apple_docs_adapter_rehearsal=selected")
+    print(
+        "stock_codex_compat_wrapper_apple_docs_adapter_surface="
+        "wrapper-owned-real-apple-docs-adapter-package-via-stock-command-tool"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_adapter_stock_codex_path="
+        f"{proof.stock_codex_path}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_adapter_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_adapter_source_bundle="
+        f"{proof.source_bundle}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_adapter_wrapper_path="
+        f"{proof.wrapper_path}"
+    )
+    print(f"stock_codex_compat_wrapper_apple_docs_adapter_codex_home={proof.codex_home}")
+    print(f"stock_codex_compat_wrapper_apple_docs_adapter_auth_path={proof.auth_path}")
+    print(f"stock_codex_compat_wrapper_apple_docs_adapter_bridge_dir={proof.bridge_dir}")
+    print(
+        "stock_codex_compat_wrapper_apple_docs_adapter_workspace_root="
+        f"{proof.workspace_root}"
+    )
+    print(f"stock_codex_compat_wrapper_apple_docs_adapter_adapter_bin={proof.adapter_bin}")
+    print(
+        "stock_codex_compat_wrapper_apple_docs_adapter_adapter_manifest="
+        f"{proof.adapter_manifest}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_adapter_adapter_tools="
+        f"{','.join(proof.adapter_tool_names)}"
+    )
+    print(f"stock_codex_compat_wrapper_apple_docs_adapter_docs_url={proof.docs_url}")
+    print(f"stock_codex_compat_wrapper_apple_docs_adapter_thread_id={proof.thread_id}")
+    print(f"stock_codex_compat_wrapper_apple_docs_adapter_event_count={proof.event_count}")
+    print(
+        "stock_codex_compat_wrapper_apple_docs_adapter_mcp_servers="
+        f"{','.join(proof.mcp_servers)}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_adapter_route_injected="
+        f"{proof.route_injected}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_adapter_evidence_path="
+        f"{proof.wrapper_evidence_path}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_adapter_command="
+        f"{_preview_text(proof.command, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_adapter_output_preview="
+        f"{_preview_text(proof.command_output, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_adapter_pre_wrapper_message_preview="
+        f"{_preview_text(proof.first_agent_message_before_wrapper, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_adapter_first_agent_message_preview="
+        f"{_preview_text(proof.first_agent_message, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_adapter_stderr_preview="
+        f"{proof.stderr_preview!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_adapter_cache_lifecycle="
+        "temporary_removed_after_proof"
+    )
+    print(
+        "ASSERTION: the Omnigent wrapper validated a real Apple docs adapter "
+        "package before launching stock Codex"
+    )
+    print(
+        "ASSERTION: wrapped stock Codex fetched Apple docs through the generated "
+        "adapter command and preserved exactly one command_execution event"
+    )
+    print(
+        "ASSERTION: the Omnigent wrapper still prefixed deterministic route "
+        "evidence before the final visible Apple-docs adapter answer"
+    )
+
+
+def print_stock_codex_compat_wrapper_apple_docs_bridge_adapter_proof(
+    proof: StockCodexCompatWrapperAppleDocsBridgeAdapterProof,
+) -> None:
+    """Emit operator evidence for Apple docs adapter bridge execution."""
+    print("stock_codex_compat_wrapper_apple_docs_bridge_adapter_rehearsal=selected")
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_surface="
+        "wrapper-owned-real-apple-docs-file-bridge-adapter-package-via-stock-command-tool"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_stock_codex_path="
+        f"{proof.stock_codex_path}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_source_bundle="
+        f"{proof.source_bundle}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_wrapper_path="
+        f"{proof.wrapper_path}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_codex_home="
+        f"{proof.codex_home}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_auth_path="
+        f"{proof.auth_path}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_bridge_dir="
+        f"{proof.bridge_dir}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_workspace_root="
+        f"{proof.workspace_root}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_adapter_bin="
+        f"{proof.adapter_bin}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_adapter_manifest="
+        f"{proof.adapter_manifest}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_adapter_bridge_dir="
+        f"{proof.adapter_bridge_dir}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_adapter_tools="
+        f"{','.join(proof.adapter_tool_names)}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_docs_url="
+        f"{proof.docs_url}"
+    )
+    print(f"stock_codex_compat_wrapper_apple_docs_bridge_adapter_sandbox={proof.sandbox}")
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_thread_id="
+        f"{proof.thread_id}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_event_count="
+        f"{proof.event_count}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_mcp_servers="
+        f"{','.join(proof.mcp_servers)}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_route_injected="
+        f"{proof.route_injected}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_evidence_path="
+        f"{proof.wrapper_evidence_path}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_command="
+        f"{_preview_text(proof.command, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_output_preview="
+        f"{_preview_text(proof.command_output, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_pre_wrapper_message_preview="
+        f"{_preview_text(proof.first_agent_message_before_wrapper, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_first_agent_message_preview="
+        f"{_preview_text(proof.first_agent_message, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_stderr_preview="
+        f"{proof.stderr_preview!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_apple_docs_bridge_adapter_cache_lifecycle="
+        "temporary_removed_after_proof"
+    )
+    print(
+        "ASSERTION: stock Codex ran the generated adapter command under "
+        "workspace-write, not danger-full-access"
+    )
+    print(
+        "ASSERTION: networked Apple docs execution happened through the "
+        "Omnigent-owned file bridge outside the stock Codex sandbox"
+    )
+    print(
+        "ASSERTION: the Omnigent wrapper still prefixed deterministic route "
+        "evidence before the final visible Apple-docs bridge-adapter answer"
+    )
+
+
+def print_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
+    proof: StockCodexCompatWrapperXcodebuildBridgeAdapterProof,
+) -> None:
+    """Emit operator evidence for XcodeBuildMCP adapter bridge execution."""
+    print("stock_codex_compat_wrapper_xcodebuild_bridge_adapter_rehearsal=selected")
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_surface="
+        "wrapper-owned-xcodebuild-file-bridge-adapter-package-via-stock-command-tool"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_stock_codex_path="
+        f"{proof.stock_codex_path}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_source_bundle="
+        f"{proof.source_bundle}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_wrapper_path="
+        f"{proof.wrapper_path}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_codex_home="
+        f"{proof.codex_home}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_auth_path="
+        f"{proof.auth_path}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_bridge_dir="
+        f"{proof.bridge_dir}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_workspace_root="
+        f"{proof.workspace_root}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_adapter_bin="
+        f"{proof.adapter_bin}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_adapter_manifest="
+        f"{proof.adapter_manifest}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_adapter_bridge_dir="
+        f"{proof.adapter_bridge_dir}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_adapter_tools="
+        f"{','.join(proof.adapter_tool_names)}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_project_path="
+        f"{proof.project_path}"
+    )
+    print(f"stock_codex_compat_wrapper_xcodebuild_bridge_adapter_scheme={proof.scheme}")
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_configuration="
+        f"{proof.configuration}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_simulator="
+        f"{proof.simulator_name}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_derived_data="
+        f"{proof.derived_data_path}"
+    )
+    print(f"stock_codex_compat_wrapper_xcodebuild_bridge_adapter_sandbox={proof.sandbox}")
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_thread_id="
+        f"{proof.thread_id}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_event_count="
+        f"{proof.event_count}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_mcp_servers="
+        f"{','.join(proof.mcp_servers)}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_route_injected="
+        f"{proof.route_injected}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_evidence_path="
+        f"{proof.wrapper_evidence_path}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_command="
+        f"{_preview_text(proof.command, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_output_preview="
+        f"{_preview_text(proof.command_output, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_pre_wrapper_message_preview="
+        f"{_preview_text(proof.first_agent_message_before_wrapper, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_first_agent_message_preview="
+        f"{_preview_text(proof.first_agent_message, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_stderr_preview="
+        f"{proof.stderr_preview!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_xcodebuild_bridge_adapter_cache_lifecycle="
+        "temporary_removed_after_proof"
+    )
+    print(
+        "ASSERTION: stock Codex ran the generated XcodeBuildMCP adapter command "
+        "under workspace-write, not danger-full-access"
+    )
+    print(
+        "ASSERTION: XcodeBuildMCP build/install/launch execution happened "
+        "through the Omnigent-owned file bridge outside the stock Codex sandbox"
+    )
+    print(
+        "ASSERTION: the Omnigent wrapper still prefixed deterministic route "
+        "evidence before the final visible XcodeBuildMCP bridge-adapter answer"
+    )
+
+
+def print_stock_codex_compat_wrapper_relay_tool_proof(
+    proof: StockCodexCompatWrapperRelayToolProof,
+) -> None:
+    """Emit operator evidence for wrapped stock Codex Omnigent relay tool execution."""
+    print("stock_codex_compat_wrapper_relay_tool_rehearsal=selected")
+    print(
+        "stock_codex_compat_wrapper_relay_tool_surface="
+        "stock-codex-exec-json-omnigent-mcp-relay-tool"
+    )
+    print(f"stock_codex_compat_wrapper_relay_tool_stock_codex_path={proof.stock_codex_path}")
+    print(
+        "stock_codex_compat_wrapper_relay_tool_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(f"stock_codex_compat_wrapper_relay_tool_source_bundle={proof.source_bundle}")
+    print(f"stock_codex_compat_wrapper_relay_tool_wrapper_path={proof.wrapper_path}")
+    print(f"stock_codex_compat_wrapper_relay_tool_codex_home={proof.codex_home}")
+    print(f"stock_codex_compat_wrapper_relay_tool_auth_path={proof.auth_path}")
+    print(f"stock_codex_compat_wrapper_relay_tool_bridge_dir={proof.bridge_dir}")
+    print(f"stock_codex_compat_wrapper_relay_tool_workspace_root={proof.workspace_root}")
+    print(f"stock_codex_compat_wrapper_relay_tool_thread_id={proof.thread_id}")
+    print(f"stock_codex_compat_wrapper_relay_tool_event_count={proof.event_count}")
+    print(
+        "stock_codex_compat_wrapper_relay_tool_mcp_servers="
+        f"{','.join(proof.mcp_servers)}"
+    )
+    print(f"stock_codex_compat_wrapper_relay_tool_route_injected={proof.route_injected}")
+    print(f"stock_codex_compat_wrapper_relay_tool_evidence_path={proof.wrapper_evidence_path}")
+    print(f"stock_codex_compat_wrapper_relay_tool_name={proof.relay_tool_name}")
+    print(
+        "stock_codex_compat_wrapper_relay_tool_arguments="
+        f"{json.dumps(proof.relay_tool_arguments, sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_wrapper_relay_tool_event_types="
+        f"{','.join(proof.relay_event_types)}"
+    )
+    print(
+        "stock_codex_compat_wrapper_relay_tool_enabled_features="
+        f"{','.join(proof.enabled_features)}"
+    )
+    print(
+        "stock_codex_compat_wrapper_relay_tool_skipped_features_requiring_nondefault_support="
+        f"{','.join(proof.skipped_features)}"
+    )
+    print(
+        "stock_codex_compat_wrapper_relay_tool_prompt_input_mentions_tool="
+        f"{proof.prompt_input_mentions_relay_tool}"
+    )
+    print(
+        "stock_codex_compat_wrapper_relay_tool_prompt_input_preview="
+        f"{proof.prompt_input_preview!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_relay_tool_output_preview="
+        f"{proof.relay_output_preview!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_relay_tool_pre_wrapper_message_preview="
+        f"{_preview_text(proof.first_agent_message_before_wrapper, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_wrapper_relay_tool_first_agent_message_preview="
+        f"{_preview_text(proof.first_agent_message, limit=500)!r}"
+    )
+    print(f"stock_codex_compat_wrapper_relay_tool_stderr_preview={proof.stderr_preview!r}")
+    print("stock_codex_compat_wrapper_relay_tool_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: wrapped stock Codex executed one Omnigent MCP relay tool "
+        "advertised from tool_relay.json"
+    )
+    print(
+        "ASSERTION: the Omnigent wrapper preserved stock Codex JSONL tool "
+        "evidence while prefixing deterministic route evidence"
+    )
+
+
+def _load_stock_codex_compat_launcher_installer() -> Any:
+    """Load the stock-Codex compatibility launcher installer script."""
+    script_path = Path(__file__).resolve().with_name(
+        "install_stock_codex_compat_launcher.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "omnigent_stock_codex_compat_launcher_installer",
+        script_path,
+    )
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"Could not load compatibility launcher installer: {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def run_stock_codex_compat_launcher_doctor_proof(
+    stock_codex_path: Path,
+    *,
+    launcher_path: Path | None = None,
+    manifest_path: Path | None = None,
+    uvx_path: Path | None = None,
+    backup_existing: bool = False,
+    force: bool = False,
+    require_path_selected: bool = False,
+) -> StockCodexCompatLauncherDoctorProof:
+    """Prove the compatibility launcher install plan without mutating the host."""
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    assert_stock_codex_path(stock_codex_path, allow_fork_codex=False)
+
+    installer = _load_stock_codex_compat_launcher_installer()
+    uvx_path = uvx_path.expanduser().resolve() if uvx_path else None
+    if uvx_path is None:
+        uvx_raw = shutil.which("uvx")
+        if not uvx_raw:
+            raise SystemExit("Could not find uvx on PATH for compatibility launcher doctor.")
+        uvx_path = Path(uvx_raw).expanduser().resolve()
+    if not uvx_path.is_file() or not os.access(uvx_path, os.X_OK):
+        raise SystemExit(f"uvx binary is not executable: {uvx_path}")
+
+    repo_root = Path(__file__).resolve().parents[1]
+    launcher_path = (
+        launcher_path.expanduser()
+        if launcher_path is not None
+        else installer.DEFAULT_LAUNCHER_PATH
+    )
+    manifest_path = (
+        manifest_path.expanduser()
+        if manifest_path is not None
+        else installer.DEFAULT_MANIFEST_PATH
+    )
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-launcher-doctor-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        adapter_package_dir = root / "adapter-package"
+        installer.materialize_default_adapter_package(
+            adapter_package_dir,
+            force=False,
+        )
+        adapter_bin, adapter_manifest = installer.resolve_adapter_paths(
+            adapter_bin=None,
+            adapter_manifest=None,
+            adapter_package_dir=adapter_package_dir,
+        )
+        doctor = installer.doctor_launcher(
+            launcher_path=launcher_path,
+            manifest_path=manifest_path,
+            repo_root=repo_root,
+            uvx_path=uvx_path,
+            pinned_codex_path=stock_codex_path,
+            route_prefix=EXPECTED_ROUTE,
+            adapter_bin=adapter_bin,
+            adapter_manifest=adapter_manifest,
+            adapter_bridge_dir=installer.DEFAULT_ADAPTER_BRIDGE_DIR,
+            backup_existing=backup_existing,
+            force=force,
+            require_path_selected=require_path_selected,
+        )
+        if doctor.mutates_filesystem:
+            raise SystemExit("Compatibility launcher doctor unexpectedly mutates files.")
+        if doctor.pinned_codex_path != stock_codex_path:
+            raise SystemExit(
+                "Compatibility launcher doctor resolved the wrong pinned Codex.\n"
+                f"expected={stock_codex_path}\nactual={doctor.pinned_codex_path}"
+            )
+        return StockCodexCompatLauncherDoctorProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=doctor.pinned_codex_version,
+            launcher_path=doctor.launcher_path,
+            manifest_path=doctor.manifest_path,
+            repo_root=doctor.repo_root,
+            uvx_path=doctor.uvx_path,
+            adapter_bin=doctor.adapter_bin,
+            adapter_manifest=doctor.adapter_manifest,
+            adapter_bridge_dir=doctor.adapter_bridge_dir,
+            adapter_package_dir=adapter_package_dir,
+            adapter_tool_names=doctor.adapter_tool_names,
+            install_allowed=doctor.install_allowed,
+            install_blocker=doctor.install_blocker,
+            existing_target_state=doctor.existing_target_state,
+            existing_target_managed=doctor.existing_target_managed,
+            existing_target_realpath=doctor.existing_target_realpath,
+            selected_command_path=doctor.selected_command_path,
+            target_selected_on_path=doctor.target_selected_on_path,
+            launcher_parent_on_path=doctor.launcher_parent_on_path,
+            launcher_parent_exists=doctor.launcher_parent_exists,
+            nearest_existing_parent=doctor.nearest_existing_parent,
+            nearest_existing_parent_writable=doctor.nearest_existing_parent_writable,
+            backup_existing_requested=doctor.backup_existing_requested,
+            force_requested=doctor.force_requested,
+            would_backup_existing=doctor.would_backup_existing,
+            backup_path=doctor.backup_path,
+            rollback_command=doctor.rollback_command,
+            install_command=doctor.install_command,
+            mutates_filesystem=doctor.mutates_filesystem,
+        )
+
+
+def print_stock_codex_compat_launcher_doctor_proof(
+    proof: StockCodexCompatLauncherDoctorProof,
+) -> None:
+    """Emit operator evidence for the compatibility launcher install plan."""
+    print("stock_codex_compat_launcher_doctor_rehearsal=selected")
+    print(
+        "stock_codex_compat_launcher_doctor_surface="
+        "non-mutating-managed-compatibility-launcher-install-plan"
+    )
+    print(f"stock_codex_compat_launcher_doctor_launcher_path={proof.launcher_path}")
+    print(f"stock_codex_compat_launcher_doctor_manifest_path={proof.manifest_path}")
+    print(f"stock_codex_compat_launcher_doctor_stock_codex_path={proof.stock_codex_path}")
+    print(
+        "stock_codex_compat_launcher_doctor_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(f"stock_codex_compat_launcher_doctor_repo_root={proof.repo_root}")
+    print(f"stock_codex_compat_launcher_doctor_uvx_path={proof.uvx_path}")
+    print(f"stock_codex_compat_launcher_doctor_adapter_bin={proof.adapter_bin}")
+    print(
+        "stock_codex_compat_launcher_doctor_adapter_manifest="
+        f"{proof.adapter_manifest}"
+    )
+    print(
+        "stock_codex_compat_launcher_doctor_adapter_package_dir="
+        f"{proof.adapter_package_dir}"
+    )
+    print(
+        "stock_codex_compat_launcher_doctor_adapter_bridge_dir="
+        f"{proof.adapter_bridge_dir}"
+    )
+    print(
+        "stock_codex_compat_launcher_doctor_adapter_tools="
+        f"{','.join(proof.adapter_tool_names)}"
+    )
+    print(
+        "stock_codex_compat_launcher_doctor_install_allowed="
+        f"{proof.install_allowed}"
+    )
+    if proof.install_blocker is not None:
+        print(
+            "stock_codex_compat_launcher_doctor_install_blocker="
+            f"{proof.install_blocker}"
+        )
+    print(
+        "stock_codex_compat_launcher_doctor_existing_target_state="
+        f"{proof.existing_target_state}"
+    )
+    print(
+        "stock_codex_compat_launcher_doctor_existing_target_managed="
+        f"{proof.existing_target_managed}"
+    )
+    if proof.existing_target_realpath is not None:
+        print(
+            "stock_codex_compat_launcher_doctor_existing_target_realpath="
+            f"{proof.existing_target_realpath}"
+        )
+    if proof.selected_command_path is not None:
+        print(
+            "stock_codex_compat_launcher_doctor_selected_command_path="
+            f"{proof.selected_command_path}"
+        )
+    print(
+        "stock_codex_compat_launcher_doctor_target_selected_on_path="
+        f"{proof.target_selected_on_path}"
+    )
+    print(
+        "stock_codex_compat_launcher_doctor_launcher_parent_on_path="
+        f"{proof.launcher_parent_on_path}"
+    )
+    print(
+        "stock_codex_compat_launcher_doctor_launcher_parent_exists="
+        f"{proof.launcher_parent_exists}"
+    )
+    print(
+        "stock_codex_compat_launcher_doctor_nearest_existing_parent="
+        f"{proof.nearest_existing_parent}"
+    )
+    print(
+        "stock_codex_compat_launcher_doctor_nearest_existing_parent_writable="
+        f"{proof.nearest_existing_parent_writable}"
+    )
+    print(
+        "stock_codex_compat_launcher_doctor_backup_existing_requested="
+        f"{proof.backup_existing_requested}"
+    )
+    print(f"stock_codex_compat_launcher_doctor_force_requested={proof.force_requested}")
+    print(
+        "stock_codex_compat_launcher_doctor_would_backup_existing="
+        f"{proof.would_backup_existing}"
+    )
+    if proof.backup_path is not None:
+        print(f"stock_codex_compat_launcher_doctor_backup_path={proof.backup_path}")
+    print(
+        "stock_codex_compat_launcher_doctor_mutates_filesystem="
+        f"{proof.mutates_filesystem}"
+    )
+    print(
+        "stock_codex_compat_launcher_doctor_rollback_command="
+        f"{proof.rollback_command}"
+    )
+    print(
+        "stock_codex_compat_launcher_doctor_install_command="
+        f"{proof.install_command}"
+    )
+    print(
+        "stock_codex_compat_launcher_doctor_cache_lifecycle="
+        "temporary_default_layout_adapter_package_removed_after_proof"
+    )
+    print(
+        "ASSERTION: compatibility launcher doctor validates the target, pinned "
+        "stock Codex, uvx, adapter manifest, PATH posture, and rollback command "
+        "without creating or replacing launcher files"
+    )
+    print(
+        "ASSERTION: this proof preserves the Codex fork and current host launcher "
+        "state; it is a production-install readiness gate, not an install"
+    )
+
+
+def _run_stock_codex_compat_installer_cli_json(
+    args: list[str],
+    *,
+    env: dict[str, str],
+    repo_root: Path,
+    script_path: Path | None = None,
+) -> dict[str, Any]:
+    """Run the compatibility launcher installer CLI and return its JSON output."""
+    script_path = script_path or (
+        repo_root / "scripts" / "install_stock_codex_compat_launcher.py"
+    )
+    completed = subprocess.run(
+        [sys.executable, str(script_path), *args, "--json"],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=repo_root,
+        env=env,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        raise SystemExit(
+            "Compatibility installer command failed.\n"
+            f"args={args!r}\n"
+            f"exit={completed.returncode}\n"
+            f"stdout={completed.stdout}\n"
+            f"stderr={completed.stderr}"
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            "Compatibility installer command did not emit JSON.\n"
+            f"args={args!r}\n"
+            f"stdout={completed.stdout}\n"
+            f"stderr={completed.stderr}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise SystemExit(
+            "Compatibility installer command emitted non-object JSON.\n"
+            f"args={args!r}\n"
+            f"payload={payload!r}"
+        )
+    return payload
+
+
+def _run_stock_codex_compat_bundle_builder_cli_json(
+    args: list[str],
+    *,
+    repo_root: Path,
+) -> dict[str, Any]:
+    """Run the compatibility bundle builder CLI and return its JSON output."""
+    script_path = repo_root / "scripts" / "build_stock_codex_compat_bundle.py"
+    completed = subprocess.run(
+        [sys.executable, str(script_path), *args, "--json"],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=repo_root,
+        timeout=60,
+    )
+    if completed.returncode != 0:
+        raise SystemExit(
+            "Compatibility bundle build command failed.\n"
+            f"args={args!r}\n"
+            f"exit={completed.returncode}\n"
+            f"stdout={completed.stdout}\n"
+            f"stderr={completed.stderr}"
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            "Compatibility bundle build command did not emit JSON.\n"
+            f"args={args!r}\n"
+            f"stdout={completed.stdout}\n"
+            f"stderr={completed.stderr}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise SystemExit(
+            "Compatibility bundle build command emitted non-object JSON.\n"
+            f"args={args!r}\n"
+            f"payload={payload!r}"
+        )
+    return payload
+
+
+def _run_stock_codex_compat_pkg_builder_cli_json(
+    args: list[str],
+    *,
+    repo_root: Path,
+) -> dict[str, Any]:
+    """Run the compatibility pkg builder CLI and return its JSON output."""
+    script_path = repo_root / "scripts" / "build_stock_codex_compat_pkg.py"
+    completed = subprocess.run(
+        [sys.executable, str(script_path), *args, "--json"],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=repo_root,
+        timeout=240,
+    )
+    if completed.returncode != 0:
+        raise SystemExit(
+            "Compatibility pkg build command failed.\n"
+            f"args={args!r}\n"
+            f"exit={completed.returncode}\n"
+            f"stdout={completed.stdout}\n"
+            f"stderr={completed.stderr}"
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            "Compatibility pkg build command did not emit JSON.\n"
+            f"args={args!r}\n"
+            f"stdout={completed.stdout}\n"
+            f"stderr={completed.stderr}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise SystemExit(
+            "Compatibility pkg build command emitted non-object JSON.\n"
+            f"args={args!r}\n"
+            f"payload={payload!r}"
+        )
+    return payload
+
+
+def _safe_extract_tar_gz(archive_path: Path, destination: Path) -> None:
+    """Extract a tar.gz archive while rejecting path traversal entries."""
+    destination = destination.expanduser().resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive_path, "r:gz") as archive:
+        for member in archive.getmembers():
+            target = (destination / member.name).resolve()
+            if target != destination and not str(target).startswith(
+                f"{destination}{os.sep}"
+            ):
+                raise SystemExit(
+                    "Compatibility bundle contains unsafe archive member: "
+                    f"{member.name!r}"
+                )
+            if member.isdev():
+                raise SystemExit(
+                    "Compatibility bundle contains unsupported device member: "
+                    f"{member.name!r}"
+                )
+        archive.extractall(destination)
+
+
+def run_stock_codex_compat_clean_install_proof(
+    stock_codex_path: Path,
+    *,
+    uvx_path: Path | None = None,
+) -> StockCodexCompatCleanInstallProof:
+    """Prove the compatibility launcher install sequence under a clean HOME."""
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    assert_stock_codex_path(stock_codex_path, allow_fork_codex=False)
+    stock_codex_version = codex_version(stock_codex_path)
+    uvx_path = uvx_path.expanduser().resolve() if uvx_path is not None else None
+    if uvx_path is None:
+        uvx_raw = shutil.which("uvx")
+        if not uvx_raw:
+            raise SystemExit("Could not find uvx on PATH for clean install proof.")
+        uvx_path = Path(uvx_raw).expanduser().resolve()
+    if not uvx_path.is_file() or not os.access(uvx_path, os.X_OK):
+        raise SystemExit(f"uvx binary is not executable: {uvx_path}")
+
+    repo_root = Path(__file__).resolve().parents[1]
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-clean-install-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        clean_home = root / "home"
+        clean_tmp = root / "tmp"
+        clean_home.mkdir()
+        clean_tmp.mkdir()
+        clean_bin_dir = clean_home / ".local" / "bin"
+        launcher_path = clean_bin_dir / "omnigent-stock-codex-compat"
+        manifest_path = (
+            clean_home / ".local" / "omnigent" / "launchers" / "stock-codex-compat.json"
+        )
+        adapter_package_dir = (
+            clean_home / ".local" / "omnigent" / "stock-codex-compat" / "adapter-package"
+        )
+        adapter_bridge_dir = (
+            clean_home / ".local" / "omnigent" / "stock-codex-compat" / "adapter-bridge"
+        )
+        proof_path = (
+            f"{clean_bin_dir}{os.pathsep}{uvx_path.parent}{os.pathsep}"
+            f"{os.environ.get('PATH', '')}"
+        )
+        python_path = str(repo_root)
+        if os.environ.get("PYTHONPATH"):
+            python_path = f"{python_path}{os.pathsep}{os.environ['PYTHONPATH']}"
+        env = os.environ.copy()
+        env.update(
+            {
+                "HOME": str(clean_home),
+                "TMPDIR": str(clean_tmp),
+                "PATH": proof_path,
+                "PYTHONPATH": python_path,
+            }
+        )
+        env.pop("CODEX_HOME", None)
+        env.pop(OMNIGENT_STOCK_CODEX_PATH_ENV, None)
+
+        adapter_payload = _run_stock_codex_compat_installer_cli_json(
+            ["--install-adapter-package"],
+            env=env,
+            repo_root=repo_root,
+        )
+        install_payload = _run_stock_codex_compat_installer_cli_json(
+            [
+                "--install",
+                "--pinned-codex-path",
+                str(stock_codex_path),
+                "--repo-root",
+                str(repo_root),
+                "--uvx-path",
+                str(uvx_path),
+                "--require-path-selected",
+            ],
+            env=env,
+            repo_root=repo_root,
+        )
+        selected = shutil.which("omnigent-stock-codex-compat", path=env["PATH"])
+        if selected is None:
+            raise SystemExit("Clean install proof did not select compatibility command.")
+        selected_command_path = Path(selected).expanduser().resolve()
+        if selected_command_path != launcher_path.resolve():
+            raise SystemExit(
+                "Clean install proof selected the wrong compatibility command.\n"
+                f"expected={launcher_path.resolve()}\nactual={selected_command_path}"
+            )
+        version = subprocess.run(
+            [str(selected_command_path), "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=10,
+        )
+        version_output = (version.stdout or version.stderr).strip()
+        if version.returncode != 0 or version_output != stock_codex_version:
+            raise SystemExit(
+                "Clean install proof version delegation failed.\n"
+                f"expected={stock_codex_version!r}\nactual={version_output!r}\n"
+                f"exit={version.returncode}"
+            )
+        probe = subprocess.run(
+            [str(selected_command_path), "--omnigent-stock-codex-compat-launcher-probe"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=10,
+        )
+        probe_output = ((probe.stdout or "") + (probe.stderr or "")).strip()
+        if probe.returncode != 0 or "OMNIGENT_STOCK_CODEX_COMPAT_LAUNCHER_OK" not in (
+            probe_output
+        ):
+            raise SystemExit(
+                "Clean install proof launcher probe failed.\n"
+                f"exit={probe.returncode}\noutput={probe_output}"
+            )
+        doctor_payload = _run_stock_codex_compat_installer_cli_json(
+            [
+                "--doctor",
+                "--pinned-codex-path",
+                str(stock_codex_path),
+                "--repo-root",
+                str(repo_root),
+                "--uvx-path",
+                str(uvx_path),
+                "--require-path-selected",
+                "--force",
+            ],
+            env=env,
+            repo_root=repo_root,
+        )
+        if doctor_payload.get("installAllowed") is not True:
+            raise SystemExit(f"Clean install doctor did not allow reinstall: {doctor_payload!r}")
+        if doctor_payload.get("targetSelectedOnPath") is not True:
+            raise SystemExit(
+                f"Clean install doctor did not see PATH selection: {doctor_payload!r}"
+            )
+        if doctor_payload.get("mutatesFilesystem") is not False:
+            raise SystemExit(f"Clean install doctor unexpectedly mutates: {doctor_payload!r}")
+
+        rollback_payload = _run_stock_codex_compat_installer_cli_json(
+            ["--uninstall"],
+            env=env,
+            repo_root=repo_root,
+        )
+        launcher_removed = not launcher_path.exists()
+        manifest_removed = not manifest_path.exists()
+        if not launcher_removed or not manifest_removed:
+            raise SystemExit(
+                "Clean install rollback left launcher artifacts behind.\n"
+                f"launcher_exists={launcher_path.exists()}\n"
+                f"manifest_exists={manifest_path.exists()}"
+            )
+
+        return StockCodexCompatCleanInstallProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            clean_home=clean_home,
+            clean_bin_dir=clean_bin_dir,
+            launcher_path=launcher_path,
+            manifest_path=manifest_path,
+            adapter_package_dir=adapter_package_dir,
+            adapter_bin=Path(str(adapter_payload["adapterBin"])),
+            adapter_manifest=Path(str(adapter_payload["adapterManifest"])),
+            adapter_bridge_dir=adapter_bridge_dir,
+            adapter_tool_names=tuple(
+                str(name) for name in adapter_payload.get("adapterToolNames", [])
+            ),
+            repo_root=repo_root,
+            uvx_path=uvx_path,
+            selected_command_path=selected_command_path,
+            version_output=version_output,
+            probe_output=probe_output,
+            adapter_package_action=str(adapter_payload["action"]),
+            install_action=str(install_payload["action"]),
+            rollback_action=str(rollback_payload["action"]),
+            doctor_install_allowed=bool(doctor_payload["installAllowed"]),
+            doctor_existing_target_state=str(doctor_payload["existingTargetState"]),
+            doctor_existing_target_managed=bool(doctor_payload["existingTargetManaged"]),
+            doctor_target_selected_on_path=bool(doctor_payload["targetSelectedOnPath"]),
+            doctor_mutates_filesystem=bool(doctor_payload["mutatesFilesystem"]),
+            launcher_removed_after_rollback=launcher_removed,
+            manifest_removed_after_rollback=manifest_removed,
+        )
+
+
+def run_stock_codex_compat_bundle_install_proof(
+    stock_codex_path: Path,
+    *,
+    uvx_path: Path | None = None,
+) -> StockCodexCompatBundleInstallProof:
+    """Prove clean-home install from a portable compatibility bundle artifact."""
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    assert_stock_codex_path(stock_codex_path, allow_fork_codex=False)
+    stock_codex_version = codex_version(stock_codex_path)
+    uvx_path = uvx_path.expanduser().resolve() if uvx_path is not None else None
+    if uvx_path is None:
+        uvx_raw = shutil.which("uvx")
+        if not uvx_raw:
+            raise SystemExit("Could not find uvx on PATH for bundle install proof.")
+        uvx_path = Path(uvx_raw).expanduser().resolve()
+    if not uvx_path.is_file() or not os.access(uvx_path, os.X_OK):
+        raise SystemExit(f"uvx binary is not executable: {uvx_path}")
+
+    source_repo_root = Path(__file__).resolve().parents[1]
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-bundle-install-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        clean_home = root / "home"
+        clean_tmp = root / "tmp"
+        artifact_dir = root / "artifacts"
+        extract_dir = root / "extract"
+        clean_home.mkdir()
+        clean_tmp.mkdir()
+        artifact_dir.mkdir()
+        bundle_path = artifact_dir / "omnigent-stock-codex-compat-bundle.tar.gz"
+        bundle_payload = _run_stock_codex_compat_bundle_builder_cli_json(
+            [
+                "--repo-root",
+                str(source_repo_root),
+                "--output",
+                str(bundle_path),
+                "--force",
+            ],
+            repo_root=source_repo_root,
+        )
+        bundle_path = Path(_json_string(bundle_payload, "bundlePath")).resolve()
+        bundle_sha256 = _json_string(bundle_payload, "sha256")
+        if sha256_file(bundle_path) != bundle_sha256:
+            raise SystemExit(
+                "Compatibility bundle digest mismatch after build.\n"
+                f"bundle={bundle_path}\nexpected={bundle_sha256}"
+            )
+
+        _safe_extract_tar_gz(bundle_path, extract_dir)
+        bundle_root_name = _json_string(bundle_payload, "bundleRootName")
+        manifest_name = _json_string(bundle_payload, "manifestName")
+        extracted_bundle_root = extract_dir / bundle_root_name
+        bundle_manifest_path = extracted_bundle_root / manifest_name
+        if not bundle_manifest_path.is_file():
+            raise SystemExit(
+                f"Extracted compatibility bundle manifest is missing: {bundle_manifest_path}"
+            )
+        bundle_manifest = json.loads(bundle_manifest_path.read_text(encoding="utf-8"))
+        if bundle_manifest.get("kind") != "omnigent-stock-codex-compat-bundle":
+            raise SystemExit(f"Compatibility bundle manifest kind mismatch: {bundle_manifest!r}")
+        runtime_root_raw = bundle_manifest.get("runtimeRoot")
+        installer_raw = bundle_manifest.get("installer")
+        if not isinstance(runtime_root_raw, str) or not runtime_root_raw:
+            raise SystemExit(f"Compatibility bundle omitted runtimeRoot: {bundle_manifest!r}")
+        if not isinstance(installer_raw, str) or not installer_raw:
+            raise SystemExit(f"Compatibility bundle omitted installer: {bundle_manifest!r}")
+        extracted_runtime_root = (extracted_bundle_root / runtime_root_raw).resolve()
+        installer_script_path = (extracted_bundle_root / installer_raw).resolve()
+        if extracted_runtime_root == source_repo_root.resolve():
+            raise SystemExit("Compatibility bundle proof reused the development checkout.")
+        if not extracted_runtime_root.is_dir():
+            raise SystemExit(
+                f"Extracted compatibility runtime root is missing: {extracted_runtime_root}"
+            )
+        if not installer_script_path.is_file():
+            raise SystemExit(
+                f"Extracted compatibility installer is missing: {installer_script_path}"
+            )
+
+        clean_bin_dir = clean_home / ".local" / "bin"
+        launcher_path = clean_bin_dir / "omnigent-stock-codex-compat"
+        manifest_path = (
+            clean_home / ".local" / "omnigent" / "launchers" / "stock-codex-compat.json"
+        )
+        adapter_package_dir = (
+            clean_home / ".local" / "omnigent" / "stock-codex-compat" / "adapter-package"
+        )
+        adapter_bridge_dir = (
+            clean_home / ".local" / "omnigent" / "stock-codex-compat" / "adapter-bridge"
+        )
+        proof_path = (
+            f"{clean_bin_dir}{os.pathsep}{uvx_path.parent}{os.pathsep}"
+            f"{os.environ.get('PATH', '')}"
+        )
+        python_path = str(extracted_runtime_root)
+        if os.environ.get("PYTHONPATH"):
+            python_path = f"{python_path}{os.pathsep}{os.environ['PYTHONPATH']}"
+        env = os.environ.copy()
+        env.update(
+            {
+                "HOME": str(clean_home),
+                "TMPDIR": str(clean_tmp),
+                "PATH": proof_path,
+                "PYTHONPATH": python_path,
+            }
+        )
+        env.pop("CODEX_HOME", None)
+        env.pop(OMNIGENT_STOCK_CODEX_PATH_ENV, None)
+
+        adapter_payload = _run_stock_codex_compat_installer_cli_json(
+            ["--install-adapter-package"],
+            env=env,
+            repo_root=extracted_runtime_root,
+            script_path=installer_script_path,
+        )
+        install_payload = _run_stock_codex_compat_installer_cli_json(
+            [
+                "--install",
+                "--pinned-codex-path",
+                str(stock_codex_path),
+                "--repo-root",
+                str(extracted_runtime_root),
+                "--uvx-path",
+                str(uvx_path),
+                "--require-path-selected",
+            ],
+            env=env,
+            repo_root=extracted_runtime_root,
+            script_path=installer_script_path,
+        )
+        launcher_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        launcher_repo_root_raw = launcher_manifest.get("repoRoot")
+        if not isinstance(launcher_repo_root_raw, str) or not launcher_repo_root_raw:
+            raise SystemExit(
+                f"Installed launcher manifest omitted repoRoot: {launcher_manifest!r}"
+            )
+        launcher_manifest_repo_root = Path(launcher_repo_root_raw).expanduser().resolve()
+        if launcher_manifest_repo_root != extracted_runtime_root:
+            raise SystemExit(
+                "Bundle install wrote the wrong runtime root into the launcher manifest.\n"
+                f"expected={extracted_runtime_root}\nactual={launcher_manifest_repo_root}"
+            )
+
+        selected = shutil.which("omnigent-stock-codex-compat", path=env["PATH"])
+        if selected is None:
+            raise SystemExit("Bundle install proof did not select compatibility command.")
+        selected_command_path = Path(selected).expanduser().resolve()
+        if selected_command_path != launcher_path.resolve():
+            raise SystemExit(
+                "Bundle install proof selected the wrong compatibility command.\n"
+                f"expected={launcher_path.resolve()}\nactual={selected_command_path}"
+            )
+        version = subprocess.run(
+            [str(selected_command_path), "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=10,
+        )
+        version_output = (version.stdout or version.stderr).strip()
+        if version.returncode != 0 or version_output != stock_codex_version:
+            raise SystemExit(
+                "Bundle install proof version delegation failed.\n"
+                f"expected={stock_codex_version!r}\nactual={version_output!r}\n"
+                f"exit={version.returncode}"
+            )
+        probe = subprocess.run(
+            [str(selected_command_path), "--omnigent-stock-codex-compat-launcher-probe"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=10,
+        )
+        probe_output = ((probe.stdout or "") + (probe.stderr or "")).strip()
+        if probe.returncode != 0 or "OMNIGENT_STOCK_CODEX_COMPAT_LAUNCHER_OK" not in (
+            probe_output
+        ):
+            raise SystemExit(
+                "Bundle install proof launcher probe failed.\n"
+                f"exit={probe.returncode}\noutput={probe_output}"
+            )
+        if str(extracted_runtime_root) not in probe_output:
+            raise SystemExit(
+                "Bundle install proof launcher probe did not delegate to extracted runtime.\n"
+                f"expected_runtime={extracted_runtime_root}\noutput={probe_output}"
+            )
+
+        doctor_payload = _run_stock_codex_compat_installer_cli_json(
+            [
+                "--doctor",
+                "--pinned-codex-path",
+                str(stock_codex_path),
+                "--repo-root",
+                str(extracted_runtime_root),
+                "--uvx-path",
+                str(uvx_path),
+                "--require-path-selected",
+                "--force",
+            ],
+            env=env,
+            repo_root=extracted_runtime_root,
+            script_path=installer_script_path,
+        )
+        if doctor_payload.get("installAllowed") is not True:
+            raise SystemExit(f"Bundle install doctor did not allow reinstall: {doctor_payload!r}")
+        if doctor_payload.get("targetSelectedOnPath") is not True:
+            raise SystemExit(
+                f"Bundle install doctor did not see PATH selection: {doctor_payload!r}"
+            )
+        if doctor_payload.get("mutatesFilesystem") is not False:
+            raise SystemExit(f"Bundle install doctor unexpectedly mutates: {doctor_payload!r}")
+
+        rollback_payload = _run_stock_codex_compat_installer_cli_json(
+            ["--uninstall"],
+            env=env,
+            repo_root=extracted_runtime_root,
+            script_path=installer_script_path,
+        )
+        launcher_removed = not launcher_path.exists()
+        manifest_removed = not manifest_path.exists()
+        if not launcher_removed or not manifest_removed:
+            raise SystemExit(
+                "Bundle install rollback left launcher artifacts behind.\n"
+                f"launcher_exists={launcher_path.exists()}\n"
+                f"manifest_exists={manifest_path.exists()}"
+            )
+
+        return StockCodexCompatBundleInstallProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            bundle_path=bundle_path,
+            bundle_sha256=bundle_sha256,
+            bundle_manifest_path=bundle_manifest_path,
+            extracted_bundle_root=extracted_bundle_root,
+            extracted_runtime_root=extracted_runtime_root,
+            installer_script_path=installer_script_path,
+            clean_home=clean_home,
+            clean_bin_dir=clean_bin_dir,
+            launcher_path=launcher_path,
+            manifest_path=manifest_path,
+            adapter_package_dir=adapter_package_dir,
+            adapter_bin=Path(str(adapter_payload["adapterBin"])),
+            adapter_manifest=Path(str(adapter_payload["adapterManifest"])),
+            adapter_bridge_dir=adapter_bridge_dir,
+            adapter_tool_names=tuple(
+                str(name) for name in adapter_payload.get("adapterToolNames", [])
+            ),
+            uvx_path=uvx_path,
+            selected_command_path=selected_command_path,
+            launcher_manifest_repo_root=launcher_manifest_repo_root,
+            version_output=version_output,
+            probe_output=probe_output,
+            adapter_package_action=str(adapter_payload["action"]),
+            install_action=str(install_payload["action"]),
+            rollback_action=str(rollback_payload["action"]),
+            doctor_install_allowed=bool(doctor_payload["installAllowed"]),
+            doctor_existing_target_state=str(doctor_payload["existingTargetState"]),
+            doctor_existing_target_managed=bool(doctor_payload["existingTargetManaged"]),
+            doctor_target_selected_on_path=bool(doctor_payload["targetSelectedOnPath"]),
+            doctor_mutates_filesystem=bool(doctor_payload["mutatesFilesystem"]),
+            launcher_removed_after_rollback=launcher_removed,
+            manifest_removed_after_rollback=manifest_removed,
+        )
+
+
+def _validate_stock_codex_compat_pkg_builder_payload(
+    payload: dict[str, Any],
+    *,
+    source_repo_root: Path,
+) -> StockCodexCompatPkgStructureProof:
+    """Validate compatibility pkg builder JSON and return common proof evidence."""
+    if payload.get("kind") != "omnigent-stock-codex-compat-pkg":
+        raise SystemExit(f"Compatibility pkg kind mismatch: {payload!r}")
+    package_path = Path(_json_string(payload, "packagePath")).resolve()
+    package_sha256 = _json_string(payload, "packageSha256")
+    if sha256_file(package_path) != package_sha256:
+        raise SystemExit(
+            "Compatibility pkg digest mismatch after build.\n"
+            f"package={package_path}\nexpected={package_sha256}"
+        )
+    inspection = payload.get("inspection")
+    if not isinstance(inspection, dict):
+        raise SystemExit(f"Compatibility pkg proof omitted inspection: {payload!r}")
+    package_identifier = _json_string(payload, "packageIdentifier")
+    package_version = _json_string(payload, "packageVersion")
+    install_location = _json_string(payload, "installLocation")
+    install_prefix = Path(_json_string(payload, "installPrefix"))
+    runtime_root = Path(_json_string(payload, "runtimeRoot"))
+    source_bundle_sha256 = _json_string(payload, "sourceBundleSha256")
+    if len(source_bundle_sha256) != 64:
+        raise SystemExit(
+            "Compatibility pkg source bundle digest was not a SHA-256.\n"
+            f"sourceBundleSha256={source_bundle_sha256!r}"
+        )
+    if package_identifier != "ai.omnigent.stock-codex-compat":
+        raise SystemExit(f"Compatibility pkg identifier mismatch: {package_identifier!r}")
+    if install_location != "/":
+        raise SystemExit(f"Compatibility pkg install location mismatch: {install_location!r}")
+    if str(install_prefix) != "/Library/Application Support/Omnigent/stock-codex-compat":
+        raise SystemExit(f"Compatibility pkg install prefix mismatch: {install_prefix}")
+    if str(runtime_root) != f"{install_prefix}/runtime":
+        raise SystemExit(f"Compatibility pkg runtime root mismatch: {runtime_root}")
+    if inspection.get("signed") is not False:
+        raise SystemExit(f"Compatibility pkg was expected to be unsigned: {inspection!r}")
+    if inspection.get("signatureStatus") != "no signature":
+        raise SystemExit(f"Compatibility pkg signature status mismatch: {inspection!r}")
+    if inspection.get("allRequiredPayloadFilesPresent") is not True:
+        raise SystemExit(
+            "Compatibility pkg missed required payload files.\n"
+            f"required={inspection.get('requiredPayloadFiles')!r}"
+        )
+    script_names_raw = inspection.get("scriptNames")
+    if not isinstance(script_names_raw, list) or "postinstall" not in script_names_raw:
+        raise SystemExit(f"Compatibility pkg missed postinstall script: {inspection!r}")
+    archive_entries_raw = inspection.get("archiveEntries")
+    if not isinstance(archive_entries_raw, list):
+        raise SystemExit(f"Compatibility pkg archive entries missing: {inspection!r}")
+    for required_entry in ("Bom", "PackageInfo", "Payload", "Scripts"):
+        if required_entry not in archive_entries_raw:
+            raise SystemExit(
+                "Compatibility pkg missed flat-package archive entry.\n"
+                f"entry={required_entry!r}\narchive={archive_entries_raw!r}"
+            )
+    required_payload_raw = inspection.get("requiredPayloadFiles")
+    if not isinstance(required_payload_raw, dict):
+        raise SystemExit(f"Compatibility pkg required payload map missing: {inspection!r}")
+    required_payload = {str(key): bool(value) for key, value in required_payload_raw.items()}
+    pkg_manifest_raw = inspection.get("pkgManifest")
+    bundle_manifest_raw = inspection.get("bundleManifest")
+    if not isinstance(pkg_manifest_raw, dict):
+        raise SystemExit(f"Compatibility pkg manifest missing: {inspection!r}")
+    if not isinstance(bundle_manifest_raw, dict):
+        raise SystemExit(f"Compatibility bundle manifest missing: {inspection!r}")
+    pkg_contract_raw = pkg_manifest_raw.get("contract")
+    if not isinstance(pkg_contract_raw, dict):
+        raise SystemExit(f"Compatibility pkg contract missing: {pkg_manifest_raw!r}")
+    if pkg_contract_raw.get("runtime") != "machine-level-runtime-only":
+        raise SystemExit(f"Compatibility pkg runtime contract mismatch: {pkg_contract_raw!r}")
+    if pkg_contract_raw.get("userBootstrap") != "deferred-to-installed-runtime-command":
+        raise SystemExit(
+            f"Compatibility pkg bootstrap contract mismatch: {pkg_contract_raw!r}"
+        )
+    bundle_source_root = bundle_manifest_raw.get("sourceRoot")
+    if bundle_source_root != "<omitted-from-pkg>":
+        raise SystemExit(
+            "Compatibility pkg should not embed the development checkout path in "
+            f"bundle-manifest.json: {bundle_manifest_raw!r}"
+        )
+    source_root_text = str(source_repo_root)
+    manifest_text = json.dumps(
+        {"pkgManifest": pkg_manifest_raw, "bundleManifest": bundle_manifest_raw},
+        sort_keys=True,
+    )
+    if source_root_text in manifest_text:
+        raise SystemExit(
+            "Compatibility pkg manifests embedded the development checkout path.\n"
+            f"source_root={source_root_text}"
+        )
+    payload_file_count_raw = inspection.get("payloadFileCount")
+    if not isinstance(payload_file_count_raw, int) or payload_file_count_raw <= 0:
+        raise SystemExit(f"Compatibility pkg payload file count invalid: {inspection!r}")
+
+    return StockCodexCompatPkgStructureProof(
+        package_path=package_path,
+        package_sha256=package_sha256,
+        source_bundle_sha256=source_bundle_sha256,
+        package_identifier=package_identifier,
+        package_version=package_version,
+        install_location=install_location,
+        install_prefix=install_prefix,
+        runtime_root=runtime_root,
+        payload_file_count=payload_file_count_raw,
+        required_payload_files=required_payload,
+        script_names=tuple(str(name) for name in script_names_raw),
+        archive_entries=tuple(str(entry) for entry in archive_entries_raw),
+        signature_status=str(inspection.get("signatureStatus")),
+        signed=bool(inspection.get("signed")),
+        pkg_manifest_path=Path(_json_string(inspection, "pkgManifestPath")),
+        bundle_manifest_path=Path(_json_string(inspection, "bundleManifestPath")),
+        pkg_contract={str(key): value for key, value in pkg_contract_raw.items()},
+        bundle_source_root=str(bundle_source_root),
+    )
+
+
+def run_stock_codex_compat_pkg_structure_proof() -> StockCodexCompatPkgStructureProof:
+    """Build and inspect an unsigned flat pkg without installing it."""
+    source_repo_root = Path(__file__).resolve().parents[1]
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-pkg-structure-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        artifact_dir = root / "artifacts"
+        artifact_dir.mkdir()
+        package_path = artifact_dir / "omnigent-stock-codex-compat.pkg"
+        payload = _run_stock_codex_compat_pkg_builder_cli_json(
+            [
+                "--repo-root",
+                str(source_repo_root),
+                "--output",
+                str(package_path),
+                "--force",
+            ],
+            repo_root=source_repo_root,
+        )
+        return _validate_stock_codex_compat_pkg_builder_payload(
+            payload,
+            source_repo_root=source_repo_root,
+        )
+
+
+def _expand_stock_codex_compat_pkg(package_path: Path, expand_dir: Path) -> Path:
+    """Expand a flat compatibility pkg and return the expanded payload root."""
+    pkgutil = shutil.which("pkgutil")
+    if not pkgutil:
+        raise SystemExit("Could not find pkgutil on PATH for compatibility pkg proof.")
+    if expand_dir.exists():
+        shutil.rmtree(expand_dir)
+    completed = subprocess.run(
+        [pkgutil, "--expand-full", str(package_path), str(expand_dir)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if completed.returncode != 0:
+        raise SystemExit(
+            "Compatibility pkg expansion failed.\n"
+            f"package={package_path}\n"
+            f"exit={completed.returncode}\n"
+            f"stdout={completed.stdout}\n"
+            f"stderr={completed.stderr}"
+        )
+    payload_root = expand_dir / "Payload"
+    if not payload_root.is_dir():
+        raise SystemExit(f"Expanded compatibility pkg payload is missing: {payload_root}")
+    return payload_root
+
+
+def _validate_expanded_stock_codex_compat_runtime(
+    *,
+    payload_root: Path,
+    packaged_runtime_root: Path,
+    source_repo_root: Path,
+) -> Path:
+    """Return the expanded runtime root or fail if the pkg runtime is incomplete."""
+    expanded_runtime_root = (payload_root / packaged_runtime_root.relative_to("/")).resolve()
+    if expanded_runtime_root == source_repo_root.resolve():
+        raise SystemExit("Expanded compatibility pkg runtime reused the development checkout.")
+    if not expanded_runtime_root.is_dir():
+        raise SystemExit(
+            f"Expanded compatibility pkg runtime root is missing: {expanded_runtime_root}"
+        )
+    required_runtime_files = (
+        Path("pyproject.toml"),
+        Path("scripts") / "install_stock_codex_compat_launcher.py",
+        Path("scripts") / "provision_stock_codex.py",
+        Path("omnigent") / "stock_codex_compat_wrapper.py",
+    )
+    missing = [
+        relative
+        for relative in required_runtime_files
+        if not (expanded_runtime_root / relative).is_file()
+    ]
+    if missing:
+        raise SystemExit(
+            "Expanded compatibility pkg runtime missed required files.\n"
+            f"runtime_root={expanded_runtime_root}\n"
+            f"missing={','.join(str(path) for path in missing)}"
+        )
+    return expanded_runtime_root
+
+
+def _stage_stock_codex_compat_pkg_install_root(
+    *,
+    payload_root: Path,
+    install_root: Path,
+    packaged_runtime_root: Path,
+    source_repo_root: Path,
+) -> Path:
+    """Copy a pkg payload into a temp install root and return its runtime root."""
+    if install_root.exists():
+        shutil.rmtree(install_root)
+    install_root.mkdir(parents=True)
+    for child in payload_root.iterdir():
+        target = install_root / child.name
+        if child.is_dir():
+            shutil.copytree(child, target, symlinks=True)
+        else:
+            shutil.copy2(child, target)
+    return _validate_expanded_stock_codex_compat_runtime(
+        payload_root=install_root,
+        packaged_runtime_root=packaged_runtime_root,
+        source_repo_root=source_repo_root,
+    )
+
+
+def _run_shell_command_for_proof(
+    command: str,
+    *,
+    env: Mapping[str, str],
+    cwd: Path,
+    timeout: float = 60.0,
+) -> subprocess.CompletedProcess[str]:
+    """Execute generated shell metadata in a proof-scoped environment."""
+    completed = subprocess.run(
+        command,
+        shell=True,
+        executable="/bin/sh",
+        check=False,
+        capture_output=True,
+        text=True,
+        env=dict(env),
+        cwd=cwd,
+        timeout=timeout,
+    )
+    if completed.returncode != 0:
+        raise SystemExit(
+            "Generated proof command failed.\n"
+            f"command={command}\n"
+            f"exit={completed.returncode}\n"
+            f"stdout={completed.stdout}\n"
+            f"stderr={completed.stderr}"
+        )
+    return completed
+
+
+def run_stock_codex_compat_pkg_runtime_live_proof(
+    source_bundle: Path,
+    stock_codex_path: Path,
+    *,
+    workspace_root: Path,
+    timeout_seconds: float,
+) -> StockCodexCompatPkgRuntimeLiveProof:
+    """Run a real stock Codex turn through an expanded compatibility pkg runtime."""
+    source_bundle = source_bundle.expanduser().resolve()
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    workspace_root = workspace_root.expanduser().resolve()
+    source_repo_root = Path(__file__).resolve().parents[1]
+    stock_codex_version = codex_version(stock_codex_path)
+    uvx_raw = shutil.which("uvx")
+    if not uvx_raw:
+        raise SystemExit("Could not find uvx on PATH for compatibility pkg live proof.")
+    uvx_path = Path(uvx_raw).expanduser().resolve()
+    if not uvx_path.is_file() or not os.access(uvx_path, os.X_OK):
+        raise SystemExit(f"uvx binary is not executable: {uvx_path}")
+    auth_path, auth_source = _stock_replacement_auth_source()
+    if not codex_native._codex_auth_json_has_available_credential(auth_path):
+        raise SystemExit(
+            "Current real Codex auth source is not available; cannot run live "
+            "stock-codex-compat-pkg-runtime proof.\n"
+            f"auth_path={auth_path}\n"
+            f"auth_source={auth_source}"
+        )
+
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-pkg-runtime-live-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        artifact_dir = root / "artifacts"
+        artifact_dir.mkdir()
+        package_path = artifact_dir / "omnigent-stock-codex-compat.pkg"
+        payload = _run_stock_codex_compat_pkg_builder_cli_json(
+            [
+                "--repo-root",
+                str(source_repo_root),
+                "--output",
+                str(package_path),
+                "--force",
+            ],
+            repo_root=source_repo_root,
+        )
+        package_proof = _validate_stock_codex_compat_pkg_builder_payload(
+            payload,
+            source_repo_root=source_repo_root,
+        )
+        expanded_payload_root = _expand_stock_codex_compat_pkg(
+            package_proof.package_path,
+            root / "pkg-expanded",
+        )
+        expanded_runtime_root = _validate_expanded_stock_codex_compat_runtime(
+            payload_root=expanded_payload_root,
+            packaged_runtime_root=package_proof.runtime_root,
+            source_repo_root=source_repo_root,
+        )
+
+        codex_home = root / "codex-home"
+        temp_home = root / "home"
+        bridge_dir = root / "omnigent-bridge"
+        marketplace_root = root / "local-apple-workflow-marketplace"
+        wrapper_evidence_path = root / "wrapper-evidence.json"
+        codex_home.mkdir(mode=0o700)
+        temp_home.mkdir(mode=0o700)
+        (codex_home / "auth.json").symlink_to(auth_path)
+
+        _write_stock_codex_compat_marketplace(
+            source_bundle=source_bundle,
+            marketplace_root=marketplace_root,
+        )
+        env = _stock_codex_compat_env(home=temp_home, codex_home=codex_home)
+        env["PATH"] = f"{uvx_path.parent}{os.pathsep}{env.get('PATH', '')}"
+        env.pop("PYTHONPATH", None)
+        enabled_features = _stock_codex_supported_feature_names(stock_codex_path, env=env)
+        feature_args = _stock_codex_enable_feature_args(enabled_features)
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "marketplace", "add", str(marketplace_root), "--json"],
+            env=env,
+        )
+        _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "add", STOCK_CODEX_COMPAT_PLUGIN_ID, "--json"],
+            env=env,
+        )
+        plugin_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["plugin", "list", "--json"],
+            env=env,
+        )
+        _validate_stock_codex_compat_plugin_state(
+            marketplace_list_output=_run_stock_codex_json(
+                stock_codex_path,
+                ["plugin", "marketplace", "list", "--json"],
+                env=env,
+            ),
+            plugin_list_output=plugin_list_output,
+            installed_plugin_path=(
+                codex_home
+                / "plugins"
+                / "cache"
+                / STOCK_CODEX_COMPAT_MARKETPLACE
+                / PLUGIN_NAME
+                / "0.1.1"
+            ),
+        )
+
+        write_mcp_bridge_config(bridge_dir)
+        write_policy_hook_config(
+            bridge_dir,
+            ap_server_url=STOCK_CODEX_COMPAT_AP_SERVER_URL,
+            ap_auth_headers={},
+        )
+        _inject_mcp_server_config(codex_home, bridge_dir, sys.executable)
+        _write_codex_policy_hooks_file(codex_home, bridge_dir, sys.executable)
+        mcp_list_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "list", "--json"],
+            env=env,
+        )
+        mcp_omnigent_output = _run_stock_codex_json(
+            stock_codex_path,
+            ["mcp", "get", "omnigent", "--json"],
+            env=env,
+        )
+        _hook_events, mcp_servers, _mcp_command, _mcp_args = _validate_stock_codex_compat_bridge(
+            codex_home=codex_home,
+            bridge_dir=bridge_dir,
+            mcp_list_output=mcp_list_output,
+            mcp_omnigent_output=mcp_omnigent_output,
+        )
+
+        prompt = (
+            "No-tool stock-codex-compat package runtime live proof for a "
+            "SwiftUI workflow. Do not inspect files, do not run commands, "
+            f"and do not explain. Reply exactly {STOCK_CODEX_COMPAT_LIVE_SENTINEL}."
+        )
+        wrapper_command = (
+            str(uvx_path),
+            "--from",
+            str(expanded_runtime_root),
+            "omnigent-stock-codex-wrapper",
+            "--stock-codex-path",
+            str(stock_codex_path),
+            "--route-prefix",
+            EXPECTED_ROUTE,
+            "--evidence-path",
+            str(wrapper_evidence_path),
+            "--",
+            "exec",
+            *feature_args,
+            "--json",
+            "--dangerously-bypass-hook-trust",
+            "--skip-git-repo-check",
+            "--sandbox",
+            "read-only",
+            "-C",
+            str(workspace_root),
+            prompt,
+        )
+        completed = subprocess.run(
+            list(wrapper_command),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds if timeout_seconds > 0 else None,
+            env=env,
+            cwd=expanded_runtime_root,
+            stdin=subprocess.DEVNULL,
+        )
+        stderr_preview = _preview_text(completed.stderr, limit=2000)
+        if completed.returncode != 0:
+            raise SystemExit(
+                "Live stock-codex-compat-pkg-runtime command failed.\n"
+                f"exit={completed.returncode}\n"
+                f"stderr={stderr_preview}\n"
+                f"stdout_preview={_preview_text(completed.stdout, limit=2000)}"
+            )
+        events = _parse_stock_codex_exec_jsonl(completed.stdout)
+        thread_id, first_agent_message = _validate_stock_codex_compat_live_events(events)
+        if not first_agent_message.startswith(EXPECTED_ROUTE):
+            raise SystemExit(
+                "Live stock-codex-compat-pkg-runtime proof did not emit "
+                "deterministic route evidence before model output.\n"
+                f"expected_prefix={EXPECTED_ROUTE!r}\n"
+                f"first_agent_message={first_agent_message!r}\n"
+                f"sentinel={STOCK_CODEX_COMPAT_LIVE_SENTINEL!r}"
+            )
+        wrapper_evidence = _read_stock_codex_compat_wrapper_evidence(wrapper_evidence_path)
+        if wrapper_evidence["routeInjected"] is not True:
+            raise SystemExit(
+                "Live stock-codex-compat-pkg-runtime proof did not prove "
+                "wrapper-owned route injection.\n"
+                f"evidence={wrapper_evidence!r}"
+            )
+
+        return StockCodexCompatPkgRuntimeLiveProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            source_bundle=source_bundle,
+            package_path=package_proof.package_path,
+            package_sha256=package_proof.package_sha256,
+            source_bundle_sha256=package_proof.source_bundle_sha256,
+            package_identifier=package_proof.package_identifier,
+            package_version=package_proof.package_version,
+            install_prefix=package_proof.install_prefix,
+            packaged_runtime_root=package_proof.runtime_root,
+            expanded_payload_root=expanded_payload_root,
+            expanded_runtime_root=expanded_runtime_root,
+            uvx_path=uvx_path,
+            wrapper_command=wrapper_command,
+            codex_home=codex_home,
+            auth_path=auth_path,
+            bridge_dir=bridge_dir,
+            workspace_root=workspace_root,
+            enabled_features=enabled_features,
+            thread_id=thread_id,
+            first_agent_message=first_agent_message,
+            first_agent_message_before_wrapper=str(
+                wrapper_evidence["firstAgentMessageBefore"]
+            ),
+            route_injected=bool(wrapper_evidence["routeInjected"]),
+            wrapper_evidence_path=wrapper_evidence_path,
+            event_count=len(events),
+            mcp_servers=mcp_servers,
+            stderr_preview=stderr_preview,
+        )
+
+
+def run_stock_codex_compat_pkg_user_bootstrap_proof(
+    stock_codex_path: Path,
+    *,
+    uvx_path: Path | None = None,
+) -> StockCodexCompatPkgUserBootstrapProof:
+    """Prove a pkg-installed runtime can bootstrap a clean user's launcher."""
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    assert_stock_codex_path(stock_codex_path, allow_fork_codex=False)
+    stock_codex_version = codex_version(stock_codex_path)
+    uvx_path = uvx_path.expanduser().resolve() if uvx_path is not None else None
+    if uvx_path is None:
+        uvx_raw = shutil.which("uvx")
+        if not uvx_raw:
+            raise SystemExit("Could not find uvx on PATH for pkg bootstrap proof.")
+        uvx_path = Path(uvx_raw).expanduser().resolve()
+    if not uvx_path.is_file() or not os.access(uvx_path, os.X_OK):
+        raise SystemExit(f"uvx binary is not executable: {uvx_path}")
+
+    source_repo_root = Path(__file__).resolve().parents[1]
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-pkg-user-bootstrap-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        artifact_dir = root / "artifacts"
+        artifact_dir.mkdir()
+        package_path = artifact_dir / "omnigent-stock-codex-compat.pkg"
+        payload = _run_stock_codex_compat_pkg_builder_cli_json(
+            [
+                "--repo-root",
+                str(source_repo_root),
+                "--output",
+                str(package_path),
+                "--force",
+            ],
+            repo_root=source_repo_root,
+        )
+        package_proof = _validate_stock_codex_compat_pkg_builder_payload(
+            payload,
+            source_repo_root=source_repo_root,
+        )
+        expanded_payload_root = _expand_stock_codex_compat_pkg(
+            package_proof.package_path,
+            root / "pkg-expanded",
+        )
+        install_root = root / "installed-root"
+        installed_runtime_root = _stage_stock_codex_compat_pkg_install_root(
+            payload_root=expanded_payload_root,
+            install_root=install_root,
+            packaged_runtime_root=package_proof.runtime_root,
+            source_repo_root=source_repo_root,
+        )
+        installed_prefix = install_root / package_proof.install_prefix.relative_to("/")
+        installer_script_path = (
+            installed_runtime_root / "scripts" / "install_stock_codex_compat_launcher.py"
+        )
+        pkg_manifest_path = installed_prefix / "pkg-manifest.json"
+        bundle_manifest_path = installed_prefix / "bundle-manifest.json"
+        pkg_manifest = json.loads(pkg_manifest_path.read_text(encoding="utf-8"))
+        bundle_manifest = json.loads(bundle_manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(pkg_manifest, dict) or not isinstance(bundle_manifest, dict):
+            raise SystemExit("Installed compatibility pkg manifests were not JSON objects.")
+        pkg_contract = pkg_manifest.get("contract")
+        if not isinstance(pkg_contract, dict):
+            raise SystemExit(f"Installed compatibility pkg contract missing: {pkg_manifest!r}")
+        if pkg_contract.get("userBootstrap") != "deferred-to-installed-runtime-command":
+            raise SystemExit(
+                "Installed compatibility bootstrap contract mismatch: "
+                f"{pkg_contract!r}"
+            )
+        if bundle_manifest.get("sourceRoot") != "<omitted-from-pkg>":
+            raise SystemExit(
+                "Installed compatibility bundle manifest embedded source root: "
+                f"{bundle_manifest!r}"
+            )
+
+        clean_home = root / "home"
+        clean_tmp = root / "tmp"
+        clean_home.mkdir()
+        clean_tmp.mkdir()
+        clean_bin_dir = clean_home / ".local" / "bin"
+        launcher_path = clean_bin_dir / "omnigent-stock-codex-compat"
+        manifest_path = (
+            clean_home / ".local" / "omnigent" / "launchers" / "stock-codex-compat.json"
+        )
+        adapter_package_dir = (
+            clean_home / ".local" / "omnigent" / "stock-codex-compat" / "adapter-package"
+        )
+        adapter_bridge_dir = (
+            clean_home / ".local" / "omnigent" / "stock-codex-compat" / "adapter-bridge"
+        )
+        proof_path = (
+            f"{clean_bin_dir}{os.pathsep}{uvx_path.parent}{os.pathsep}"
+            f"{os.environ.get('PATH', '')}"
+        )
+        python_path = str(installed_runtime_root)
+        if os.environ.get("PYTHONPATH"):
+            python_path = f"{python_path}{os.pathsep}{os.environ['PYTHONPATH']}"
+        env = os.environ.copy()
+        env.update(
+            {
+                "HOME": str(clean_home),
+                "TMPDIR": str(clean_tmp),
+                "PATH": proof_path,
+                "PYTHONPATH": python_path,
+            }
+        )
+        env.pop("CODEX_HOME", None)
+        env.pop(OMNIGENT_STOCK_CODEX_PATH_ENV, None)
+
+        adapter_payload = _run_stock_codex_compat_installer_cli_json(
+            ["--install-adapter-package"],
+            env=env,
+            repo_root=installed_runtime_root,
+            script_path=installer_script_path,
+        )
+        install_payload = _run_stock_codex_compat_installer_cli_json(
+            [
+                "--install",
+                "--pinned-codex-path",
+                str(stock_codex_path),
+                "--repo-root",
+                str(installed_runtime_root),
+                "--uvx-path",
+                str(uvx_path),
+                "--require-path-selected",
+            ],
+            env=env,
+            repo_root=installed_runtime_root,
+            script_path=installer_script_path,
+        )
+        selected = shutil.which("omnigent-stock-codex-compat", path=env["PATH"])
+        if selected is None:
+            raise SystemExit("Pkg bootstrap proof did not select compatibility command.")
+        selected_command_path = Path(selected).expanduser().resolve()
+        if selected_command_path != launcher_path.resolve():
+            raise SystemExit(
+                "Pkg bootstrap proof selected the wrong compatibility command.\n"
+                f"expected={launcher_path.resolve()}\nactual={selected_command_path}"
+            )
+        version = subprocess.run(
+            [str(selected_command_path), "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=10,
+        )
+        version_output = (version.stdout or version.stderr).strip()
+        if version.returncode != 0 or version_output != stock_codex_version:
+            raise SystemExit(
+                "Pkg bootstrap proof version delegation failed.\n"
+                f"expected={stock_codex_version!r}\nactual={version_output!r}\n"
+                f"exit={version.returncode}"
+            )
+        probe = subprocess.run(
+            [str(selected_command_path), "--omnigent-stock-codex-compat-launcher-probe"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=10,
+        )
+        probe_output = ((probe.stdout or "") + (probe.stderr or "")).strip()
+        if probe.returncode != 0 or "OMNIGENT_STOCK_CODEX_COMPAT_LAUNCHER_OK" not in (
+            probe_output
+        ):
+            raise SystemExit(
+                "Pkg bootstrap proof launcher probe failed.\n"
+                f"exit={probe.returncode}\noutput={probe_output}"
+            )
+        if str(installed_runtime_root) not in probe_output:
+            raise SystemExit(
+                "Pkg bootstrap proof launcher probe did not delegate to installed runtime.\n"
+                f"expected_runtime={installed_runtime_root}\noutput={probe_output}"
+            )
+        launcher_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        launcher_repo_root_raw = launcher_manifest.get("repoRoot")
+        if not isinstance(launcher_repo_root_raw, str) or not launcher_repo_root_raw:
+            raise SystemExit(
+                f"Installed launcher manifest omitted repoRoot: {launcher_manifest!r}"
+            )
+        launcher_manifest_repo_root = Path(launcher_repo_root_raw).expanduser().resolve()
+        if launcher_manifest_repo_root != installed_runtime_root:
+            raise SystemExit(
+                "Pkg bootstrap wrote the wrong runtime root into the launcher manifest.\n"
+                f"expected={installed_runtime_root}\nactual={launcher_manifest_repo_root}"
+            )
+        wrapper_entrypoint = launcher_manifest.get("wrapperEntrypoint")
+        if wrapper_entrypoint != "omnigent-stock-codex-wrapper":
+            raise SystemExit(
+                "Pkg bootstrap launcher manifest had wrong wrapper entrypoint: "
+                f"{launcher_manifest!r}"
+            )
+        manifest_tool_names_raw = launcher_manifest.get("adapterToolNames")
+        if not isinstance(manifest_tool_names_raw, list) or not all(
+            isinstance(item, str) for item in manifest_tool_names_raw
+        ):
+            raise SystemExit(
+                "Pkg bootstrap launcher manifest omitted adapter tool names: "
+                f"{launcher_manifest!r}"
+            )
+
+        doctor_payload = _run_stock_codex_compat_installer_cli_json(
+            [
+                "--doctor",
+                "--pinned-codex-path",
+                str(stock_codex_path),
+                "--repo-root",
+                str(installed_runtime_root),
+                "--uvx-path",
+                str(uvx_path),
+                "--require-path-selected",
+                "--force",
+            ],
+            env=env,
+            repo_root=installed_runtime_root,
+            script_path=installer_script_path,
+        )
+        if doctor_payload.get("installAllowed") is not True:
+            raise SystemExit(f"Pkg bootstrap doctor did not allow update: {doctor_payload!r}")
+        if doctor_payload.get("existingTargetState") != "managed":
+            raise SystemExit(f"Pkg bootstrap doctor missed managed launcher: {doctor_payload!r}")
+        if doctor_payload.get("targetSelectedOnPath") is not True:
+            raise SystemExit(
+                f"Pkg bootstrap doctor did not see PATH selection: {doctor_payload!r}"
+            )
+        if doctor_payload.get("mutatesFilesystem") is not False:
+            raise SystemExit(f"Pkg bootstrap doctor unexpectedly mutates: {doctor_payload!r}")
+
+        update_payload = _run_stock_codex_compat_installer_cli_json(
+            [
+                "--install",
+                "--pinned-codex-path",
+                str(stock_codex_path),
+                "--repo-root",
+                str(installed_runtime_root),
+                "--uvx-path",
+                str(uvx_path),
+                "--require-path-selected",
+                "--force",
+            ],
+            env=env,
+            repo_root=installed_runtime_root,
+            script_path=installer_script_path,
+        )
+        rollback_command_raw = update_payload.get("rollbackCommand")
+        if not isinstance(rollback_command_raw, str) or not rollback_command_raw:
+            raise SystemExit(f"Pkg bootstrap update omitted rollback command: {update_payload!r}")
+        if str(installed_runtime_root) not in rollback_command_raw:
+            raise SystemExit(
+                "Pkg bootstrap rollback command did not target installed runtime.\n"
+                f"expected_runtime={installed_runtime_root}\n"
+                f"rollback_command={rollback_command_raw}"
+            )
+        adapter_package_exists_after_install = (
+            adapter_package_dir.is_dir()
+            and Path(str(adapter_payload["adapterBin"])).is_dir()
+            and Path(str(adapter_payload["adapterManifest"])).is_file()
+        )
+        rollback = _run_shell_command_for_proof(
+            rollback_command_raw,
+            env=env,
+            cwd=installed_runtime_root,
+            timeout=240,
+        )
+        if "compat_launcher_action=uninstalled" not in rollback.stdout:
+            raise SystemExit(
+                "Pkg bootstrap generated rollback command did not uninstall launcher.\n"
+                f"stdout={rollback.stdout}\nstderr={rollback.stderr}"
+            )
+        launcher_removed = not launcher_path.exists()
+        manifest_removed = not manifest_path.exists()
+        if not launcher_removed or not manifest_removed:
+            raise SystemExit(
+                "Pkg bootstrap rollback left launcher artifacts behind.\n"
+                f"launcher_exists={launcher_path.exists()}\n"
+                f"manifest_exists={manifest_path.exists()}"
+            )
+
+        return StockCodexCompatPkgUserBootstrapProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            package_path=package_proof.package_path,
+            package_sha256=package_proof.package_sha256,
+            package_identifier=package_proof.package_identifier,
+            package_version=package_proof.package_version,
+            install_root=install_root,
+            installed_prefix=installed_prefix,
+            installed_runtime_root=installed_runtime_root,
+            installer_script_path=installer_script_path,
+            pkg_manifest_path=pkg_manifest_path,
+            bundle_manifest_path=bundle_manifest_path,
+            clean_home=clean_home,
+            clean_bin_dir=clean_bin_dir,
+            launcher_path=launcher_path,
+            manifest_path=manifest_path,
+            adapter_package_dir=adapter_package_dir,
+            adapter_bin=Path(str(adapter_payload["adapterBin"])),
+            adapter_manifest=Path(str(adapter_payload["adapterManifest"])),
+            adapter_bridge_dir=adapter_bridge_dir,
+            adapter_tool_names=tuple(
+                str(name) for name in adapter_payload.get("adapterToolNames", [])
+            ),
+            uvx_path=uvx_path,
+            selected_command_path=selected_command_path,
+            launcher_manifest_repo_root=launcher_manifest_repo_root,
+            launcher_manifest_wrapper_entrypoint=str(wrapper_entrypoint),
+            launcher_manifest_adapter_tool_names=tuple(manifest_tool_names_raw),
+            version_output=version_output,
+            probe_output=probe_output,
+            adapter_package_action=str(adapter_payload["action"]),
+            install_action=str(install_payload["action"]),
+            update_action=str(update_payload["action"]),
+            rollback_command=rollback_command_raw,
+            rollback_action="uninstalled",
+            doctor_install_allowed=bool(doctor_payload["installAllowed"]),
+            doctor_existing_target_state=str(doctor_payload["existingTargetState"]),
+            doctor_existing_target_managed=bool(doctor_payload["existingTargetManaged"]),
+            doctor_target_selected_on_path=bool(doctor_payload["targetSelectedOnPath"]),
+            doctor_mutates_filesystem=bool(doctor_payload["mutatesFilesystem"]),
+            adapter_package_exists_after_install=adapter_package_exists_after_install,
+            launcher_removed_after_rollback=launcher_removed,
+            manifest_removed_after_rollback=manifest_removed,
+        )
+
+
+def run_stock_codex_compat_pkg_clean_provision_proof(
+    stock_codex_path: Path,
+) -> StockCodexCompatPkgCleanProvisionProof:
+    """Prove a pkg-installed runtime can provision stock Codex into a clean cache."""
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    assert_stock_codex_path(stock_codex_path, allow_fork_codex=False)
+    stock_codex_realpath = stock_codex_path.resolve()
+    stock_codex_version = codex_version(stock_codex_realpath)
+    stock_codex_sha256 = sha256_file(stock_codex_realpath)
+
+    source_repo_root = Path(__file__).resolve().parents[1]
+    host_cache_root = (
+        Path.home() / ".local" / "omnigent" / "codex-stock"
+    ).expanduser().resolve()
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-pkg-clean-provision-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        artifact_dir = root / "artifacts"
+        artifact_dir.mkdir()
+        package_path = artifact_dir / "omnigent-stock-codex-compat.pkg"
+        payload = _run_stock_codex_compat_pkg_builder_cli_json(
+            [
+                "--repo-root",
+                str(source_repo_root),
+                "--output",
+                str(package_path),
+                "--force",
+            ],
+            repo_root=source_repo_root,
+        )
+        package_proof = _validate_stock_codex_compat_pkg_builder_payload(
+            payload,
+            source_repo_root=source_repo_root,
+        )
+        expanded_payload_root = _expand_stock_codex_compat_pkg(
+            package_proof.package_path,
+            root / "pkg-expanded",
+        )
+        install_root = root / "installed-root"
+        installed_runtime_root = _stage_stock_codex_compat_pkg_install_root(
+            payload_root=expanded_payload_root,
+            install_root=install_root,
+            packaged_runtime_root=package_proof.runtime_root,
+            source_repo_root=source_repo_root,
+        )
+        installed_prefix = install_root / package_proof.install_prefix.relative_to("/")
+        provisioner_script_path = installed_runtime_root / "scripts" / "provision_stock_codex.py"
+        if not provisioner_script_path.is_file():
+            raise SystemExit(
+                "Pkg-installed runtime is missing the stock Codex provisioner.\n"
+                f"expected={provisioner_script_path}"
+            )
+        pkg_manifest_path = installed_prefix / "pkg-manifest.json"
+        bundle_manifest_path = installed_prefix / "bundle-manifest.json"
+        pkg_manifest = json.loads(pkg_manifest_path.read_text(encoding="utf-8"))
+        bundle_manifest = json.loads(bundle_manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(pkg_manifest, dict) or not isinstance(bundle_manifest, dict):
+            raise SystemExit("Installed compatibility pkg manifests were not JSON objects.")
+        pkg_contract = pkg_manifest.get("contract")
+        if not isinstance(pkg_contract, dict):
+            raise SystemExit(f"Installed compatibility pkg contract missing: {pkg_manifest!r}")
+        if (
+            pkg_contract.get("stockCodexProvisioning")
+            != "deferred-to-installed-runtime-command"
+        ):
+            raise SystemExit(
+                "Installed compatibility stock Codex provisioning contract mismatch: "
+                f"{pkg_contract!r}"
+            )
+        provisioner_manifest_path = pkg_manifest.get("stockCodexProvisioner")
+        expected_provisioner_manifest_path = str(
+            package_proof.runtime_root / "scripts" / "provision_stock_codex.py"
+        )
+        if provisioner_manifest_path != expected_provisioner_manifest_path:
+            raise SystemExit(
+                "Installed compatibility pkg manifest recorded the wrong provisioner path: "
+                f"{pkg_manifest!r}"
+            )
+        if bundle_manifest.get("sourceRoot") != "<omitted-from-pkg>":
+            raise SystemExit(
+                "Installed compatibility bundle manifest embedded source root: "
+                f"{bundle_manifest!r}"
+            )
+
+        clean_home = root / "home"
+        clean_tmp = root / "tmp"
+        clean_home.mkdir(mode=0o700)
+        clean_tmp.mkdir(mode=0o700)
+        clean_cache_root = clean_home / ".local" / "omnigent" / "codex-stock"
+        if clean_cache_root.exists():
+            raise SystemExit(f"Clean stock Codex cache unexpectedly exists: {clean_cache_root}")
+
+        channel_root = root / "stock-codex-channel"
+        channel_artifacts = channel_root / "artifacts"
+        channel_artifacts.mkdir(parents=True)
+        channel_artifact_path = channel_artifacts / "codex"
+        shutil.copy2(stock_codex_realpath, channel_artifact_path)
+        channel_artifact_path.chmod(0o755)
+        if sha256_file(channel_artifact_path) != stock_codex_sha256:
+            raise SystemExit(
+                "Clean stock Codex channel artifact digest mismatch after copy.\n"
+                f"source={stock_codex_realpath}\nartifact={channel_artifact_path}"
+            )
+        channel_manifest_path = channel_root / "channel.json"
+        channel_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-channel",
+                    "latest": stock_codex_version,
+                    "artifacts": [
+                        {
+                            "version": stock_codex_version,
+                            "path": "artifacts/codex",
+                            "sha256": stock_codex_sha256,
+                        }
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        python_path_entries = [str(installed_runtime_root)]
+        if os.environ.get("PYTHONPATH"):
+            python_path_entries.append(os.environ["PYTHONPATH"])
+        env = os.environ.copy()
+        env.update(
+            {
+                "HOME": str(clean_home),
+                "TMPDIR": str(clean_tmp),
+                "PYTHONPATH": os.pathsep.join(python_path_entries),
+            }
+        )
+        env.pop("CODEX_HOME", None)
+        env.pop(OMNIGENT_STOCK_CODEX_PATH_ENV, None)
+
+        provisioner_command = [
+            sys.executable,
+            str(provisioner_script_path),
+            "--cache-root",
+            str(clean_cache_root),
+            "--channel-manifest",
+            str(channel_manifest_path),
+            "--expected-sha256",
+            stock_codex_sha256,
+            "--json",
+        ]
+
+        def run_provisioner_json() -> dict[str, Any]:
+            completed = subprocess.run(
+                provisioner_command,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                cwd=installed_runtime_root,
+                timeout=120,
+            )
+            if completed.returncode != 0:
+                raise SystemExit(
+                    "Pkg-installed stock Codex provisioner failed.\n"
+                    f"command={shlex.join(provisioner_command)}\n"
+                    f"exit={completed.returncode}\n"
+                    f"stdout={completed.stdout}\n"
+                    f"stderr={completed.stderr}"
+                )
+            try:
+                parsed = json.loads(completed.stdout)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(
+                    "Pkg-installed stock Codex provisioner did not emit JSON.\n"
+                    f"stdout={completed.stdout}\nstderr={completed.stderr}"
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise SystemExit(
+                    "Pkg-installed stock Codex provisioner emitted non-object JSON: "
+                    f"{parsed!r}"
+                )
+            return parsed
+
+        provisioned = run_provisioner_json()
+        provisioned_path = Path(_json_string(provisioned, "codexPath")).resolve()
+        payload_dir = Path(_json_string(provisioned, "payloadDir")).resolve()
+        manifest_path = Path(_json_string(provisioned, "manifestPath")).resolve()
+        provisioned_sha = _json_string(provisioned, "sha256")
+        provisioned_version = _json_string(provisioned, "version")
+        provisioned_source_kind = _json_string(provisioned, "sourceKind")
+        if not payload_dir.is_relative_to(clean_cache_root.resolve()):
+            raise SystemExit(
+                "Pkg-installed provisioner wrote outside the clean cache root.\n"
+                f"cache_root={clean_cache_root}\npayload_dir={payload_dir}"
+            )
+        if not provisioned_path.is_relative_to(clean_cache_root.resolve()):
+            raise SystemExit(
+                "Pkg-installed provisioner returned a Codex path outside the clean cache.\n"
+                f"cache_root={clean_cache_root}\ncodex_path={provisioned_path}"
+            )
+        if provisioned_sha.lower() != stock_codex_sha256.lower():
+            raise SystemExit(
+                "Pkg-installed provisioner installed an unexpected stock Codex binary.\n"
+                f"expected_sha256={stock_codex_sha256}\nactual_sha256={provisioned_sha}"
+            )
+        if provisioned_version != stock_codex_version:
+            raise SystemExit(
+                "Pkg-installed provisioner recorded an unexpected stock Codex version.\n"
+                f"expected_version={stock_codex_version!r}\nactual_version={provisioned_version!r}"
+            )
+        if provisioned_source_kind != "channel":
+            raise SystemExit(
+                f"Pkg-installed provisioner source kind mismatch: {provisioned!r}"
+            )
+        provisioned_env = provisioned.get("env")
+        if not isinstance(provisioned_env, dict):
+            raise SystemExit(f"Pkg-installed provisioner omitted env contract: {provisioned!r}")
+        provisioned_env_raw = provisioned_env.get(OMNIGENT_STOCK_CODEX_PATH_ENV)
+        if provisioned_env_raw != str(provisioned_path):
+            raise SystemExit(
+                "Pkg-installed provisioner emitted the wrong env contract.\n"
+                f"expected={provisioned_path}\nactual={provisioned_env_raw!r}"
+            )
+        provisioned_env_path = Path(str(provisioned_env_raw)).resolve()
+        if not provisioned_path.is_file() or not os.access(provisioned_path, os.X_OK):
+            raise SystemExit(f"Clean-provisioned Codex is not executable: {provisioned_path}")
+        if codex_version(provisioned_path) != provisioned_version:
+            raise SystemExit(
+                "Clean-provisioned Codex binary reported a different version.\n"
+                f"manifest_version={provisioned_version!r}"
+            )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("kind") != "omnigent-stock-codex":
+            raise SystemExit(f"Clean-provisioned manifest kind mismatch: {manifest!r}")
+        if manifest.get("sourceKind") != "channel":
+            raise SystemExit(f"Clean-provisioned manifest source mismatch: {manifest!r}")
+        if manifest.get("channelManifestPath") != str(channel_manifest_path):
+            raise SystemExit(
+                f"Clean-provisioned manifest channel path mismatch: {manifest!r}"
+            )
+        channel_artifact = manifest.get("channelArtifact")
+        if not isinstance(channel_artifact, dict):
+            raise SystemExit(f"Clean-provisioned manifest omitted channel artifact: {manifest!r}")
+        if channel_artifact.get("path") != "artifacts/codex":
+            raise SystemExit(
+                f"Clean-provisioned manifest recorded unexpected artifact: {manifest!r}"
+            )
+
+        with temporary_env({OMNIGENT_STOCK_CODEX_PATH_ENV: str(provisioned_path)}):
+            resolved_raw = _find_codex_cli()
+        if resolved_raw is None:
+            raise SystemExit(f"{OMNIGENT_STOCK_CODEX_PATH_ENV} did not resolve a Codex binary.")
+        resolved_path = Path(resolved_raw).expanduser().resolve()
+        if resolved_path != provisioned_path:
+            raise SystemExit(
+                "Omnigent stock-Codex resolver did not select the clean-provisioned binary.\n"
+                f"expected={provisioned_path}\nactual={resolved_raw}"
+            )
+
+        reused = run_provisioner_json()
+        reuse_path = Path(_json_string(reused, "codexPath")).resolve()
+        reuse_payload_dir = Path(_json_string(reused, "payloadDir")).resolve()
+        if reuse_path != provisioned_path or reuse_payload_dir != payload_dir:
+            raise SystemExit(
+                "Pkg-installed provisioner did not reuse the verified clean-cache payload.\n"
+                f"first_path={provisioned_path}\nreuse_path={reuse_path}\n"
+                f"first_payload={payload_dir}\nreuse_payload={reuse_payload_dir}"
+            )
+
+        proof_text = (
+            json.dumps(provisioned, sort_keys=True)
+            + "\n"
+            + json.dumps(reused, sort_keys=True)
+            + "\n"
+            + json.dumps(manifest, sort_keys=True)
+        )
+        host_cache_referenced = str(host_cache_root) in proof_text
+        if host_cache_referenced:
+            raise SystemExit(
+                "Pkg-installed clean provisioning referenced the host stock Codex cache.\n"
+                f"host_cache_root={host_cache_root}"
+            )
+
+        return StockCodexCompatPkgCleanProvisionProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            stock_codex_sha256=stock_codex_sha256,
+            package_path=package_proof.package_path,
+            package_sha256=package_proof.package_sha256,
+            package_identifier=package_proof.package_identifier,
+            package_version=package_proof.package_version,
+            install_root=install_root,
+            installed_prefix=installed_prefix,
+            installed_runtime_root=installed_runtime_root,
+            provisioner_script_path=provisioner_script_path,
+            pkg_manifest_path=pkg_manifest_path,
+            bundle_manifest_path=bundle_manifest_path,
+            clean_home=clean_home,
+            clean_cache_root=clean_cache_root,
+            channel_manifest_path=channel_manifest_path,
+            channel_artifact_path=channel_artifact_path,
+            payload_dir=payload_dir,
+            provisioned_codex_path=provisioned_path,
+            provisioned_manifest_path=manifest_path,
+            provisioned_version=provisioned_version,
+            provisioned_sha256=provisioned_sha,
+            provisioned_source_kind=provisioned_source_kind,
+            provisioned_env_path=provisioned_env_path,
+            omnigent_resolved_codex_path=resolved_path,
+            reuse_payload_dir=reuse_payload_dir,
+            reuse_provisioned_codex_path=reuse_path,
+            host_cache_root=host_cache_root,
+            host_cache_referenced=host_cache_referenced,
+        )
+
+
+def run_stock_codex_compat_pkg_clean_auth_proof(
+    stock_codex_path: Path,
+) -> StockCodexCompatPkgCleanAuthProof:
+    """Prove clean auth onboarding classification from a pkg-installed runtime."""
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    assert_stock_codex_path(stock_codex_path, allow_fork_codex=False)
+    stock_codex_realpath = stock_codex_path.resolve()
+    stock_codex_version = codex_version(stock_codex_realpath)
+    stock_codex_sha256 = sha256_file(stock_codex_realpath)
+    real_auth_path, real_auth_source = _stock_replacement_auth_source()
+    real_auth_available = codex_native._codex_auth_json_has_available_credential(
+        real_auth_path
+    )
+    if not real_auth_available:
+        raise SystemExit(
+            "Current real Codex auth source is not available; cannot prove the "
+            "packaged clean-auth boundary.\n"
+            f"auth_path={real_auth_path}\n"
+            "Run stock Codex authentication outside this proof, or point CODEX_HOME "
+            "at an authenticated Codex home, then rerun "
+            "stock-codex-compat-pkg-clean-auth-onboarding."
+        )
+
+    source_repo_root = Path(__file__).resolve().parents[1]
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-pkg-clean-auth-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        artifact_dir = root / "artifacts"
+        artifact_dir.mkdir()
+        package_path = artifact_dir / "omnigent-stock-codex-compat.pkg"
+        payload = _run_stock_codex_compat_pkg_builder_cli_json(
+            [
+                "--repo-root",
+                str(source_repo_root),
+                "--output",
+                str(package_path),
+                "--force",
+            ],
+            repo_root=source_repo_root,
+        )
+        package_proof = _validate_stock_codex_compat_pkg_builder_payload(
+            payload,
+            source_repo_root=source_repo_root,
+        )
+        expanded_payload_root = _expand_stock_codex_compat_pkg(
+            package_proof.package_path,
+            root / "pkg-expanded",
+        )
+        install_root = root / "installed-root"
+        installed_runtime_root = _stage_stock_codex_compat_pkg_install_root(
+            payload_root=expanded_payload_root,
+            install_root=install_root,
+            packaged_runtime_root=package_proof.runtime_root,
+            source_repo_root=source_repo_root,
+        )
+        installed_prefix = install_root / package_proof.install_prefix.relative_to("/")
+        provisioner_script_path = installed_runtime_root / "scripts" / "provision_stock_codex.py"
+        if not provisioner_script_path.is_file():
+            raise SystemExit(
+                "Pkg-installed runtime is missing the stock Codex provisioner.\n"
+                f"expected={provisioner_script_path}"
+            )
+
+        clean_home = root / "home"
+        clean_tmp = root / "tmp"
+        clean_home.mkdir(mode=0o700)
+        clean_tmp.mkdir(mode=0o700)
+        clean_cache_root = clean_home / ".local" / "omnigent" / "codex-stock"
+
+        channel_root = root / "stock-codex-channel"
+        channel_artifacts = channel_root / "artifacts"
+        channel_artifacts.mkdir(parents=True)
+        channel_artifact_path = channel_artifacts / "codex"
+        shutil.copy2(stock_codex_realpath, channel_artifact_path)
+        channel_artifact_path.chmod(0o755)
+        channel_manifest_path = channel_root / "channel.json"
+        channel_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-channel",
+                    "latest": stock_codex_version,
+                    "artifacts": [
+                        {
+                            "version": stock_codex_version,
+                            "path": "artifacts/codex",
+                            "sha256": stock_codex_sha256,
+                        }
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        python_path_entries = [str(installed_runtime_root)]
+        if os.environ.get("PYTHONPATH"):
+            python_path_entries.append(os.environ["PYTHONPATH"])
+        provision_env = os.environ.copy()
+        provision_env.update(
+            {
+                "HOME": str(clean_home),
+                "TMPDIR": str(clean_tmp),
+                "PYTHONPATH": os.pathsep.join(python_path_entries),
+            }
+        )
+        provision_env.pop("CODEX_HOME", None)
+        provision_env.pop(OMNIGENT_STOCK_CODEX_PATH_ENV, None)
+        provision_command = [
+            sys.executable,
+            str(provisioner_script_path),
+            "--cache-root",
+            str(clean_cache_root),
+            "--channel-manifest",
+            str(channel_manifest_path),
+            "--expected-sha256",
+            stock_codex_sha256,
+            "--json",
+        ]
+        completed = subprocess.run(
+            provision_command,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=provision_env,
+            cwd=installed_runtime_root,
+            timeout=120,
+        )
+        if completed.returncode != 0:
+            raise SystemExit(
+                "Pkg-installed stock Codex provisioner failed during clean-auth proof.\n"
+                f"command={shlex.join(provision_command)}\n"
+                f"exit={completed.returncode}\n"
+                f"stdout={completed.stdout}\n"
+                f"stderr={completed.stderr}"
+            )
+        try:
+            provisioned = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(
+                "Pkg-installed stock Codex provisioner did not emit JSON during "
+                f"clean-auth proof.\nstdout={completed.stdout}\nstderr={completed.stderr}"
+            ) from exc
+        if not isinstance(provisioned, dict):
+            raise SystemExit(
+                "Pkg-installed stock Codex provisioner emitted non-object JSON "
+                f"during clean-auth proof: {provisioned!r}"
+            )
+        provisioned_codex_path = Path(_json_string(provisioned, "codexPath")).resolve()
+        provisioned_version = _json_string(provisioned, "version")
+        if provisioned_version != stock_codex_version:
+            raise SystemExit(
+                "Clean-auth proof provisioned an unexpected stock Codex version.\n"
+                f"expected={stock_codex_version!r}\nactual={provisioned_version!r}"
+            )
+        if not provisioned_codex_path.is_relative_to(clean_cache_root.resolve()):
+            raise SystemExit(
+                "Clean-auth proof provisioned Codex outside the clean cache root.\n"
+                f"cache_root={clean_cache_root}\ncodex_path={provisioned_codex_path}"
+            )
+
+        clean_codex_home = root / "codex-home-clean"
+        synthetic_codex_home = root / "codex-home-synthetic"
+        real_classifier_home = root / "home-real-auth"
+        clean_codex_home.mkdir()
+        synthetic_codex_home.mkdir()
+        real_classifier_home.mkdir()
+        synthetic_secret = "sk-test-clean-auth-onboarding-proof"
+        (synthetic_codex_home / "auth.json").write_text(
+            json.dumps(
+                {"auth_mode": "api", "OPENAI_API_KEY": synthetic_secret},
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        real_classifier_path, real_reason, real_output = (
+            _run_installed_runtime_auth_classifier(
+                installed_runtime_root=installed_runtime_root,
+                home=real_classifier_home,
+                codex_home=real_auth_path.parent,
+                stock_codex_path=provisioned_codex_path,
+            )
+        )
+        if real_classifier_path != real_auth_path.expanduser().resolve():
+            raise SystemExit(
+                "Installed runtime auth classifier selected the wrong real auth path.\n"
+                f"expected={real_auth_path}\nactual={real_classifier_path}"
+            )
+        if real_reason is not None:
+            raise SystemExit(
+                "Installed runtime auth classifier did not accept the real auth source.\n"
+                f"expected=None\nactual={real_reason!r}"
+            )
+
+        clean_classifier_path, clean_reason, clean_output = (
+            _run_installed_runtime_auth_classifier(
+                installed_runtime_root=installed_runtime_root,
+                home=clean_home,
+                codex_home=clean_codex_home,
+                stock_codex_path=provisioned_codex_path,
+            )
+        )
+        if clean_classifier_path != (clean_codex_home / "auth.json").resolve():
+            raise SystemExit(
+                "Installed runtime auth classifier selected the wrong clean auth path.\n"
+                f"expected={clean_codex_home / 'auth.json'}\n"
+                f"actual={clean_classifier_path}"
+            )
+        if clean_reason != "needs-auth":
+            raise SystemExit(
+                "Installed runtime clean auth classification did not require onboarding.\n"
+                f"expected=needs-auth\nactual={clean_reason!r}"
+            )
+
+        synthetic_classifier_path, synthetic_reason, synthetic_output = (
+            _run_installed_runtime_auth_classifier(
+                installed_runtime_root=installed_runtime_root,
+                home=clean_home,
+                codex_home=synthetic_codex_home,
+                stock_codex_path=provisioned_codex_path,
+            )
+        )
+        if synthetic_classifier_path != (synthetic_codex_home / "auth.json").resolve():
+            raise SystemExit(
+                "Installed runtime auth classifier selected the wrong synthetic auth path.\n"
+                f"expected={synthetic_codex_home / 'auth.json'}\n"
+                f"actual={synthetic_classifier_path}"
+            )
+        if synthetic_reason is not None:
+            raise SystemExit(
+                "Installed runtime synthetic auth classification did not report available.\n"
+                f"expected=None\nactual={synthetic_reason!r}"
+            )
+
+        classifier_output = real_output + clean_output + synthetic_output
+        credential_material_leaked = synthetic_secret in classifier_output
+        if credential_material_leaked:
+            raise SystemExit(
+                "Installed runtime auth classifier leaked synthetic credential material."
+            )
+        onboarding_command = (
+            f"CODEX_HOME={shlex.quote(str(clean_codex_home))} "
+            f"{shlex.quote(str(provisioned_codex_path))} login"
+        )
+
+        return StockCodexCompatPkgCleanAuthProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            stock_codex_sha256=stock_codex_sha256,
+            package_path=package_proof.package_path,
+            package_sha256=package_proof.package_sha256,
+            package_identifier=package_proof.package_identifier,
+            package_version=package_proof.package_version,
+            install_root=install_root,
+            installed_prefix=installed_prefix,
+            installed_runtime_root=installed_runtime_root,
+            provisioner_script_path=provisioner_script_path,
+            clean_home=clean_home,
+            clean_cache_root=clean_cache_root,
+            provisioned_codex_path=provisioned_codex_path,
+            provisioned_version=provisioned_version,
+            real_auth_path=real_auth_path,
+            real_auth_source=real_auth_source,
+            real_auth_available=real_auth_available,
+            real_auth_classifier_path=real_classifier_path,
+            real_auth_unavailable_reason=real_reason,
+            clean_codex_home=clean_codex_home,
+            clean_auth_classifier_path=clean_classifier_path,
+            clean_unavailable_reason=str(clean_reason),
+            synthetic_codex_home=synthetic_codex_home,
+            synthetic_auth_classifier_path=synthetic_classifier_path,
+            synthetic_available_reason=synthetic_reason,
+            onboarding_command=onboarding_command,
+            credential_material_leaked=credential_material_leaked,
+        )
+
+
+def print_stock_codex_compat_clean_install_proof(
+    proof: StockCodexCompatCleanInstallProof,
+) -> None:
+    """Emit operator evidence for the clean-home compatibility install proof."""
+    print("stock_codex_compat_clean_install_rehearsal=selected")
+    print(
+        "stock_codex_compat_clean_install_surface="
+        "clean-home-separate-command-install-rollback"
+    )
+    print(f"stock_codex_compat_clean_install_stock_codex_path={proof.stock_codex_path}")
+    print(
+        "stock_codex_compat_clean_install_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(f"stock_codex_compat_clean_install_home={proof.clean_home}")
+    print(f"stock_codex_compat_clean_install_bin_dir={proof.clean_bin_dir}")
+    print(f"stock_codex_compat_clean_install_launcher_path={proof.launcher_path}")
+    print(f"stock_codex_compat_clean_install_manifest_path={proof.manifest_path}")
+    print(
+        "stock_codex_compat_clean_install_adapter_package_dir="
+        f"{proof.adapter_package_dir}"
+    )
+    print(f"stock_codex_compat_clean_install_adapter_bin={proof.adapter_bin}")
+    print(f"stock_codex_compat_clean_install_adapter_manifest={proof.adapter_manifest}")
+    print(
+        "stock_codex_compat_clean_install_adapter_bridge_dir="
+        f"{proof.adapter_bridge_dir}"
+    )
+    print(
+        "stock_codex_compat_clean_install_adapter_tools="
+        f"{','.join(proof.adapter_tool_names)}"
+    )
+    print(f"stock_codex_compat_clean_install_repo_root={proof.repo_root}")
+    print(f"stock_codex_compat_clean_install_uvx_path={proof.uvx_path}")
+    print(
+        "stock_codex_compat_clean_install_selected_command_path="
+        f"{proof.selected_command_path}"
+    )
+    print(f"stock_codex_compat_clean_install_version_output={proof.version_output}")
+    print(
+        "stock_codex_compat_clean_install_adapter_package_action="
+        f"{proof.adapter_package_action}"
+    )
+    print(f"stock_codex_compat_clean_install_install_action={proof.install_action}")
+    print(f"stock_codex_compat_clean_install_rollback_action={proof.rollback_action}")
+    print(
+        "stock_codex_compat_clean_install_doctor_install_allowed="
+        f"{proof.doctor_install_allowed}"
+    )
+    print(
+        "stock_codex_compat_clean_install_doctor_existing_target_state="
+        f"{proof.doctor_existing_target_state}"
+    )
+    print(
+        "stock_codex_compat_clean_install_doctor_existing_target_managed="
+        f"{proof.doctor_existing_target_managed}"
+    )
+    print(
+        "stock_codex_compat_clean_install_doctor_target_selected_on_path="
+        f"{proof.doctor_target_selected_on_path}"
+    )
+    print(
+        "stock_codex_compat_clean_install_doctor_mutates_filesystem="
+        f"{proof.doctor_mutates_filesystem}"
+    )
+    print(
+        "stock_codex_compat_clean_install_launcher_removed_after_rollback="
+        f"{proof.launcher_removed_after_rollback}"
+    )
+    print(
+        "stock_codex_compat_clean_install_manifest_removed_after_rollback="
+        f"{proof.manifest_removed_after_rollback}"
+    )
+    print(
+        "stock_codex_compat_clean_install_probe_output="
+        f"{_preview_text(proof.probe_output, limit=1000)!r}"
+    )
+    print("stock_codex_compat_clean_install_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: stock-codex-compat can install its adapter package and "
+        "separate launcher command from defaults under a clean HOME"
+    )
+    print(
+        "ASSERTION: clean-home install, doctor, probe, version delegation, and "
+        "rollback are repeatable without mutating the current host codex default"
+    )
+
+
+def print_stock_codex_compat_bundle_install_proof(
+    proof: StockCodexCompatBundleInstallProof,
+) -> None:
+    """Emit operator evidence for the bundle compatibility install proof."""
+    print("stock_codex_compat_bundle_install_rehearsal=selected")
+    print(
+        "stock_codex_compat_bundle_install_surface="
+        "portable-bundle-clean-home-install-rollback"
+    )
+    print(f"stock_codex_compat_bundle_install_stock_codex_path={proof.stock_codex_path}")
+    print(
+        "stock_codex_compat_bundle_install_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(f"stock_codex_compat_bundle_install_bundle_path={proof.bundle_path}")
+    print(f"stock_codex_compat_bundle_install_bundle_sha256={proof.bundle_sha256}")
+    print(
+        "stock_codex_compat_bundle_install_bundle_manifest="
+        f"{proof.bundle_manifest_path}"
+    )
+    print(
+        "stock_codex_compat_bundle_install_extracted_bundle_root="
+        f"{proof.extracted_bundle_root}"
+    )
+    print(
+        "stock_codex_compat_bundle_install_extracted_runtime_root="
+        f"{proof.extracted_runtime_root}"
+    )
+    print(
+        "stock_codex_compat_bundle_install_installer_script="
+        f"{proof.installer_script_path}"
+    )
+    print(f"stock_codex_compat_bundle_install_home={proof.clean_home}")
+    print(f"stock_codex_compat_bundle_install_bin_dir={proof.clean_bin_dir}")
+    print(f"stock_codex_compat_bundle_install_launcher_path={proof.launcher_path}")
+    print(f"stock_codex_compat_bundle_install_manifest_path={proof.manifest_path}")
+    print(
+        "stock_codex_compat_bundle_install_adapter_package_dir="
+        f"{proof.adapter_package_dir}"
+    )
+    print(f"stock_codex_compat_bundle_install_adapter_bin={proof.adapter_bin}")
+    print(
+        "stock_codex_compat_bundle_install_adapter_manifest="
+        f"{proof.adapter_manifest}"
+    )
+    print(
+        "stock_codex_compat_bundle_install_adapter_bridge_dir="
+        f"{proof.adapter_bridge_dir}"
+    )
+    print(
+        "stock_codex_compat_bundle_install_adapter_tools="
+        f"{','.join(proof.adapter_tool_names)}"
+    )
+    print(f"stock_codex_compat_bundle_install_uvx_path={proof.uvx_path}")
+    print(
+        "stock_codex_compat_bundle_install_selected_command_path="
+        f"{proof.selected_command_path}"
+    )
+    print(
+        "stock_codex_compat_bundle_install_launcher_manifest_repo_root="
+        f"{proof.launcher_manifest_repo_root}"
+    )
+    print(f"stock_codex_compat_bundle_install_version_output={proof.version_output}")
+    print(
+        "stock_codex_compat_bundle_install_adapter_package_action="
+        f"{proof.adapter_package_action}"
+    )
+    print(f"stock_codex_compat_bundle_install_install_action={proof.install_action}")
+    print(f"stock_codex_compat_bundle_install_rollback_action={proof.rollback_action}")
+    print(
+        "stock_codex_compat_bundle_install_doctor_install_allowed="
+        f"{proof.doctor_install_allowed}"
+    )
+    print(
+        "stock_codex_compat_bundle_install_doctor_existing_target_state="
+        f"{proof.doctor_existing_target_state}"
+    )
+    print(
+        "stock_codex_compat_bundle_install_doctor_existing_target_managed="
+        f"{proof.doctor_existing_target_managed}"
+    )
+    print(
+        "stock_codex_compat_bundle_install_doctor_target_selected_on_path="
+        f"{proof.doctor_target_selected_on_path}"
+    )
+    print(
+        "stock_codex_compat_bundle_install_doctor_mutates_filesystem="
+        f"{proof.doctor_mutates_filesystem}"
+    )
+    print(
+        "stock_codex_compat_bundle_install_launcher_removed_after_rollback="
+        f"{proof.launcher_removed_after_rollback}"
+    )
+    print(
+        "stock_codex_compat_bundle_install_manifest_removed_after_rollback="
+        f"{proof.manifest_removed_after_rollback}"
+    )
+    print(
+        "stock_codex_compat_bundle_install_probe_output="
+        f"{_preview_text(proof.probe_output, limit=1000)!r}"
+    )
+    print("stock_codex_compat_bundle_install_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: stock-codex-compat can be packaged as a portable runtime "
+        "bundle and installed from the extracted artifact under a clean HOME"
+    )
+    print(
+        "ASSERTION: the installed launcher manifest and probe delegate to the "
+        "extracted bundle runtime, not the development checkout"
+    )
+
+
+def print_stock_codex_compat_pkg_structure_proof(
+    proof: StockCodexCompatPkgStructureProof,
+) -> None:
+    """Emit operator evidence for the unsigned pkg structure proof."""
+    print("stock_codex_compat_pkg_structure_rehearsal=selected")
+    print("stock_codex_compat_pkg_structure_surface=unsigned-flat-pkg-structure")
+    print(f"stock_codex_compat_pkg_structure_package_path={proof.package_path}")
+    print(f"stock_codex_compat_pkg_structure_package_sha256={proof.package_sha256}")
+    print(
+        "stock_codex_compat_pkg_structure_source_bundle_sha256="
+        f"{proof.source_bundle_sha256}"
+    )
+    print(
+        "stock_codex_compat_pkg_structure_identifier="
+        f"{proof.package_identifier}"
+    )
+    print(f"stock_codex_compat_pkg_structure_version={proof.package_version}")
+    print(
+        "stock_codex_compat_pkg_structure_install_location="
+        f"{proof.install_location}"
+    )
+    print(f"stock_codex_compat_pkg_structure_install_prefix={proof.install_prefix}")
+    print(f"stock_codex_compat_pkg_structure_runtime_root={proof.runtime_root}")
+    print(
+        "stock_codex_compat_pkg_structure_payload_file_count="
+        f"{proof.payload_file_count}"
+    )
+    print(
+        "stock_codex_compat_pkg_structure_required_payload_files="
+        f"{json.dumps(proof.required_payload_files, sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_structure_scripts="
+        f"{','.join(proof.script_names)}"
+    )
+    print(
+        "stock_codex_compat_pkg_structure_archive_entries="
+        f"{','.join(proof.archive_entries)}"
+    )
+    print(
+        "stock_codex_compat_pkg_structure_signature_status="
+        f"{proof.signature_status}"
+    )
+    print(f"stock_codex_compat_pkg_structure_signed={proof.signed}")
+    print(
+        "stock_codex_compat_pkg_structure_pkg_manifest="
+        f"{proof.pkg_manifest_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_structure_bundle_manifest="
+        f"{proof.bundle_manifest_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_structure_contract="
+        f"{json.dumps(proof.pkg_contract, sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_structure_bundle_source_root="
+        f"{proof.bundle_source_root}"
+    )
+    print("stock_codex_compat_pkg_structure_artifact_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: stock-codex-compat can be packaged as an unsigned flat "
+        "macOS pkg with sane identifier, version, install root, scripts, and "
+        "runtime payload layout"
+    )
+    print(
+        "ASSERTION: the pkg installs only the machine-level runtime payload; "
+        "user bootstrap, stock-Codex provisioning, auth, signing, and "
+        "notarization remain separate gates"
+    )
+
+
+def print_stock_codex_compat_pkg_clean_provision_proof(
+    proof: StockCodexCompatPkgCleanProvisionProof,
+) -> None:
+    """Emit operator evidence for installed-runtime clean stock Codex provisioning."""
+    print("stock_codex_compat_pkg_clean_provision_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_clean_provision_surface="
+        "pkg-installed-runtime-clean-stock-codex-channel-provision"
+    )
+    print(f"stock_codex_compat_pkg_clean_provision_stock_codex_path={proof.stock_codex_path}")
+    print(
+        "stock_codex_compat_pkg_clean_provision_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_provision_stock_codex_sha256="
+        f"{proof.stock_codex_sha256}"
+    )
+    print(f"stock_codex_compat_pkg_clean_provision_package_path={proof.package_path}")
+    print(f"stock_codex_compat_pkg_clean_provision_package_sha256={proof.package_sha256}")
+    print(
+        "stock_codex_compat_pkg_clean_provision_identifier="
+        f"{proof.package_identifier}"
+    )
+    print(f"stock_codex_compat_pkg_clean_provision_version={proof.package_version}")
+    print(f"stock_codex_compat_pkg_clean_provision_install_root={proof.install_root}")
+    print(f"stock_codex_compat_pkg_clean_provision_installed_prefix={proof.installed_prefix}")
+    print(
+        "stock_codex_compat_pkg_clean_provision_installed_runtime_root="
+        f"{proof.installed_runtime_root}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_provision_provisioner_script="
+        f"{proof.provisioner_script_path}"
+    )
+    print(f"stock_codex_compat_pkg_clean_provision_pkg_manifest={proof.pkg_manifest_path}")
+    print(
+        "stock_codex_compat_pkg_clean_provision_bundle_manifest="
+        f"{proof.bundle_manifest_path}"
+    )
+    print(f"stock_codex_compat_pkg_clean_provision_home={proof.clean_home}")
+    print(f"stock_codex_compat_pkg_clean_provision_cache_root={proof.clean_cache_root}")
+    print(
+        "stock_codex_compat_pkg_clean_provision_channel_manifest="
+        f"{proof.channel_manifest_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_provision_channel_artifact="
+        f"{proof.channel_artifact_path}"
+    )
+    print(f"stock_codex_compat_pkg_clean_provision_payload_dir={proof.payload_dir}")
+    print(
+        "stock_codex_compat_pkg_clean_provision_codex_path="
+        f"{proof.provisioned_codex_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_provision_manifest="
+        f"{proof.provisioned_manifest_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_provision_provisioned_version="
+        f"{proof.provisioned_version}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_provision_provisioned_sha256="
+        f"{proof.provisioned_sha256}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_provision_source_kind="
+        f"{proof.provisioned_source_kind}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_provision_env="
+        f"{OMNIGENT_STOCK_CODEX_PATH_ENV}={proof.provisioned_env_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_provision_omnigent_resolved_codex_path="
+        f"{proof.omnigent_resolved_codex_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_provision_reuse_payload_dir="
+        f"{proof.reuse_payload_dir}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_provision_reuse_codex_path="
+        f"{proof.reuse_provisioned_codex_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_provision_host_cache_root="
+        f"{proof.host_cache_root}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_provision_host_cache_referenced="
+        f"{proof.host_cache_referenced}"
+    )
+    print("stock_codex_compat_pkg_clean_provision_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: a pkg-installed machine-level runtime can provision a "
+        "verified stock Codex payload into a clean user cache from an explicit "
+        "channel artifact without using the host stock-Codex cache"
+    )
+    print(
+        "ASSERTION: the clean-provisioned payload is selected by Omnigent "
+        f"through {OMNIGENT_STOCK_CODEX_PATH_ENV}, and a second no-force "
+        "provision reuses the same verified payload"
+    )
+
+
+def print_stock_codex_compat_pkg_clean_auth_proof(
+    proof: StockCodexCompatPkgCleanAuthProof,
+) -> None:
+    """Emit operator evidence for installed-runtime clean auth onboarding."""
+    print("stock_codex_compat_pkg_clean_auth_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_clean_auth_surface="
+        "pkg-installed-runtime-clean-stock-codex-auth-onboarding"
+    )
+    print(f"stock_codex_compat_pkg_clean_auth_stock_codex_path={proof.stock_codex_path}")
+    print(
+        "stock_codex_compat_pkg_clean_auth_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_stock_codex_sha256="
+        f"{proof.stock_codex_sha256}"
+    )
+    print(f"stock_codex_compat_pkg_clean_auth_package_path={proof.package_path}")
+    print(f"stock_codex_compat_pkg_clean_auth_package_sha256={proof.package_sha256}")
+    print(
+        "stock_codex_compat_pkg_clean_auth_identifier="
+        f"{proof.package_identifier}"
+    )
+    print(f"stock_codex_compat_pkg_clean_auth_version={proof.package_version}")
+    print(f"stock_codex_compat_pkg_clean_auth_install_root={proof.install_root}")
+    print(f"stock_codex_compat_pkg_clean_auth_installed_prefix={proof.installed_prefix}")
+    print(
+        "stock_codex_compat_pkg_clean_auth_installed_runtime_root="
+        f"{proof.installed_runtime_root}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_provisioner_script="
+        f"{proof.provisioner_script_path}"
+    )
+    print(f"stock_codex_compat_pkg_clean_auth_home={proof.clean_home}")
+    print(f"stock_codex_compat_pkg_clean_auth_cache_root={proof.clean_cache_root}")
+    print(
+        "stock_codex_compat_pkg_clean_auth_provisioned_codex_path="
+        f"{proof.provisioned_codex_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_provisioned_version="
+        f"{proof.provisioned_version}"
+    )
+    print(f"stock_codex_compat_pkg_clean_auth_real_auth_path={proof.real_auth_path}")
+    print(f"stock_codex_compat_pkg_clean_auth_real_auth_source={proof.real_auth_source}")
+    print(
+        "stock_codex_compat_pkg_clean_auth_real_auth_available="
+        f"{proof.real_auth_available}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_real_classifier_path="
+        f"{proof.real_auth_classifier_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_real_unavailable_reason="
+        f"{proof.real_auth_unavailable_reason}"
+    )
+    print(f"stock_codex_compat_pkg_clean_auth_clean_codex_home={proof.clean_codex_home}")
+    print(
+        "stock_codex_compat_pkg_clean_auth_clean_classifier_path="
+        f"{proof.clean_auth_classifier_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_clean_unavailable_reason="
+        f"{proof.clean_unavailable_reason}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_synthetic_codex_home="
+        f"{proof.synthetic_codex_home}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_synthetic_classifier_path="
+        f"{proof.synthetic_auth_classifier_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_synthetic_available_reason="
+        f"{proof.synthetic_available_reason}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_credential_material_leaked="
+        f"{proof.credential_material_leaked}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_onboarding_command="
+        f"{proof.onboarding_command}"
+    )
+    print("stock_codex_compat_pkg_clean_auth_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: the pkg-installed runtime classifies a clean CODEX_HOME "
+        "as needs-auth while using the clean-provisioned stock Codex binary"
+    )
+    print(
+        "ASSERTION: the pkg-installed runtime recognizes both the current real "
+        "auth source and a synthetic populated auth.json without printing "
+        "credential material"
+    )
+
+
+def print_stock_codex_compat_pkg_runtime_live_proof(
+    proof: StockCodexCompatPkgRuntimeLiveProof,
+) -> None:
+    """Emit operator evidence for the expanded pkg runtime live proof."""
+    print("stock_codex_compat_pkg_runtime_live_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_runtime_live_surface="
+        "expanded-pkg-runtime-uvx-wrapper-live-model-turn"
+    )
+    print(f"stock_codex_compat_pkg_runtime_live_stock_codex_path={proof.stock_codex_path}")
+    print(
+        "stock_codex_compat_pkg_runtime_live_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(f"stock_codex_compat_pkg_runtime_live_source_bundle={proof.source_bundle}")
+    print(f"stock_codex_compat_pkg_runtime_live_package_path={proof.package_path}")
+    print(f"stock_codex_compat_pkg_runtime_live_package_sha256={proof.package_sha256}")
+    print(
+        "stock_codex_compat_pkg_runtime_live_source_bundle_sha256="
+        f"{proof.source_bundle_sha256}"
+    )
+    print(
+        "stock_codex_compat_pkg_runtime_live_identifier="
+        f"{proof.package_identifier}"
+    )
+    print(f"stock_codex_compat_pkg_runtime_live_version={proof.package_version}")
+    print(f"stock_codex_compat_pkg_runtime_live_install_prefix={proof.install_prefix}")
+    print(
+        "stock_codex_compat_pkg_runtime_live_packaged_runtime_root="
+        f"{proof.packaged_runtime_root}"
+    )
+    print(
+        "stock_codex_compat_pkg_runtime_live_expanded_payload_root="
+        f"{proof.expanded_payload_root}"
+    )
+    print(
+        "stock_codex_compat_pkg_runtime_live_expanded_runtime_root="
+        f"{proof.expanded_runtime_root}"
+    )
+    print(f"stock_codex_compat_pkg_runtime_live_uvx_path={proof.uvx_path}")
+    print(
+        "stock_codex_compat_pkg_runtime_live_wrapper_command="
+        f"{shlex.join(proof.wrapper_command)}"
+    )
+    print(f"stock_codex_compat_pkg_runtime_live_codex_home={proof.codex_home}")
+    print(f"stock_codex_compat_pkg_runtime_live_auth_path={proof.auth_path}")
+    print(f"stock_codex_compat_pkg_runtime_live_bridge_dir={proof.bridge_dir}")
+    print(f"stock_codex_compat_pkg_runtime_live_workspace_root={proof.workspace_root}")
+    print(
+        "stock_codex_compat_pkg_runtime_live_enabled_features="
+        f"{','.join(proof.enabled_features)}"
+    )
+    print(f"stock_codex_compat_pkg_runtime_live_thread_id={proof.thread_id}")
+    print(f"stock_codex_compat_pkg_runtime_live_event_count={proof.event_count}")
+    print(
+        "stock_codex_compat_pkg_runtime_live_mcp_servers="
+        f"{','.join(proof.mcp_servers)}"
+    )
+    print(f"stock_codex_compat_pkg_runtime_live_route_injected={proof.route_injected}")
+    print(
+        "stock_codex_compat_pkg_runtime_live_evidence_path="
+        f"{proof.wrapper_evidence_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_runtime_live_pre_wrapper_message_preview="
+        f"{_preview_text(proof.first_agent_message_before_wrapper, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_pkg_runtime_live_first_agent_message_preview="
+        f"{_preview_text(proof.first_agent_message, limit=500)!r}"
+    )
+    print(f"stock_codex_compat_pkg_runtime_live_stderr_preview={proof.stderr_preview!r}")
+    print("stock_codex_compat_pkg_runtime_live_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: an expanded unsigned pkg runtime launched a real stock "
+        "Codex model turn through uvx --from without using the development "
+        "checkout as the wrapper runtime"
+    )
+    print(
+        "ASSERTION: known-good stock auth was reused; package install, "
+        "per-user bootstrap, clean stock-Codex provisioning, clean auth "
+        "onboarding, signing, and notarization remain separate gates"
+    )
+
+
+def print_stock_codex_compat_pkg_user_bootstrap_proof(
+    proof: StockCodexCompatPkgUserBootstrapProof,
+) -> None:
+    """Emit operator evidence for the installed-runtime user bootstrap proof."""
+    print("stock_codex_compat_pkg_user_bootstrap_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_surface="
+        "pkg-installed-runtime-clean-user-bootstrap-update-rollback"
+    )
+    print(f"stock_codex_compat_pkg_user_bootstrap_stock_codex_path={proof.stock_codex_path}")
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(f"stock_codex_compat_pkg_user_bootstrap_package_path={proof.package_path}")
+    print(f"stock_codex_compat_pkg_user_bootstrap_package_sha256={proof.package_sha256}")
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_identifier="
+        f"{proof.package_identifier}"
+    )
+    print(f"stock_codex_compat_pkg_user_bootstrap_version={proof.package_version}")
+    print(f"stock_codex_compat_pkg_user_bootstrap_install_root={proof.install_root}")
+    print(f"stock_codex_compat_pkg_user_bootstrap_installed_prefix={proof.installed_prefix}")
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_installed_runtime_root="
+        f"{proof.installed_runtime_root}"
+    )
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_installer_script="
+        f"{proof.installer_script_path}"
+    )
+    print(f"stock_codex_compat_pkg_user_bootstrap_pkg_manifest={proof.pkg_manifest_path}")
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_bundle_manifest="
+        f"{proof.bundle_manifest_path}"
+    )
+    print(f"stock_codex_compat_pkg_user_bootstrap_home={proof.clean_home}")
+    print(f"stock_codex_compat_pkg_user_bootstrap_bin_dir={proof.clean_bin_dir}")
+    print(f"stock_codex_compat_pkg_user_bootstrap_launcher_path={proof.launcher_path}")
+    print(f"stock_codex_compat_pkg_user_bootstrap_manifest_path={proof.manifest_path}")
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_adapter_package_dir="
+        f"{proof.adapter_package_dir}"
+    )
+    print(f"stock_codex_compat_pkg_user_bootstrap_adapter_bin={proof.adapter_bin}")
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_adapter_manifest="
+        f"{proof.adapter_manifest}"
+    )
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_adapter_bridge_dir="
+        f"{proof.adapter_bridge_dir}"
+    )
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_adapter_tools="
+        f"{','.join(proof.adapter_tool_names)}"
+    )
+    print(f"stock_codex_compat_pkg_user_bootstrap_uvx_path={proof.uvx_path}")
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_selected_command_path="
+        f"{proof.selected_command_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_launcher_manifest_repo_root="
+        f"{proof.launcher_manifest_repo_root}"
+    )
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_launcher_manifest_wrapper_entrypoint="
+        f"{proof.launcher_manifest_wrapper_entrypoint}"
+    )
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_launcher_manifest_adapter_tools="
+        f"{','.join(proof.launcher_manifest_adapter_tool_names)}"
+    )
+    print(f"stock_codex_compat_pkg_user_bootstrap_version_output={proof.version_output}")
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_adapter_package_action="
+        f"{proof.adapter_package_action}"
+    )
+    print(f"stock_codex_compat_pkg_user_bootstrap_install_action={proof.install_action}")
+    print(f"stock_codex_compat_pkg_user_bootstrap_update_action={proof.update_action}")
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_rollback_command="
+        f"{proof.rollback_command}"
+    )
+    print(f"stock_codex_compat_pkg_user_bootstrap_rollback_action={proof.rollback_action}")
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_doctor_install_allowed="
+        f"{proof.doctor_install_allowed}"
+    )
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_doctor_existing_target_state="
+        f"{proof.doctor_existing_target_state}"
+    )
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_doctor_existing_target_managed="
+        f"{proof.doctor_existing_target_managed}"
+    )
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_doctor_target_selected_on_path="
+        f"{proof.doctor_target_selected_on_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_doctor_mutates_filesystem="
+        f"{proof.doctor_mutates_filesystem}"
+    )
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_adapter_package_exists_after_install="
+        f"{proof.adapter_package_exists_after_install}"
+    )
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_launcher_removed_after_rollback="
+        f"{proof.launcher_removed_after_rollback}"
+    )
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_manifest_removed_after_rollback="
+        f"{proof.manifest_removed_after_rollback}"
+    )
+    print(
+        "stock_codex_compat_pkg_user_bootstrap_probe_output="
+        f"{_preview_text(proof.probe_output, limit=1000)!r}"
+    )
+    print("stock_codex_compat_pkg_user_bootstrap_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: a pkg-installed machine-level runtime can bootstrap a "
+        "clean user's compatibility launcher, adapter package, manifest, and "
+        "bridge path without touching the current host profile"
+    )
+    print(
+        "ASSERTION: the generated rollback command targets the installed "
+        "runtime and was executed successfully to remove the launcher and "
+        "manifest"
+    )
+
+
+def run_stock_codex_compat_launcher_activation_proof(
+    *,
+    timeout_seconds: float = DEFAULT_LIVE_PROOF_TIMEOUT_SECONDS,
+) -> StockCodexCompatLauncherActivationProof:
+    """Prove the persistent compatibility launcher can be the active ``codex``."""
+    uvx_raw = shutil.which("uvx")
+    if not uvx_raw:
+        raise SystemExit("Could not find uvx on PATH for compatibility launcher proof.")
+    uvx_path = Path(uvx_raw).expanduser().resolve()
+    if not uvx_path.is_file() or not os.access(uvx_path, os.X_OK):
+        raise SystemExit(f"uvx binary is not executable: {uvx_path}")
+
+    installer = _load_stock_codex_compat_launcher_installer()
+    repo_root = Path(__file__).resolve().parents[1]
+    original_path = os.environ.get("PATH", "")
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-launcher-proof-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        launcher_dir = root / "bin"
+        fake_bin = root / "fake-bin"
+        stock_codex_path = root / "stock-codex" / "codex"
+        launcher_path = launcher_dir / "codex"
+        manifest_path = root / "launcher-manifest.json"
+        workspace_root = root / "workspace"
+        adapter_bridge_dir = root / "adapter-bridge"
+        wrapper_evidence_path = root / "wrapper-evidence.json"
+        launcher_dir.mkdir()
+        fake_bin.mkdir()
+        workspace_root.mkdir(mode=0o700)
+        _write_stock_codex_compat_launcher_fake_sosumi(fake_bin / "sosumi")
+        _write_stock_codex_compat_launcher_fake_codex(stock_codex_path)
+        stock_codex_version = codex_version(stock_codex_path)
+        adapter_package = write_stock_codex_compat_adapter_package(
+            root / "adapter-package",
+            (build_fetch_apple_docs_stock_codex_bridge_adapter_spec(),),
+        )
+
+        activated_path = f"{launcher_dir}{os.pathsep}{fake_bin}{os.pathsep}{original_path}"
+        previous_pinned_env = os.environ.pop(OMNIGENT_STOCK_CODEX_PATH_ENV, None)
+        try:
+            with temporary_env({"PATH": activated_path}):
+                install_result = installer.install_launcher(
+                    launcher_path=launcher_path,
+                    manifest_path=manifest_path,
+                    repo_root=repo_root,
+                    uvx_path=uvx_path,
+                    pinned_codex_path=stock_codex_path,
+                    route_prefix=EXPECTED_ROUTE,
+                    adapter_bin=adapter_package.adapter_bin,
+                    adapter_manifest=adapter_package.manifest_path,
+                    adapter_bridge_dir=adapter_bridge_dir,
+                    backup_existing=False,
+                    force=False,
+                    require_path_selected=True,
+                    validate=True,
+                )
+                resolved_raw = _find_codex_cli()
+                if resolved_raw is None:
+                    raise SystemExit(
+                        "Compatibility launcher proof did not resolve a Codex binary."
+                    )
+                resolved_codex_path = Path(resolved_raw).expanduser().resolve()
+                if resolved_codex_path != stock_codex_path.resolve():
+                    raise SystemExit(
+                        "Compatibility launcher proof resolved the wrong stock Codex.\n"
+                        f"expected={stock_codex_path.resolve()}\n"
+                        f"actual={resolved_codex_path}"
+                    )
+                probe = subprocess.run(
+                    ["codex", installer.PROBE_ARG],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                probe_output = (probe.stdout or "") + (probe.stderr or "")
+                if probe.returncode != 0 or installer.PROBE_SENTINEL not in probe_output:
+                    raise SystemExit(
+                        "Compatibility launcher probe failed.\n"
+                        f"exit={probe.returncode}\n"
+                        f"output={probe_output}"
+                    )
+                prompt = (
+                    "Persistent stock Codex compatibility launcher proof. Use the "
+                    f"shell command tool exactly once to run `{APPLE_DOCS_CLI_TOOL} "
+                    f"--url {APPLE_DOCS_CLI_URL}`. Reply exactly "
+                    f"{STOCK_CODEX_COMPAT_LAUNCHER_ACTIVATION_SENTINEL} if stdout "
+                    "contains title: String and the Apple documentation source URL."
+                )
+                run_env = os.environ.copy()
+                run_env[STOCK_CODEX_COMPAT_WRAPPER_EVIDENCE_ENV] = str(
+                    wrapper_evidence_path
+                )
+                completed = subprocess.run(
+                    [
+                        "codex",
+                        "exec",
+                        "--json",
+                        "--skip-git-repo-check",
+                        "--sandbox",
+                        "workspace-write",
+                        "-C",
+                        str(workspace_root),
+                        prompt,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds if timeout_seconds > 0 else None,
+                    env=run_env,
+                    stdin=subprocess.DEVNULL,
+                )
+                stderr_preview = _preview_text(completed.stderr, limit=2000)
+                if completed.returncode != 0:
+                    raise SystemExit(
+                        "Compatibility launcher wrapped command failed.\n"
+                        f"exit={completed.returncode}\n"
+                        f"stderr={stderr_preview}\n"
+                        f"stdout_preview={_preview_text(completed.stdout, limit=2000)}"
+                    )
+                events = _parse_stock_codex_exec_jsonl(completed.stdout)
+                thread_id, first_agent_message = (
+                    _extract_stock_codex_thread_and_agent_message(
+                        events,
+                        proof_name="stock-codex-compat-launcher-activation",
+                    )
+                )
+                if not first_agent_message.startswith(EXPECTED_ROUTE):
+                    raise SystemExit(
+                        "Compatibility launcher proof did not prefix route evidence.\n"
+                        f"expected_prefix={EXPECTED_ROUTE!r}\n"
+                        f"first_agent_message={first_agent_message!r}"
+                    )
+                if (
+                    STOCK_CODEX_COMPAT_LAUNCHER_ACTIVATION_SENTINEL
+                    not in first_agent_message
+                ):
+                    raise SystemExit(
+                        "Compatibility launcher proof missed the expected sentinel.\n"
+                        f"sentinel={STOCK_CODEX_COMPAT_LAUNCHER_ACTIVATION_SENTINEL!r}\n"
+                        f"first_agent_message={first_agent_message!r}"
+                    )
+                command_item = _validate_stock_codex_adapter_command_execution_events(
+                    events,
+                    command_name=APPLE_DOCS_CLI_TOOL,
+                    command_argument=APPLE_DOCS_CLI_URL,
+                    output_sentinel=APPLE_MCP_SOSUMI_SENTINELS[0],
+                )
+                command_output = str(command_item["aggregated_output"])
+                for output_sentinel in APPLE_MCP_SOSUMI_SENTINELS:
+                    if output_sentinel not in command_output:
+                        raise SystemExit(
+                            "Compatibility launcher adapter output missed sentinel "
+                            f"{output_sentinel!r}: {command_item!r}"
+                        )
+                wrapper_evidence = _read_stock_codex_compat_wrapper_evidence(
+                    wrapper_evidence_path
+                )
+                if wrapper_evidence["routeInjected"] is not True:
+                    raise SystemExit(
+                        "Compatibility launcher proof did not inject route evidence.\n"
+                        f"evidence={wrapper_evidence!r}"
+                    )
+                if wrapper_evidence.get("adapterBridgeDir") != str(
+                    adapter_bridge_dir.resolve()
+                ):
+                    raise SystemExit(
+                        "Compatibility launcher proof did not record adapter bridge dir.\n"
+                        f"expected={adapter_bridge_dir.resolve()}\n"
+                        f"evidence={wrapper_evidence!r}"
+                    )
+                if wrapper_evidence.get("adapterToolNames") != [APPLE_DOCS_CLI_TOOL]:
+                    raise SystemExit(
+                        "Compatibility launcher proof recorded wrong adapter tools.\n"
+                        f"evidence={wrapper_evidence!r}"
+                    )
+                removed = installer.uninstall_launcher(
+                    launcher_path=launcher_path,
+                    manifest_path=manifest_path,
+                )
+                if launcher_path.exists() or manifest_path.exists():
+                    raise SystemExit(
+                        "Compatibility launcher uninstall left launcher artifacts behind."
+                    )
+        finally:
+            if previous_pinned_env is not None:
+                os.environ[OMNIGENT_STOCK_CODEX_PATH_ENV] = previous_pinned_env
+
+        return StockCodexCompatLauncherActivationProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            launcher_path=install_result.launcher_path,
+            manifest_path=install_result.manifest_path,
+            repo_root=repo_root,
+            uvx_path=uvx_path,
+            resolved_codex_path=resolved_codex_path,
+            adapter_bin=adapter_package.adapter_bin,
+            adapter_manifest=adapter_package.manifest_path,
+            adapter_bridge_dir=adapter_bridge_dir,
+            adapter_tool_names=adapter_package.tool_names,
+            workspace_root=workspace_root,
+            sandbox="workspace-write",
+            wrapper_evidence_path=wrapper_evidence_path,
+            thread_id=thread_id,
+            command=str(command_item["command"]),
+            command_output=command_output,
+            first_agent_message=first_agent_message,
+            first_agent_message_before_wrapper=str(
+                wrapper_evidence["firstAgentMessageBefore"]
+            ),
+            route_injected=bool(wrapper_evidence["routeInjected"]),
+            probe_output=probe_output.strip(),
+            uninstall_action=str(removed.action),
+            event_count=len(events),
+            stderr_preview=stderr_preview,
+        )
+
+
+def _write_stock_codex_compat_launcher_fake_sosumi(path: Path) -> None:
+    """Write the deterministic Sosumi CLI fixture used by the launcher proof."""
+    path.write_text(
+        "#!/bin/sh\n"
+        "if [ \"${1:-}\" != \"fetch\" ] || "
+        f"[ \"${{2:-}}\" != {shlex.quote(APPLE_DOCS_CLI_URL)} ]; then\n"
+        "  echo unexpected sosumi arguments >&2\n"
+        "  exit 66\n"
+        "fi\n"
+        "cat <<'EOF'\n"
+        "---\n"
+        "title: String\n"
+        f"source: {APPLE_DOCS_CLI_URL}\n"
+        "timestamp: 2026-07-04T12:00:00.000Z\n"
+        "---\n"
+        "EOF\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _write_stock_codex_compat_launcher_fake_codex(path: Path) -> None:
+    """Write a fake stock Codex binary that emits one adapter command event."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import subprocess
+import sys
+
+VERSION = "codex-cli 0.142.2"
+THREAD_ID = "thread-stock-codex-compat-launcher"
+COMMAND = "fetch_apple_docs --url {APPLE_DOCS_CLI_URL}"
+SENTINEL = {STOCK_CODEX_COMPAT_LAUNCHER_ACTIVATION_SENTINEL!r}
+
+if len(sys.argv) > 1 and sys.argv[1] == "--version":
+    print(VERSION)
+    raise SystemExit(0)
+
+completed = subprocess.run(
+    ["/bin/zsh", "-lc", COMMAND],
+    check=False,
+    capture_output=True,
+    text=True,
+)
+output = completed.stdout + completed.stderr
+print(json.dumps({{"type": "thread.started", "thread_id": THREAD_ID}}))
+print(json.dumps({{
+    "type": "item.completed",
+    "item": {{
+        "type": "command_execution",
+        "command": "/bin/zsh -lc '" + COMMAND + "'",
+        "aggregated_output": output,
+        "exit_code": completed.returncode,
+        "status": "completed",
+    }},
+}}))
+agent_message = (
+    SENTINEL
+    if "title: String" in output and {APPLE_DOCS_CLI_URL!r} in output
+    else "STOCK_CODEX_COMPAT_LAUNCHER_ACTIVATION_FAILED"
+)
+print(json.dumps({{
+    "type": "item.completed",
+    "item": {{"type": "agent_message", "text": agent_message}},
+}}))
+raise SystemExit(completed.returncode)
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def print_stock_codex_compat_launcher_activation_proof(
+    proof: StockCodexCompatLauncherActivationProof,
+) -> None:
+    """Emit operator evidence for compatibility launcher activation."""
+    print("stock_codex_compat_launcher_activation_rehearsal=selected")
+    print(
+        "stock_codex_compat_launcher_activation_surface="
+        "managed-codex-launcher-to-wrapper-owned-file-bridge-adapter"
+    )
+    print(f"stock_codex_compat_launcher_activation_launcher_path={proof.launcher_path}")
+    print(f"stock_codex_compat_launcher_activation_manifest_path={proof.manifest_path}")
+    print(
+        "stock_codex_compat_launcher_activation_stock_codex_path="
+        f"{proof.stock_codex_path}"
+    )
+    print(
+        "stock_codex_compat_launcher_activation_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(
+        "stock_codex_compat_launcher_activation_resolved_codex_path="
+        f"{proof.resolved_codex_path}"
+    )
+    print(f"stock_codex_compat_launcher_activation_repo_root={proof.repo_root}")
+    print(f"stock_codex_compat_launcher_activation_uvx_path={proof.uvx_path}")
+    print(f"stock_codex_compat_launcher_activation_adapter_bin={proof.adapter_bin}")
+    print(
+        "stock_codex_compat_launcher_activation_adapter_manifest="
+        f"{proof.adapter_manifest}"
+    )
+    print(
+        "stock_codex_compat_launcher_activation_adapter_bridge_dir="
+        f"{proof.adapter_bridge_dir}"
+    )
+    print(
+        "stock_codex_compat_launcher_activation_adapter_tools="
+        f"{','.join(proof.adapter_tool_names)}"
+    )
+    print(f"stock_codex_compat_launcher_activation_workspace_root={proof.workspace_root}")
+    print(f"stock_codex_compat_launcher_activation_sandbox={proof.sandbox}")
+    print(f"stock_codex_compat_launcher_activation_thread_id={proof.thread_id}")
+    print(f"stock_codex_compat_launcher_activation_event_count={proof.event_count}")
+    print(
+        "stock_codex_compat_launcher_activation_route_injected="
+        f"{proof.route_injected}"
+    )
+    print(
+        "stock_codex_compat_launcher_activation_evidence_path="
+        f"{proof.wrapper_evidence_path}"
+    )
+    print(
+        "stock_codex_compat_launcher_activation_command="
+        f"{_preview_text(proof.command, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_launcher_activation_output_preview="
+        f"{_preview_text(proof.command_output, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_launcher_activation_pre_wrapper_message_preview="
+        f"{_preview_text(proof.first_agent_message_before_wrapper, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_launcher_activation_first_agent_message_preview="
+        f"{_preview_text(proof.first_agent_message, limit=500)!r}"
+    )
+    print(
+        "stock_codex_compat_launcher_activation_probe_output="
+        f"{proof.probe_output!r}"
+    )
+    print(
+        "stock_codex_compat_launcher_activation_uninstall_action="
+        f"{proof.uninstall_action}"
+    )
+    print(
+        "stock_codex_compat_launcher_activation_stderr_preview="
+        f"{proof.stderr_preview!r}"
+    )
+    print(
+        "stock_codex_compat_launcher_activation_cache_lifecycle="
+        "temporary_removed_after_proof"
+    )
+    print(
+        "ASSERTION: managed compatibility launcher can be selected as codex on "
+        "PATH while Omnigent resolves its manifest-pinned stock Codex binary"
+    )
+    print(
+        "ASSERTION: the launcher delegates through uvx to "
+        "omnigent-stock-codex-wrapper with the adapter bridge package active"
+    )
+    print(
+        "ASSERTION: uninstall removed the temporary managed launcher and manifest "
+        "without touching Codex fork state"
     )
 
 
@@ -4689,6 +12439,25 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-channel",
             "stock-codex-homebrew-remote-channel",
             "clean-auth-onboarding",
+            "stock-codex-compat",
+            "stock-codex-compat-live",
+            "stock-codex-compat-wrapper-live",
+            "stock-codex-compat-wrapper-command-tool",
+            "stock-codex-compat-wrapper-adapter-tool",
+            "stock-codex-compat-wrapper-adapter-arbitration",
+            "stock-codex-compat-wrapper-apple-docs-adapter",
+            "stock-codex-compat-wrapper-apple-docs-bridge-adapter",
+            "stock-codex-compat-launcher-activation",
+            "stock-codex-compat-launcher-doctor",
+            "stock-codex-compat-clean-install",
+            "stock-codex-compat-bundle-install",
+            "stock-codex-compat-pkg-structure",
+            "stock-codex-compat-pkg-runtime-live",
+            "stock-codex-compat-pkg-user-bootstrap",
+            "stock-codex-compat-pkg-clean-provision",
+            "stock-codex-compat-pkg-clean-auth-onboarding",
+            "stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
+            "stock-codex-compat-wrapper-relay-tool",
             "app-bundle-entrypoint",
             "launcher-activation",
             "all",
@@ -4734,6 +12503,71 @@ def parse_args() -> argparse.Namespace:
             "'clean-auth-onboarding' proves clean CODEX_HOME needs-auth "
             "classification plus populated auth detection without running "
             "interactive login. "
+            "'stock-codex-compat' proves stock Codex can install the Apple "
+            "workflow plugin from a disposable local marketplace and read "
+            "the Omnigent MCP plus policy-hook bridge from an isolated "
+            "CODEX_HOME. "
+            "'stock-codex-compat-live' starts from stock Codex exec with "
+            "the isolated compatibility profile and requires deterministic "
+            "route evidence before the live model sentinel. "
+            "'stock-codex-compat-wrapper-live' starts from an Omnigent-owned "
+            "wrapper around stock Codex exec, keeps the isolated compatibility "
+            "profile, and requires the wrapper to prefix deterministic route "
+            "evidence before the live model sentinel. "
+            "'stock-codex-compat-wrapper-command-tool' proves that the same "
+            "source-owned wrapper preserves a stock Codex command_execution "
+            "tool event while still prefixing route evidence before the final "
+            "agent message. "
+            "'stock-codex-compat-wrapper-adapter-tool' proves that the same "
+            "source-owned wrapper can validate an Omnigent-owned adapter "
+            "package manifest, expose the declared command through PATH, have "
+            "stock Codex execute it via the command tool, and still prefix "
+            "route evidence before the final agent message. "
+            "'stock-codex-compat-wrapper-adapter-arbitration' proves that "
+            "the same wrapper can validate a generated multi-tool adapter "
+            "package, have stock Codex select the route adapter, reject the "
+            "non-matching adapter, and still prefix route evidence before "
+            "the final agent message. "
+            "'stock-codex-compat-wrapper-apple-docs-adapter' proves that "
+            "the same generated adapter package surface can run the real "
+            "Apple docs adapter through stock Codex's command tool. "
+            "'stock-codex-compat-wrapper-apple-docs-bridge-adapter' proves "
+            "that the real Apple docs adapter can run through a wrapper-owned "
+            "file bridge while stock Codex stays in workspace-write. "
+            "'stock-codex-compat-launcher-activation' proves that a managed "
+            "stock-Codex compatibility launcher can be PATH-selected as "
+            "`codex`, resolve back to its manifest-pinned stock binary without "
+            "recursion, delegate through uvx to omnigent-stock-codex-wrapper, "
+            "and run the generated file-bridge adapter package. "
+            "'stock-codex-compat-launcher-doctor' validates the intended "
+            "compatibility launcher install target, pinned stock Codex, uvx, "
+            "adapter manifest, PATH posture, backup/rollback policy, and "
+            "install command without mutating launcher files. "
+            "'stock-codex-compat-clean-install' proves the same separate "
+            "compatibility command can install, validate, and roll back from "
+            "defaults under a clean temporary HOME. "
+            "'stock-codex-compat-bundle-install' builds a portable runtime "
+            "bundle, extracts it, and proves the same clean-home install and "
+            "rollback flow from the extracted artifact runtime. "
+            "'stock-codex-compat-pkg-structure' builds an unsigned flat "
+            "macOS pkg from the portable runtime bundle and inspects "
+            "identifier, version, install root, scripts, signature status, "
+            "and required payload layout without installing it. "
+            "'stock-codex-compat-pkg-runtime-live' builds the same unsigned "
+            "pkg, expands it without installing, and launches a live stock "
+            "Codex model turn through uvx --from the expanded runtime. "
+            "'stock-codex-compat-pkg-user-bootstrap' stages the same pkg "
+            "payload in a temporary install root and proves the installed "
+            "runtime can bootstrap, update, doctor, and roll back a clean "
+            "user-level compatibility command. "
+            "'stock-codex-compat-wrapper-xcodebuild-bridge-adapter' proves "
+            "that XcodeBuildMCP simulator build/run can execute through the "
+            "same wrapper-owned file bridge while stock Codex stays in "
+            "workspace-write. "
+            "'stock-codex-compat-wrapper-relay-tool' proves that the same "
+            "source-owned wrapper preserves a stock Codex MCP call into the "
+            "Omnigent tool_relay.json sidecar while still prefixing route "
+            "evidence before the final agent message. "
             "'app-bundle-entrypoint' proves a temporary macOS .app bundle can "
             "enter the Omnigent Codex path, pin stock Codex through "
             "OMNIGENT_STOCK_CODEX_PATH, and delegate through uvx without "
@@ -4843,6 +12677,377 @@ def main() -> int:
         codex_path = resolve_codex_path(args.codex_path)
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_clean_auth_onboarding_proof(run_clean_auth_onboarding_proof(codex_path))
+        return 0
+
+    if requested_proof == "stock-codex-compat":
+        if args.allow_fork_codex:
+            raise SystemExit("stock-codex-compat cannot allow a Codex-fork binary.")
+        source_bundle = (
+            args.apple_bundle.expanduser() if args.apple_bundle else resolve_default_bundle()
+        )
+        if not source_bundle.is_dir():
+            raise SystemExit(f"Apple bundle not found: {source_bundle}")
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_proof(
+            run_stock_codex_compat_proof(source_bundle, codex_path)
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-live":
+        if args.allow_fork_codex:
+            raise SystemExit("stock-codex-compat-live cannot allow a Codex-fork binary.")
+        source_bundle = (
+            args.apple_bundle.expanduser() if args.apple_bundle else resolve_default_bundle()
+        )
+        if not source_bundle.is_dir():
+            raise SystemExit(f"Apple bundle not found: {source_bundle}")
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_live_proof(
+            run_stock_codex_compat_live_proof(
+                source_bundle,
+                codex_path,
+                workspace_root=Path.cwd(),
+                timeout_seconds=args.live_proof_timeout,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-wrapper-live":
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-wrapper-live cannot allow a Codex-fork binary."
+            )
+        source_bundle = (
+            args.apple_bundle.expanduser() if args.apple_bundle else resolve_default_bundle()
+        )
+        if not source_bundle.is_dir():
+            raise SystemExit(f"Apple bundle not found: {source_bundle}")
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_wrapper_live_proof(
+            run_stock_codex_compat_wrapper_live_proof(
+                source_bundle,
+                codex_path,
+                workspace_root=Path.cwd(),
+                timeout_seconds=args.live_proof_timeout,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-wrapper-command-tool":
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-wrapper-command-tool cannot allow a Codex-fork binary."
+            )
+        source_bundle = (
+            args.apple_bundle.expanduser() if args.apple_bundle else resolve_default_bundle()
+        )
+        if not source_bundle.is_dir():
+            raise SystemExit(f"Apple bundle not found: {source_bundle}")
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_wrapper_command_tool_proof(
+            run_stock_codex_compat_wrapper_command_tool_proof(
+                source_bundle,
+                codex_path,
+                timeout_seconds=args.live_proof_timeout,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-wrapper-adapter-tool":
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-wrapper-adapter-tool cannot allow a Codex-fork binary."
+            )
+        source_bundle = (
+            args.apple_bundle.expanduser() if args.apple_bundle else resolve_default_bundle()
+        )
+        if not source_bundle.is_dir():
+            raise SystemExit(f"Apple bundle not found: {source_bundle}")
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_wrapper_adapter_tool_proof(
+            run_stock_codex_compat_wrapper_adapter_tool_proof(
+                source_bundle,
+                codex_path,
+                timeout_seconds=args.live_proof_timeout,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-wrapper-adapter-arbitration":
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-wrapper-adapter-arbitration cannot allow a "
+                "Codex-fork binary."
+            )
+        source_bundle = (
+            args.apple_bundle.expanduser() if args.apple_bundle else resolve_default_bundle()
+        )
+        if not source_bundle.is_dir():
+            raise SystemExit(f"Apple bundle not found: {source_bundle}")
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_wrapper_adapter_arbitration_proof(
+            run_stock_codex_compat_wrapper_adapter_arbitration_proof(
+                source_bundle,
+                codex_path,
+                timeout_seconds=args.live_proof_timeout,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-wrapper-apple-docs-adapter":
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-wrapper-apple-docs-adapter cannot allow a "
+                "Codex-fork binary."
+            )
+        source_bundle = (
+            args.apple_bundle.expanduser() if args.apple_bundle else resolve_default_bundle()
+        )
+        if not source_bundle.is_dir():
+            raise SystemExit(f"Apple bundle not found: {source_bundle}")
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_wrapper_apple_docs_adapter_proof(
+            run_stock_codex_compat_wrapper_apple_docs_adapter_proof(
+                source_bundle,
+                codex_path,
+                timeout_seconds=args.live_proof_timeout,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-wrapper-apple-docs-bridge-adapter":
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-wrapper-apple-docs-bridge-adapter cannot "
+                "allow a Codex-fork binary."
+            )
+        source_bundle = (
+            args.apple_bundle.expanduser() if args.apple_bundle else resolve_default_bundle()
+        )
+        if not source_bundle.is_dir():
+            raise SystemExit(f"Apple bundle not found: {source_bundle}")
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_wrapper_apple_docs_bridge_adapter_proof(
+            run_stock_codex_compat_wrapper_apple_docs_bridge_adapter_proof(
+                source_bundle,
+                codex_path,
+                timeout_seconds=args.live_proof_timeout,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-launcher-activation":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-launcher-activation does not use --apple-bundle; "
+                "omit it."
+            )
+        if args.codex_path is not None:
+            raise SystemExit(
+                "stock-codex-compat-launcher-activation creates an isolated fake "
+                "stock Codex binary; omit --codex-path."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-launcher-activation cannot allow a Codex-fork "
+                "binary."
+            )
+        print_stock_codex_compat_launcher_activation_proof(
+            run_stock_codex_compat_launcher_activation_proof(
+                timeout_seconds=args.live_proof_timeout,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-launcher-doctor":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-launcher-doctor does not use --apple-bundle; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-launcher-doctor cannot allow a Codex-fork binary."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_launcher_doctor_proof(
+            run_stock_codex_compat_launcher_doctor_proof(codex_path)
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-clean-install":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-clean-install does not use --apple-bundle; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-clean-install cannot allow a Codex-fork binary."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_clean_install_proof(
+            run_stock_codex_compat_clean_install_proof(codex_path)
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-bundle-install":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-bundle-install does not use --apple-bundle; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-bundle-install cannot allow a Codex-fork binary."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_bundle_install_proof(
+            run_stock_codex_compat_bundle_install_proof(codex_path)
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-structure":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-structure does not use --apple-bundle; omit it."
+            )
+        if args.codex_path is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-structure does not use --codex-path; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-structure cannot allow a Codex-fork binary."
+            )
+        print_stock_codex_compat_pkg_structure_proof(
+            run_stock_codex_compat_pkg_structure_proof()
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-runtime-live":
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-runtime-live cannot allow a Codex-fork binary."
+            )
+        source_bundle = (
+            args.apple_bundle.expanduser() if args.apple_bundle else resolve_default_bundle()
+        )
+        if not source_bundle.is_dir():
+            raise SystemExit(f"Apple bundle not found: {source_bundle}")
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_pkg_runtime_live_proof(
+            run_stock_codex_compat_pkg_runtime_live_proof(
+                source_bundle,
+                codex_path,
+                workspace_root=Path.cwd(),
+                timeout_seconds=args.live_proof_timeout,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-user-bootstrap":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-user-bootstrap does not use --apple-bundle; "
+                "omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-user-bootstrap cannot allow a Codex-fork binary."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_pkg_user_bootstrap_proof(
+            run_stock_codex_compat_pkg_user_bootstrap_proof(codex_path)
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-clean-provision":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-provision does not use --apple-bundle; "
+                "omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-provision cannot allow a Codex-fork binary."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_pkg_clean_provision_proof(
+            run_stock_codex_compat_pkg_clean_provision_proof(codex_path)
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-clean-auth-onboarding":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-auth-onboarding does not use "
+                "--apple-bundle; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-auth-onboarding cannot allow a "
+                "Codex-fork binary."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_pkg_clean_auth_proof(
+            run_stock_codex_compat_pkg_clean_auth_proof(codex_path)
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-wrapper-xcodebuild-bridge-adapter":
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-wrapper-xcodebuild-bridge-adapter cannot "
+                "allow a Codex-fork binary."
+            )
+        source_bundle = (
+            args.apple_bundle.expanduser() if args.apple_bundle else resolve_default_bundle()
+        )
+        if not source_bundle.is_dir():
+            raise SystemExit(f"Apple bundle not found: {source_bundle}")
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
+            run_stock_codex_compat_wrapper_xcodebuild_bridge_adapter_proof(
+                source_bundle,
+                codex_path,
+                timeout_seconds=args.live_proof_timeout,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-wrapper-relay-tool":
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-wrapper-relay-tool cannot allow a Codex-fork binary."
+            )
+        source_bundle = (
+            args.apple_bundle.expanduser() if args.apple_bundle else resolve_default_bundle()
+        )
+        if not source_bundle.is_dir():
+            raise SystemExit(f"Apple bundle not found: {source_bundle}")
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_wrapper_relay_tool_proof(
+            run_stock_codex_compat_wrapper_relay_tool_proof(
+                source_bundle,
+                codex_path,
+                timeout_seconds=args.live_proof_timeout,
+            )
+        )
         return 0
 
     if requested_proof == "app-bundle-entrypoint":
