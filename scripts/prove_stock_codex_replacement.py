@@ -31,6 +31,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 from urllib.parse import urlparse
@@ -1274,6 +1275,67 @@ class StockCodexCompatPkgUpdateAcquisitionProof:
 
 
 @dataclass(frozen=True)
+class StockCodexCompatPkgUpdatePromotionProof:
+    """Proof result for stock-Codex promotion from a pkg-installed runtime."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    stock_codex_sha256: str
+    package_path: Path
+    package_sha256: str
+    source_bundle_sha256: str
+    package_identifier: str
+    package_version: str
+    install_root: Path
+    installed_prefix: Path
+    installed_runtime_root: Path
+    provisioner_script_path: Path
+    pkg_manifest_path: Path
+    bundle_manifest_path: Path
+    clean_home: Path
+    clean_cache_root: Path
+    current_codex_path: Path
+    current_codex_version: str
+    current_codex_sha256: str
+    policy_name: str
+    cask_token: str
+    cask_tap: str
+    cask_homepage: str
+    cask_version: str
+    cask_url: str
+    cask_sha256: str
+    archive_executable: str
+    channel_manifest_path: Path
+    launcher_manifest_path: Path
+    rollback_metadata_path: Path
+    acquired_payload_dir: Path
+    acquired_codex_path: Path
+    acquired_version: str
+    acquired_sha256: str
+    acquired_source_kind: str
+    acquisition_action: str
+    acquisition_mutates_filesystem: bool
+    acquisition_promotion_required: bool
+    acquisition_promotion_ready: bool
+    acquisition_launcher_update_required: bool
+    promoted_codex_path: Path
+    promoted_env_path: Path
+    promoted_metadata_to_path: Path
+    post_promotion_action: str
+    post_promotion_mutates_filesystem: bool
+    post_promotion_required: bool
+    rollback_codex_path: Path
+    rollback_env_path: Path
+    rollback_plan_action: str
+    rollback_plan_mutates_filesystem: bool
+    rollback_plan_promotion_required: bool
+    omnigent_resolved_promoted_codex_path: Path
+    omnigent_resolved_rollback_codex_path: Path
+    host_cache_root: Path
+    host_cache_referenced_by_plans: bool
+
+
+@dataclass(frozen=True)
 class StockCodexCompatPkgCleanAuthProof:
     """Proof result for clean auth onboarding from a pkg-installed runtime."""
 
@@ -2136,6 +2198,168 @@ def _run_stock_codex_provisioner_json(
     if not isinstance(parsed, dict):
         raise SystemExit(f"{failure_label} emitted non-object JSON: {parsed!r}")
     return parsed
+
+
+def _read_json_file(path: Path, *, label: str) -> dict[str, Any]:
+    """Read a JSON object from disk for proof-local manifest checks."""
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise SystemExit(f"{label} could not read JSON file: {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{label} JSON file is invalid: {path}") from exc
+    if not isinstance(parsed, dict):
+        raise SystemExit(f"{label} JSON file is not an object: {path}")
+    return parsed
+
+
+def _write_json_file_atomic(path: Path, payload: dict[str, Any]) -> None:
+    """Atomically write a proof-local JSON object."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    tmp_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    tmp_path.replace(path)
+
+
+def _launcher_manifest_stock_codex_path(
+    manifest: dict[str, Any],
+    *,
+    field: str,
+    label: str,
+) -> Path:
+    value = manifest.get(field)
+    if not isinstance(value, str) or not value:
+        raise SystemExit(f"{label} missing launcher manifest field {field!r}: {manifest!r}")
+    return Path(value).expanduser().resolve()
+
+
+def _launcher_manifest_env_codex_path(
+    manifest: dict[str, Any],
+    *,
+    label: str,
+) -> Path:
+    env = manifest.get("env")
+    if not isinstance(env, dict):
+        raise SystemExit(f"{label} missing launcher manifest env object: {manifest!r}")
+    value = env.get(OMNIGENT_STOCK_CODEX_PATH_ENV)
+    if not isinstance(value, str) or not value:
+        raise SystemExit(
+            f"{label} missing launcher manifest {OMNIGENT_STOCK_CODEX_PATH_ENV}: {manifest!r}"
+        )
+    return Path(value).expanduser().resolve()
+
+
+def _promote_stock_codex_launcher_manifest(
+    *,
+    launcher_manifest_path: Path,
+    rollback_metadata_path: Path,
+    expected_current_codex_path: Path,
+    target_codex_path: Path,
+    target_manifest_path: Path,
+    target_version: str,
+    target_sha256: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Promote a proof-local launcher manifest and persist rollback metadata."""
+    manifest = _read_json_file(
+        launcher_manifest_path,
+        label="Stock Codex launcher promotion",
+    )
+    current_path = _launcher_manifest_stock_codex_path(
+        manifest,
+        field="pinnedCodexPath",
+        label="Stock Codex launcher promotion",
+    )
+    current_env_path = _launcher_manifest_env_codex_path(
+        manifest,
+        label="Stock Codex launcher promotion",
+    )
+    expected_current = expected_current_codex_path.expanduser().resolve()
+    if current_path != expected_current or current_env_path != expected_current:
+        raise SystemExit(
+            "Stock Codex launcher promotion started from an unexpected pointer.\n"
+            f"expected={expected_current}\npinned={current_path}\nenv={current_env_path}"
+        )
+
+    target = target_codex_path.expanduser().resolve()
+    rollback_metadata: dict[str, Any] = {
+        "schemaVersion": 1,
+        "kind": "omnigent-stock-codex-compat-update-rollback",
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "launcherManifestPath": str(launcher_manifest_path),
+        "field": "pinnedCodexPath",
+        "envKey": OMNIGENT_STOCK_CODEX_PATH_ENV,
+        "from": str(expected_current),
+        "to": str(target),
+        "targetManifestPath": str(target_manifest_path),
+        "targetVersion": target_version,
+        "targetSha256": target_sha256,
+    }
+    _write_json_file_atomic(rollback_metadata_path, rollback_metadata)
+
+    env = dict(manifest.get("env") if isinstance(manifest.get("env"), dict) else {})
+    env[OMNIGENT_STOCK_CODEX_PATH_ENV] = str(target)
+    manifest["pinnedCodexPath"] = str(target)
+    manifest["env"] = env
+    manifest["lastStockCodexUpdate"] = {
+        "schemaVersion": 1,
+        "from": str(expected_current),
+        "to": str(target),
+        "targetManifestPath": str(target_manifest_path),
+        "targetVersion": target_version,
+        "targetSha256": target_sha256,
+        "rollbackMetadataPath": str(rollback_metadata_path),
+    }
+    _write_json_file_atomic(launcher_manifest_path, manifest)
+    return manifest, rollback_metadata
+
+
+def _rollback_stock_codex_launcher_manifest(
+    *,
+    launcher_manifest_path: Path,
+    rollback_metadata_path: Path,
+) -> dict[str, Any]:
+    """Roll a proof-local launcher manifest back to its previous stock-Codex path."""
+    manifest = _read_json_file(
+        launcher_manifest_path,
+        label="Stock Codex launcher rollback",
+    )
+    rollback = _read_json_file(
+        rollback_metadata_path,
+        label="Stock Codex launcher rollback metadata",
+    )
+    previous = Path(_json_string(rollback, "from")).expanduser().resolve()
+    promoted = Path(_json_string(rollback, "to")).expanduser().resolve()
+    current_path = _launcher_manifest_stock_codex_path(
+        manifest,
+        field="pinnedCodexPath",
+        label="Stock Codex launcher rollback",
+    )
+    current_env_path = _launcher_manifest_env_codex_path(
+        manifest,
+        label="Stock Codex launcher rollback",
+    )
+    if current_path != promoted or current_env_path != promoted:
+        raise SystemExit(
+            "Stock Codex launcher rollback started from an unexpected pointer.\n"
+            f"expected={promoted}\npinned={current_path}\nenv={current_env_path}"
+        )
+
+    env = dict(manifest.get("env") if isinstance(manifest.get("env"), dict) else {})
+    env[OMNIGENT_STOCK_CODEX_PATH_ENV] = str(previous)
+    manifest["pinnedCodexPath"] = str(previous)
+    manifest["env"] = env
+    manifest["lastStockCodexRollback"] = {
+        "schemaVersion": 1,
+        "from": str(promoted),
+        "to": str(previous),
+        "rollbackMetadataPath": str(rollback_metadata_path),
+        "appliedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    _write_json_file_atomic(launcher_manifest_path, manifest)
+    return manifest
 
 
 def run_stock_codex_production_channel_policy_proof(
@@ -10859,6 +11083,542 @@ def run_stock_codex_compat_pkg_update_acquisition_proof(
         )
 
 
+def run_stock_codex_compat_pkg_update_promotion_proof(
+    stock_codex_path: Path,
+) -> StockCodexCompatPkgUpdatePromotionProof:
+    """Prove a pkg-installed runtime can promote and roll back a staged update."""
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    assert_stock_codex_path(stock_codex_path, allow_fork_codex=False)
+    stock_codex_realpath = stock_codex_path.resolve()
+    stock_codex_version = codex_version(stock_codex_realpath)
+    stock_codex_sha256 = sha256_file(stock_codex_realpath)
+    cask = _read_homebrew_codex_cask()
+    cask_url = _json_string(cask, "url")
+    cask_sha256 = _json_string(cask, "sha256").lower()
+    cask_version = _json_string(cask, "version")
+    cask_token = _json_string(cask, "token")
+    cask_tap = _json_string(cask, "tap")
+    cask_homepage = _json_string(cask, "homepage")
+    archive_executable = _homebrew_codex_binary_name(cask)
+    _validate_homebrew_codex_cask_metadata(
+        token=cask_token,
+        homepage=cask_homepage,
+        url=cask_url,
+        sha256=cask_sha256,
+    )
+    selected_version = f"codex-cli {cask_version}"
+    provisioner = _load_stock_codex_provisioner()
+    policy_name = provisioner.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY
+
+    source_repo_root = Path(__file__).resolve().parents[1]
+    host_cache_root = (Path.home() / ".local" / "omnigent" / "codex-stock").expanduser().resolve()
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-pkg-update-promotion-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        artifact_dir = root / "artifacts"
+        artifact_dir.mkdir()
+        package_path = artifact_dir / "omnigent-stock-codex-compat.pkg"
+        payload = _run_stock_codex_compat_pkg_builder_cli_json(
+            [
+                "--repo-root",
+                str(source_repo_root),
+                "--output",
+                str(package_path),
+                "--force",
+            ],
+            repo_root=source_repo_root,
+        )
+        package_proof = _validate_stock_codex_compat_pkg_builder_payload(
+            payload,
+            source_repo_root=source_repo_root,
+        )
+        expanded_payload_root = _expand_stock_codex_compat_pkg(
+            package_proof.package_path,
+            root / "pkg-expanded",
+        )
+        install_root = root / "installed-root"
+        installed_runtime_root = _stage_stock_codex_compat_pkg_install_root(
+            payload_root=expanded_payload_root,
+            install_root=install_root,
+            packaged_runtime_root=package_proof.runtime_root,
+            source_repo_root=source_repo_root,
+        )
+        installed_prefix = install_root / package_proof.install_prefix.relative_to("/")
+        provisioner_script_path = installed_runtime_root / "scripts" / "provision_stock_codex.py"
+        if not provisioner_script_path.is_file():
+            raise SystemExit(
+                "Pkg-installed runtime is missing the stock Codex provisioner.\n"
+                f"expected={provisioner_script_path}"
+            )
+        pkg_manifest_path = installed_prefix / "pkg-manifest.json"
+        bundle_manifest_path = installed_prefix / "bundle-manifest.json"
+        pkg_manifest = json.loads(pkg_manifest_path.read_text(encoding="utf-8"))
+        bundle_manifest = json.loads(bundle_manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(pkg_manifest, dict) or not isinstance(bundle_manifest, dict):
+            raise SystemExit("Installed compatibility pkg manifests were not JSON objects.")
+        pkg_contract = pkg_manifest.get("contract")
+        if not isinstance(pkg_contract, dict):
+            raise SystemExit(f"Installed compatibility pkg contract missing: {pkg_manifest!r}")
+        if pkg_contract.get("stockCodexProvisioning") != "deferred-to-installed-runtime-command":
+            raise SystemExit(
+                "Installed compatibility stock Codex provisioning contract mismatch: "
+                f"{pkg_contract!r}"
+            )
+        provisioner_manifest_path = pkg_manifest.get("stockCodexProvisioner")
+        expected_provisioner_manifest_path = str(
+            package_proof.runtime_root / "scripts" / "provision_stock_codex.py"
+        )
+        if provisioner_manifest_path != expected_provisioner_manifest_path:
+            raise SystemExit(
+                "Installed compatibility pkg manifest recorded the wrong provisioner path: "
+                f"{pkg_manifest!r}"
+            )
+        if bundle_manifest.get("sourceRoot") != "<omitted-from-pkg>":
+            raise SystemExit(
+                "Installed compatibility bundle manifest embedded source root: "
+                f"{bundle_manifest!r}"
+            )
+
+        clean_home = root / "home"
+        clean_tmp = root / "tmp"
+        clean_home.mkdir(mode=0o700)
+        clean_tmp.mkdir(mode=0o700)
+        clean_cache_root = clean_home / ".local" / "omnigent" / "codex-stock"
+        if clean_cache_root.exists():
+            raise SystemExit(
+                "Pkg update promotion clean cache unexpectedly exists before proof.\n"
+                f"cache={clean_cache_root}"
+            )
+
+        current_codex_path = root / "current" / "codex"
+        current_codex_path.parent.mkdir(parents=True)
+        shutil.copy2(stock_codex_realpath, current_codex_path)
+        current_codex_path.chmod(0o755)
+        current_codex_version = codex_version(current_codex_path)
+        current_codex_sha = sha256_file(current_codex_path)
+        if current_codex_version != stock_codex_version or current_codex_sha != stock_codex_sha256:
+            raise SystemExit(
+                "Pkg update promotion temp current Codex copy changed identity.\n"
+                f"source_version={stock_codex_version!r}\n"
+                f"current_version={current_codex_version!r}\n"
+                f"source_sha={stock_codex_sha256}\ncurrent_sha={current_codex_sha}"
+            )
+
+        channel_manifest_path = root / "official-remote-update-channel.json"
+        channel_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-channel",
+                    "latest": cask_version,
+                    "artifacts": [
+                        {
+                            "version": selected_version,
+                            "url": cask_url,
+                            "sha256": cask_sha256,
+                            "archiveFormat": "tar.gz",
+                            "archiveExecutable": archive_executable,
+                        }
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        launcher_manifest_path = root / "stock-codex-compat-launcher.json"
+        launcher_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-compat-launcher",
+                    "pinnedCodexPath": str(current_codex_path),
+                    "env": {OMNIGENT_STOCK_CODEX_PATH_ENV: str(current_codex_path)},
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rollback_metadata_path = root / "stock-codex-compat-launcher.rollback.json"
+
+        python_path_entries = [str(installed_runtime_root)]
+        if os.environ.get("PYTHONPATH"):
+            python_path_entries.append(os.environ["PYTHONPATH"])
+        env = os.environ.copy()
+        env.update(
+            {
+                "HOME": str(clean_home),
+                "TMPDIR": str(clean_tmp),
+                "PYTHONPATH": os.pathsep.join(python_path_entries),
+            }
+        )
+        env.pop("CODEX_HOME", None)
+        env.pop(OMNIGENT_STOCK_CODEX_PATH_ENV, None)
+        update_command = [
+            sys.executable,
+            str(provisioner_script_path),
+            "--plan-update",
+            "--channel-manifest",
+            str(channel_manifest_path),
+            "--expected-sha256",
+            cask_sha256,
+            "--channel-policy",
+            policy_name,
+            "--launcher-manifest",
+            str(launcher_manifest_path),
+            "--stage-update",
+            "--json",
+            "--cache-root",
+            str(clean_cache_root),
+        ]
+        acquisition_plan = _run_stock_codex_provisioner_json(
+            [
+                *update_command,
+                "--current-codex",
+                str(current_codex_path),
+                "--allow-remote-channel-download",
+            ],
+            env=env,
+            cwd=installed_runtime_root,
+            failure_label="Pkg-installed Stock Codex update promotion acquisition",
+            timeout=300,
+        )
+        acquisition_action = _json_string(acquisition_plan, "action")
+        acquisition_mutates = _json_bool(
+            acquisition_plan,
+            "mutatesFilesystem",
+            label="Pkg-installed Stock Codex update promotion acquisition",
+        )
+        acquisition_target = _json_object(
+            acquisition_plan,
+            "target",
+            label="Pkg-installed Stock Codex update promotion acquisition",
+        )
+        acquisition_target_state = _json_string(acquisition_target, "state")
+        acquired_codex_path = Path(_json_string(acquisition_target, "codexPath")).resolve()
+        acquired_payload_dir = Path(_json_string(acquisition_target, "payloadDir")).resolve()
+        if not acquired_codex_path.is_relative_to(clean_cache_root.resolve()):
+            raise SystemExit(
+                "Pkg-installed update promotion acquired a Codex path outside "
+                "the clean cache.\n"
+                f"cache_root={clean_cache_root}\ncodex_path={acquired_codex_path}"
+            )
+        if not acquired_payload_dir.is_relative_to(clean_cache_root.resolve()):
+            raise SystemExit(
+                "Pkg-installed update promotion wrote outside the clean cache.\n"
+                f"cache_root={clean_cache_root}\npayload_dir={acquired_payload_dir}"
+            )
+        acquisition_promotion = _json_object(
+            acquisition_plan,
+            "promotion",
+            label="Pkg-installed Stock Codex update promotion acquisition",
+        )
+        acquisition_promotion_required = _json_bool(
+            acquisition_promotion,
+            "required",
+            label="Pkg-installed Stock Codex update promotion acquisition promotion",
+        )
+        acquisition_promotion_ready = _json_bool(
+            acquisition_promotion,
+            "ready",
+            label="Pkg-installed Stock Codex update promotion acquisition promotion",
+        )
+        acquisition_launcher = _json_object(
+            acquisition_promotion,
+            "launcherManifest",
+            label="Pkg-installed Stock Codex update promotion acquisition promotion",
+        )
+        acquisition_launcher_update_required = _json_bool(
+            acquisition_launcher,
+            "updateRequired",
+            label="Pkg-installed Stock Codex update promotion launcher promotion",
+        )
+        staged_payload = _json_object(
+            acquisition_plan,
+            "stagedPayload",
+            label="Pkg-installed Stock Codex update promotion acquisition",
+        )
+        acquired_version = _json_string(staged_payload, "version")
+        acquired_sha = _json_string(staged_payload, "sha256")
+        acquired_source_kind = _json_string(staged_payload, "sourceKind")
+        if acquisition_action != "staged" or acquisition_target_state != "ready":
+            raise SystemExit(
+                "Pkg-installed update promotion did not stage a ready target.\n"
+                f"plan={acquisition_plan!r}"
+            )
+        if not acquisition_mutates:
+            raise SystemExit(
+                "Pkg-installed update promotion acquisition did not report mutation: "
+                f"{acquisition_plan!r}"
+            )
+        if not acquisition_promotion_required or not acquisition_promotion_ready:
+            raise SystemExit(
+                "Pkg-installed update promotion did not report target-ready "
+                "promotion intent.\n"
+                f"plan={acquisition_plan!r}"
+            )
+        if not acquisition_launcher_update_required:
+            raise SystemExit(
+                "Pkg-installed update promotion did not report launcher update intent.\n"
+                f"plan={acquisition_plan!r}"
+            )
+        if acquired_version != selected_version or acquired_source_kind != "channel":
+            raise SystemExit(
+                "Pkg-installed update promotion staged payload metadata mismatch.\n"
+                f"plan={acquisition_plan!r}"
+            )
+        if not acquired_codex_path.is_file() or not os.access(acquired_codex_path, os.X_OK):
+            raise SystemExit(
+                f"Pkg-installed update-promoted Codex is not executable: {acquired_codex_path}"
+            )
+        actual_acquired_version = codex_version(acquired_codex_path)
+        if actual_acquired_version != selected_version:
+            raise SystemExit(
+                "Pkg-installed update-promoted Codex binary reported an "
+                "unexpected version.\n"
+                f"expected={selected_version!r}\nactual={actual_acquired_version!r}"
+            )
+        acquired_manifest_path = acquired_payload_dir / "manifest.json"
+        acquired_manifest = json.loads(acquired_manifest_path.read_text(encoding="utf-8"))
+        if acquired_manifest.get("sourcePath") != cask_url:
+            raise SystemExit(
+                f"Pkg-installed update promotion manifest source mismatch: {acquired_manifest!r}"
+            )
+        if acquired_manifest.get("sourceKind") != "channel":
+            raise SystemExit(
+                "Pkg-installed update promotion manifest source kind mismatch: "
+                f"{acquired_manifest!r}"
+            )
+
+        promoted_manifest, rollback_metadata = _promote_stock_codex_launcher_manifest(
+            launcher_manifest_path=launcher_manifest_path,
+            rollback_metadata_path=rollback_metadata_path,
+            expected_current_codex_path=current_codex_path,
+            target_codex_path=acquired_codex_path,
+            target_manifest_path=acquired_manifest_path,
+            target_version=acquired_version,
+            target_sha256=acquired_sha,
+        )
+        promoted_codex_path = _launcher_manifest_stock_codex_path(
+            promoted_manifest,
+            field="pinnedCodexPath",
+            label="Stock Codex update promotion proof",
+        )
+        promoted_env_path = _launcher_manifest_env_codex_path(
+            promoted_manifest,
+            label="Stock Codex update promotion proof",
+        )
+        promoted_metadata_to_path = (
+            Path(_json_string(rollback_metadata, "to")).expanduser().resolve()
+        )
+        if (
+            promoted_codex_path != acquired_codex_path
+            or promoted_env_path != acquired_codex_path
+            or promoted_metadata_to_path != acquired_codex_path
+        ):
+            raise SystemExit(
+                "Pkg-installed update promotion did not persist the acquired target.\n"
+                f"target={acquired_codex_path}\n"
+                f"manifest={promoted_codex_path}\nenv={promoted_env_path}\n"
+                f"rollback_to={promoted_metadata_to_path}"
+            )
+
+        with temporary_env({OMNIGENT_STOCK_CODEX_PATH_ENV: str(promoted_codex_path)}):
+            promoted_resolved_raw = _find_codex_cli()
+        if promoted_resolved_raw is None:
+            raise SystemExit(f"{OMNIGENT_STOCK_CODEX_PATH_ENV} did not resolve after promotion.")
+        promoted_resolved_path = Path(promoted_resolved_raw).expanduser().resolve()
+        if promoted_resolved_path != acquired_codex_path:
+            raise SystemExit(
+                "Omnigent resolver did not select the promoted stock Codex target.\n"
+                f"expected={acquired_codex_path}\nactual={promoted_resolved_raw}"
+            )
+
+        post_promotion_plan = _run_stock_codex_provisioner_json(
+            update_command,
+            env=env,
+            cwd=installed_runtime_root,
+            failure_label="Pkg-installed Stock Codex update promotion post-plan",
+            timeout=60,
+        )
+        post_promotion_action = _json_string(post_promotion_plan, "action")
+        post_promotion_mutates = _json_bool(
+            post_promotion_plan,
+            "mutatesFilesystem",
+            label="Pkg-installed Stock Codex update promotion post-plan",
+        )
+        post_promotion = _json_object(
+            post_promotion_plan,
+            "promotion",
+            label="Pkg-installed Stock Codex update promotion post-plan",
+        )
+        post_promotion_required = _json_bool(
+            post_promotion,
+            "required",
+            label="Pkg-installed Stock Codex update promotion post-plan",
+        )
+        if (
+            post_promotion_action != "up-to-date"
+            or post_promotion_mutates
+            or post_promotion_required
+        ):
+            raise SystemExit(
+                "Pkg-installed update promotion did not suppress promotion "
+                "after manifest update.\n"
+                f"plan={post_promotion_plan!r}"
+            )
+
+        rollback_manifest = _rollback_stock_codex_launcher_manifest(
+            launcher_manifest_path=launcher_manifest_path,
+            rollback_metadata_path=rollback_metadata_path,
+        )
+        rollback_codex_path = _launcher_manifest_stock_codex_path(
+            rollback_manifest,
+            field="pinnedCodexPath",
+            label="Stock Codex update rollback proof",
+        )
+        rollback_env_path = _launcher_manifest_env_codex_path(
+            rollback_manifest,
+            label="Stock Codex update rollback proof",
+        )
+        if rollback_codex_path != current_codex_path or rollback_env_path != current_codex_path:
+            raise SystemExit(
+                "Pkg-installed update rollback did not restore the previous pointer.\n"
+                f"expected={current_codex_path}\n"
+                f"manifest={rollback_codex_path}\nenv={rollback_env_path}"
+            )
+
+        with temporary_env({OMNIGENT_STOCK_CODEX_PATH_ENV: str(rollback_codex_path)}):
+            rollback_resolved_raw = _find_codex_cli()
+        if rollback_resolved_raw is None:
+            raise SystemExit(f"{OMNIGENT_STOCK_CODEX_PATH_ENV} did not resolve after rollback.")
+        rollback_resolved_path = Path(rollback_resolved_raw).expanduser().resolve()
+        if rollback_resolved_path != current_codex_path:
+            raise SystemExit(
+                "Omnigent resolver did not select the rollback stock Codex target.\n"
+                f"expected={current_codex_path}\nactual={rollback_resolved_raw}"
+            )
+
+        rollback_plan = _run_stock_codex_provisioner_json(
+            update_command,
+            env=env,
+            cwd=installed_runtime_root,
+            failure_label="Pkg-installed Stock Codex update promotion rollback-plan",
+            timeout=60,
+        )
+        rollback_plan_action = _json_string(rollback_plan, "action")
+        rollback_plan_mutates = _json_bool(
+            rollback_plan,
+            "mutatesFilesystem",
+            label="Pkg-installed Stock Codex update promotion rollback-plan",
+        )
+        rollback_plan_promotion = _json_object(
+            rollback_plan,
+            "promotion",
+            label="Pkg-installed Stock Codex update promotion rollback-plan",
+        )
+        rollback_plan_promotion_required = _json_bool(
+            rollback_plan_promotion,
+            "required",
+            label="Pkg-installed Stock Codex update promotion rollback-plan",
+        )
+        if (
+            rollback_plan_action != "stage-ready"
+            or rollback_plan_mutates
+            or not rollback_plan_promotion_required
+        ):
+            raise SystemExit(
+                "Pkg-installed update rollback did not restore stage-ready "
+                "promotion posture.\n"
+                f"plan={rollback_plan!r}"
+            )
+
+        proof_text = (
+            json.dumps(acquisition_plan, sort_keys=True)
+            + "\n"
+            + json.dumps(post_promotion_plan, sort_keys=True)
+            + "\n"
+            + json.dumps(rollback_plan, sort_keys=True)
+            + "\n"
+            + json.dumps(promoted_manifest, sort_keys=True)
+            + "\n"
+            + json.dumps(rollback_metadata, sort_keys=True)
+            + "\n"
+            + json.dumps(rollback_manifest, sort_keys=True)
+            + "\n"
+            + json.dumps(acquired_manifest, sort_keys=True)
+        )
+        host_cache_referenced = str(host_cache_root) in proof_text
+        if host_cache_referenced:
+            raise SystemExit(
+                "Pkg-installed update promotion referenced the host stock Codex cache.\n"
+                f"host_cache_root={host_cache_root}"
+            )
+
+        return StockCodexCompatPkgUpdatePromotionProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            stock_codex_sha256=stock_codex_sha256,
+            package_path=package_proof.package_path,
+            package_sha256=package_proof.package_sha256,
+            source_bundle_sha256=package_proof.source_bundle_sha256,
+            package_identifier=package_proof.package_identifier,
+            package_version=package_proof.package_version,
+            install_root=install_root,
+            installed_prefix=installed_prefix,
+            installed_runtime_root=installed_runtime_root,
+            provisioner_script_path=provisioner_script_path,
+            pkg_manifest_path=pkg_manifest_path,
+            bundle_manifest_path=bundle_manifest_path,
+            clean_home=clean_home,
+            clean_cache_root=clean_cache_root,
+            current_codex_path=current_codex_path,
+            current_codex_version=current_codex_version,
+            current_codex_sha256=current_codex_sha,
+            policy_name=policy_name,
+            cask_token=cask_token,
+            cask_tap=cask_tap,
+            cask_homepage=cask_homepage,
+            cask_version=cask_version,
+            cask_url=cask_url,
+            cask_sha256=cask_sha256,
+            archive_executable=archive_executable,
+            channel_manifest_path=channel_manifest_path,
+            launcher_manifest_path=launcher_manifest_path,
+            rollback_metadata_path=rollback_metadata_path,
+            acquired_payload_dir=acquired_payload_dir,
+            acquired_codex_path=acquired_codex_path,
+            acquired_version=acquired_version,
+            acquired_sha256=acquired_sha,
+            acquired_source_kind=acquired_source_kind,
+            acquisition_action=acquisition_action,
+            acquisition_mutates_filesystem=acquisition_mutates,
+            acquisition_promotion_required=acquisition_promotion_required,
+            acquisition_promotion_ready=acquisition_promotion_ready,
+            acquisition_launcher_update_required=acquisition_launcher_update_required,
+            promoted_codex_path=promoted_codex_path,
+            promoted_env_path=promoted_env_path,
+            promoted_metadata_to_path=promoted_metadata_to_path,
+            post_promotion_action=post_promotion_action,
+            post_promotion_mutates_filesystem=post_promotion_mutates,
+            post_promotion_required=post_promotion_required,
+            rollback_codex_path=rollback_codex_path,
+            rollback_env_path=rollback_env_path,
+            rollback_plan_action=rollback_plan_action,
+            rollback_plan_mutates_filesystem=rollback_plan_mutates,
+            rollback_plan_promotion_required=rollback_plan_promotion_required,
+            omnigent_resolved_promoted_codex_path=promoted_resolved_path,
+            omnigent_resolved_rollback_codex_path=rollback_resolved_path,
+            host_cache_root=host_cache_root,
+            host_cache_referenced_by_plans=host_cache_referenced,
+        )
+
+
 def run_stock_codex_compat_pkg_clean_auth_proof(
     stock_codex_path: Path,
 ) -> StockCodexCompatPkgCleanAuthProof:
@@ -11772,6 +12532,143 @@ def print_stock_codex_compat_pkg_update_acquisition_proof(
         "ASSERTION: after acquisition, the same pkg-installed runtime reuses "
         "the staged target without --allow-remote-channel-download and without "
         "filesystem mutation"
+    )
+
+
+def print_stock_codex_compat_pkg_update_promotion_proof(
+    proof: StockCodexCompatPkgUpdatePromotionProof,
+) -> None:
+    """Emit operator evidence for installed-runtime stock-Codex promotion."""
+    print("stock_codex_compat_pkg_update_promotion_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_update_promotion_surface="
+        "pkg-installed-runtime-stable-stock-codex-promotion-rollback"
+    )
+    print(f"stock_codex_compat_pkg_update_promotion_stock_codex_path={proof.stock_codex_path}")
+    print(
+        f"stock_codex_compat_pkg_update_promotion_stock_codex_version={proof.stock_codex_version}"
+    )
+    print(f"stock_codex_compat_pkg_update_promotion_stock_codex_sha256={proof.stock_codex_sha256}")
+    print(f"stock_codex_compat_pkg_update_promotion_package_path={proof.package_path}")
+    print(f"stock_codex_compat_pkg_update_promotion_package_sha256={proof.package_sha256}")
+    print(
+        "stock_codex_compat_pkg_update_promotion_source_bundle_sha256="
+        f"{proof.source_bundle_sha256}"
+    )
+    print(f"stock_codex_compat_pkg_update_promotion_identifier={proof.package_identifier}")
+    print(f"stock_codex_compat_pkg_update_promotion_version={proof.package_version}")
+    print(f"stock_codex_compat_pkg_update_promotion_install_root={proof.install_root}")
+    print(f"stock_codex_compat_pkg_update_promotion_installed_prefix={proof.installed_prefix}")
+    print(
+        "stock_codex_compat_pkg_update_promotion_installed_runtime_root="
+        f"{proof.installed_runtime_root}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_promotion_provisioner_script="
+        f"{proof.provisioner_script_path}"
+    )
+    print(f"stock_codex_compat_pkg_update_promotion_pkg_manifest={proof.pkg_manifest_path}")
+    print(f"stock_codex_compat_pkg_update_promotion_bundle_manifest={proof.bundle_manifest_path}")
+    print(f"stock_codex_compat_pkg_update_promotion_home={proof.clean_home}")
+    print(f"stock_codex_compat_pkg_update_promotion_cache_root={proof.clean_cache_root}")
+    print(f"stock_codex_compat_pkg_update_promotion_current_path={proof.current_codex_path}")
+    print(f"stock_codex_compat_pkg_update_promotion_current_version={proof.current_codex_version}")
+    print(f"stock_codex_compat_pkg_update_promotion_current_sha256={proof.current_codex_sha256}")
+    print(f"stock_codex_compat_pkg_update_promotion_policy_name={proof.policy_name}")
+    print(f"stock_codex_compat_pkg_update_promotion_cask_token={proof.cask_token}")
+    print(f"stock_codex_compat_pkg_update_promotion_cask_tap={proof.cask_tap}")
+    print(f"stock_codex_compat_pkg_update_promotion_cask_homepage={proof.cask_homepage}")
+    print(f"stock_codex_compat_pkg_update_promotion_cask_version={proof.cask_version}")
+    print(f"stock_codex_compat_pkg_update_promotion_cask_url={proof.cask_url}")
+    print(f"stock_codex_compat_pkg_update_promotion_cask_sha256={proof.cask_sha256}")
+    print(f"stock_codex_compat_pkg_update_promotion_archive_executable={proof.archive_executable}")
+    print(
+        f"stock_codex_compat_pkg_update_promotion_channel_manifest={proof.channel_manifest_path}"
+    )
+    print(
+        f"stock_codex_compat_pkg_update_promotion_launcher_manifest={proof.launcher_manifest_path}"
+    )
+    print(
+        f"stock_codex_compat_pkg_update_promotion_rollback_metadata={proof.rollback_metadata_path}"
+    )
+    print(f"stock_codex_compat_pkg_update_promotion_payload_dir={proof.acquired_payload_dir}")
+    print(f"stock_codex_compat_pkg_update_promotion_path={proof.acquired_codex_path}")
+    print(f"stock_codex_compat_pkg_update_promotion_acquired_version={proof.acquired_version}")
+    print(f"stock_codex_compat_pkg_update_promotion_binary_sha256={proof.acquired_sha256}")
+    print(f"stock_codex_compat_pkg_update_promotion_source_kind={proof.acquired_source_kind}")
+    print(f"stock_codex_compat_pkg_update_promotion_action={proof.acquisition_action}")
+    print(
+        "stock_codex_compat_pkg_update_promotion_acquisition_mutates_filesystem="
+        f"{proof.acquisition_mutates_filesystem}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_promotion_acquisition_promotion_required="
+        f"{proof.acquisition_promotion_required}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_promotion_acquisition_promotion_ready="
+        f"{proof.acquisition_promotion_ready}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_promotion_launcher_update_required="
+        f"{proof.acquisition_launcher_update_required}"
+    )
+    print(
+        f"stock_codex_compat_pkg_update_promotion_promoted_codex_path={proof.promoted_codex_path}"
+    )
+    print(f"stock_codex_compat_pkg_update_promotion_promoted_env_path={proof.promoted_env_path}")
+    print(
+        "stock_codex_compat_pkg_update_promotion_promoted_metadata_to_path="
+        f"{proof.promoted_metadata_to_path}"
+    )
+    print(f"stock_codex_compat_pkg_update_promotion_post_action={proof.post_promotion_action}")
+    print(
+        "stock_codex_compat_pkg_update_promotion_post_mutates_filesystem="
+        f"{proof.post_promotion_mutates_filesystem}"
+    )
+    print(f"stock_codex_compat_pkg_update_promotion_post_required={proof.post_promotion_required}")
+    print(
+        f"stock_codex_compat_pkg_update_promotion_rollback_codex_path={proof.rollback_codex_path}"
+    )
+    print(f"stock_codex_compat_pkg_update_promotion_rollback_env_path={proof.rollback_env_path}")
+    print(
+        "stock_codex_compat_pkg_update_promotion_rollback_plan_action="
+        f"{proof.rollback_plan_action}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_promotion_rollback_plan_mutates_filesystem="
+        f"{proof.rollback_plan_mutates_filesystem}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_promotion_rollback_plan_promotion_required="
+        f"{proof.rollback_plan_promotion_required}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_promotion_omnigent_resolved_promoted_codex_path="
+        f"{proof.omnigent_resolved_promoted_codex_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_promotion_omnigent_resolved_rollback_codex_path="
+        f"{proof.omnigent_resolved_rollback_codex_path}"
+    )
+    print(f"stock_codex_compat_pkg_update_promotion_host_cache_root={proof.host_cache_root}")
+    print(
+        "stock_codex_compat_pkg_update_promotion_host_cache_referenced_by_plans="
+        f"{proof.host_cache_referenced_by_plans}"
+    )
+    print("stock_codex_compat_pkg_update_promotion_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: the pkg-installed runtime stages the stable official stock "
+        "Codex target before any persistent launcher pointer is promoted"
+    )
+    print(
+        "ASSERTION: promotion updates only the clean user's launcher manifest "
+        "and env contract, writes rollback metadata, and then reports "
+        "up-to-date without another remote download or filesystem mutation"
+    )
+    print(
+        "ASSERTION: rollback restores the previous launcher pointer and "
+        "returns the installed-runtime plan to stage-ready promotion posture"
     )
 
 
@@ -15921,6 +16818,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-pkg-user-bootstrap",
             "stock-codex-compat-pkg-clean-provision",
             "stock-codex-compat-pkg-update-acquisition",
+            "stock-codex-compat-pkg-update-promotion",
             "stock-codex-compat-pkg-clean-auth-onboarding",
             "stock-codex-compat-pkg-signed-notarized",
             "stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
@@ -16048,6 +16946,10 @@ def parse_args() -> argparse.Namespace:
             "'stock-codex-compat-pkg-update-acquisition' proves the installed "
             "runtime can acquire the stable official stock Codex release "
             "through --plan-update --stage-update. "
+            "'stock-codex-compat-pkg-update-promotion' proves the installed "
+            "runtime can stage the stable official stock Codex release, "
+            "promote a clean user launcher manifest, suppress promotion as "
+            "up-to-date, and roll back to the previous pointer. "
             "'stock-codex-compat-pkg-signed-notarized' builds the pkg with a "
             "Developer ID Installer identity, submits it through notarytool, "
             "staples it, validates the staple, and checks Gatekeeper; when "
@@ -16595,6 +17497,22 @@ def main() -> int:
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_stock_codex_compat_pkg_update_acquisition_proof(
             run_stock_codex_compat_pkg_update_acquisition_proof(codex_path)
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-update-promotion":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-update-promotion does not use --apple-bundle; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-update-promotion cannot allow a Codex-fork binary."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_pkg_update_promotion_proof(
+            run_stock_codex_compat_pkg_update_promotion_proof(codex_path)
         )
         return 0
 

@@ -2001,6 +2001,275 @@ def test_stock_codex_compat_pkg_update_acquisition_proof_uses_installed_runtime(
     assert proof.host_cache_referenced_by_plans is False
 
 
+def test_stock_codex_compat_pkg_update_promotion_proof_promotes_and_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host_home = tmp_path / "host-home"
+    stock_codex = _write_codex_binary(
+        tmp_path / "stock" / "codex",
+        version="codex-cli 0.142.5",
+    )
+    cask_url = (
+        "https://github.com/openai/codex/releases/download/"
+        "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+    )
+    cask_sha = "b" * 64
+    cask = {
+        "token": "codex",
+        "tap": "homebrew/cask",
+        "homepage": "https://github.com/openai/codex",
+        "url": cask_url,
+        "sha256": cask_sha,
+        "version": "0.143.0",
+        "artifacts": [
+            {"binary": ["codex-aarch64-apple-darwin", {"target": "codex"}]},
+        ],
+    }
+    expected_artifact = {
+        "archiveExecutable": "codex-aarch64-apple-darwin",
+        "archiveFormat": "tar.gz",
+        "sha256": cask_sha,
+        "url": cask_url,
+        "version": "codex-cli 0.143.0",
+        "versionSlug": "0.143.0",
+    }
+    monkeypatch.setenv("HOME", str(host_home))
+    monkeypatch.setattr(_MOD, "_read_homebrew_codex_cask", lambda: cask)
+
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir(parents=True)
+    package_path.write_bytes(b"fake-pkg")
+    install_prefix = Path("/Library/Application Support/Omnigent/stock-codex-compat")
+    package_proof = _MOD.StockCodexCompatPkgStructureProof(
+        package_path=package_path,
+        package_sha256=_MOD.sha256_file(package_path),
+        source_bundle_sha256="c" * 64,
+        package_identifier="ai.omnigent.stock-codex-compat",
+        package_version="0.3.0.dev0",
+        install_location="/",
+        install_prefix=install_prefix,
+        runtime_root=install_prefix / "runtime",
+        payload_file_count=1,
+        required_payload_files={"runtime/scripts/provision_stock_codex.py": True},
+        script_names=("postinstall",),
+        archive_entries=("Bom", "PackageInfo", "Payload", "Scripts"),
+        signature_status="no signature",
+        signed=False,
+        pkg_manifest_path=install_prefix / "pkg-manifest.json",
+        bundle_manifest_path=install_prefix / "bundle-manifest.json",
+        pkg_contract={
+            "runtime": "machine-level-runtime-only",
+            "userBootstrap": "deferred-to-installed-runtime-command",
+            "stockCodexProvisioning": "deferred-to-installed-runtime-command",
+        },
+        bundle_source_root="<omitted-from-pkg>",
+    )
+
+    monkeypatch.setattr(
+        _MOD,
+        "_run_stock_codex_compat_pkg_builder_cli_json",
+        lambda *_args, **_kwargs: {"kind": "fake-pkg-builder-payload"},
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_validate_stock_codex_compat_pkg_builder_payload",
+        lambda *_args, **_kwargs: package_proof,
+    )
+
+    def fake_expand(package_path_arg: Path, expand_dir: Path) -> Path:
+        assert package_path_arg == package_path
+        payload_root = expand_dir / "Payload"
+        payload_root.mkdir(parents=True)
+        return payload_root
+
+    def fake_stage(
+        *,
+        payload_root: Path,
+        install_root: Path,
+        packaged_runtime_root: Path,
+        source_repo_root: Path,
+    ) -> Path:
+        del payload_root, packaged_runtime_root, source_repo_root
+        installed_prefix = install_root / install_prefix.relative_to("/")
+        runtime_root = installed_prefix / "runtime"
+        (runtime_root / "scripts").mkdir(parents=True)
+        (runtime_root / "scripts" / "provision_stock_codex.py").write_text(
+            "#!/usr/bin/env python3\n",
+            encoding="utf-8",
+        )
+        pkg_manifest = {
+            "contract": {
+                "runtime": "machine-level-runtime-only",
+                "userBootstrap": "deferred-to-installed-runtime-command",
+                "stockCodexProvisioning": "deferred-to-installed-runtime-command",
+            },
+            "stockCodexProvisioner": str(
+                package_proof.runtime_root / "scripts" / "provision_stock_codex.py"
+            ),
+        }
+        bundle_manifest = {"sourceRoot": "<omitted-from-pkg>"}
+        (installed_prefix / "pkg-manifest.json").write_text(
+            json.dumps(pkg_manifest) + "\n",
+            encoding="utf-8",
+        )
+        (installed_prefix / "bundle-manifest.json").write_text(
+            json.dumps(bundle_manifest) + "\n",
+            encoding="utf-8",
+        )
+        return runtime_root
+
+    monkeypatch.setattr(_MOD, "_expand_stock_codex_compat_pkg", fake_expand)
+    monkeypatch.setattr(_MOD, "_stage_stock_codex_compat_pkg_install_root", fake_stage)
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = False,
+        capture_output: bool = False,
+        text: bool = False,
+        env: dict[str, str] | None = None,
+        cwd: Path | None = None,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text, env, cwd, timeout
+        if len(cmd) >= 2 and cmd[1:] == ["--version"]:
+            version = "codex-cli 0.143.0" if "0.143.0" in cmd[0] else "codex-cli 0.142.5"
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"{version}\n", stderr="")
+        if len(cmd) >= 2 and Path(cmd[1]).name == "provision_stock_codex.py":
+            args = cmd[2:]
+            cache_root = Path(args[args.index("--cache-root") + 1])
+            launcher_manifest_path = Path(args[args.index("--launcher-manifest") + 1])
+            allow_remote = "--allow-remote-channel-download" in args
+            target_dir = cache_root / "0.143.0"
+            target_path = target_dir / "codex"
+            if not allow_remote and not target_path.exists():
+                return subprocess.CompletedProcess(
+                    cmd,
+                    1,
+                    stdout="",
+                    stderr="error: Remote channel downloads require "
+                    "--allow-remote-channel-download.\n",
+                )
+            mutates = False
+            if allow_remote:
+                _write_codex_binary(target_path, version="codex-cli 0.143.0")
+                mutates = True
+                action = "staged"
+            else:
+                launcher_manifest = json.loads(launcher_manifest_path.read_text(encoding="utf-8"))
+                pinned_path = Path(str(launcher_manifest["pinnedCodexPath"])).resolve()
+                action = "up-to-date" if pinned_path == target_path.resolve() else "stage-ready"
+
+            manifest = {
+                "schemaVersion": 1,
+                "kind": "omnigent-stock-codex",
+                "sourceKind": "channel",
+                "version": "codex-cli 0.143.0",
+                "versionSlug": "0.143.0",
+                "sha256": _MOD.sha256_file(target_path),
+                "sourcePath": cask_url,
+                "sourceRealpath": cask_url,
+                "channelArtifact": expected_artifact,
+            }
+            (target_dir / "manifest.json").write_text(
+                json.dumps(manifest) + "\n",
+                encoding="utf-8",
+            )
+            sha = _MOD.sha256_file(target_path)
+            launcher_manifest = json.loads(launcher_manifest_path.read_text(encoding="utf-8"))
+            pinned_path = Path(str(launcher_manifest["pinnedCodexPath"])).resolve()
+            promotion_required = pinned_path != target_path.resolve()
+            current_arg = (
+                args[args.index("--current-codex") + 1]
+                if "--current-codex" in args
+                else str(pinned_path)
+            )
+            plan = {
+                "kind": "omnigent-stock-codex-update-plan",
+                "schemaVersion": 1,
+                "action": action,
+                "mutatesFilesystem": mutates,
+                "target": {
+                    "state": "ready",
+                    "payloadDir": str(target_dir),
+                    "codexPath": str(target_path),
+                    "error": None,
+                },
+                "promotion": {
+                    "required": promotion_required,
+                    "ready": True,
+                    "env": (
+                        {_MOD.OMNIGENT_STOCK_CODEX_PATH_ENV: str(target_path)}
+                        if promotion_required
+                        else {}
+                    ),
+                    "launcherManifest": {
+                        "manifestPath": str(launcher_manifest_path),
+                        "field": "pinnedCodexPath",
+                        "from": str(pinned_path),
+                        "to": str(target_path),
+                        "updateRequired": promotion_required,
+                        "ready": True,
+                    },
+                },
+                "rollback": {
+                    "codexPath": current_arg,
+                    "payloadRetention": "versioned-cache-keeps-previous-payload",
+                },
+                "stagedPayload": {
+                    "codexPath": str(target_path),
+                    "payloadDir": str(target_dir),
+                    "manifestPath": str(target_dir / "manifest.json"),
+                    "version": "codex-cli 0.143.0",
+                    "versionSlug": "0.143.0",
+                    "sha256": sha,
+                    "sourcePath": cask_url,
+                    "sourceRealpath": cask_url,
+                    "sourceKind": "channel",
+                    "channelArtifact": expected_artifact,
+                },
+            }
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(plan), stderr="")
+        raise AssertionError(f"unexpected subprocess command: {cmd!r}")
+
+    monkeypatch.setattr(_MOD.subprocess, "run", fake_run)
+
+    proof = _MOD.run_stock_codex_compat_pkg_update_promotion_proof(stock_codex)
+
+    assert proof.stock_codex_path == stock_codex.resolve()
+    assert proof.stock_codex_version == "codex-cli 0.142.5"
+    assert proof.package_identifier == "ai.omnigent.stock-codex-compat"
+    assert proof.installed_runtime_root == proof.installed_prefix / "runtime"
+    assert proof.provisioner_script_path == (
+        proof.installed_runtime_root / "scripts" / "provision_stock_codex.py"
+    )
+    assert proof.policy_name == "official-openai-github-release"
+    assert proof.acquisition_action == "staged"
+    assert proof.acquisition_mutates_filesystem is True
+    assert proof.acquisition_promotion_required is True
+    assert proof.acquisition_promotion_ready is True
+    assert proof.acquisition_launcher_update_required is True
+    assert proof.acquired_version == "codex-cli 0.143.0"
+    assert proof.acquired_source_kind == "channel"
+    assert proof.acquired_codex_path == proof.clean_cache_root / "0.143.0" / "codex"
+    assert proof.promoted_codex_path == proof.acquired_codex_path
+    assert proof.promoted_env_path == proof.acquired_codex_path
+    assert proof.promoted_metadata_to_path == proof.acquired_codex_path
+    assert proof.post_promotion_action == "up-to-date"
+    assert proof.post_promotion_mutates_filesystem is False
+    assert proof.post_promotion_required is False
+    assert proof.rollback_codex_path == proof.current_codex_path
+    assert proof.rollback_env_path == proof.current_codex_path
+    assert proof.rollback_plan_action == "stage-ready"
+    assert proof.rollback_plan_mutates_filesystem is False
+    assert proof.rollback_plan_promotion_required is True
+    assert proof.omnigent_resolved_promoted_codex_path == proof.acquired_codex_path
+    assert proof.omnigent_resolved_rollback_codex_path == proof.current_codex_path
+    assert proof.host_cache_root == host_home / ".local" / "omnigent" / "codex-stock"
+    assert proof.host_cache_referenced_by_plans is False
+
+
 def test_stock_codex_compat_pkg_clean_auth_proof_uses_installed_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
