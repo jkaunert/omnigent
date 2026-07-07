@@ -95,3 +95,17 @@ download, and verifies the acquired payload resolves through
 `OMNIGENT_STOCK_CODEX_PATH`. On 2026-07-07, the official stable cask and GitHub
 latest release both selected `0.142.5`; `0.143.0-alpha.37` existed as a
 pre-release and is not part of this stable production-channel policy.
+
+Run the package-installed runtime acquisition gate:
+
+```sh
+uvx --from . python scripts/prove_stock_codex_replacement.py \
+  --proof stock-codex-compat-pkg-update-acquisition \
+  --codex-path ~/.local/omnigent/codex-stock/0.142.5/codex
+```
+
+This proof builds and stages the compatibility `.pkg` under a temporary
+installed-root shape, then runs the installed runtime's bundled
+`runtime/scripts/provision_stock_codex.py` under a clean temporary `HOME`. It
+proves the same stable official remote acquisition contract from packaged
+runtime code rather than from the development checkout.

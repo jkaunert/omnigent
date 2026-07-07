@@ -1219,6 +1219,61 @@ class StockCodexCompatPkgCleanProvisionProof:
 
 
 @dataclass(frozen=True)
+class StockCodexCompatPkgUpdateAcquisitionProof:
+    """Proof result for remote stock-Codex acquisition from a pkg-installed runtime."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    stock_codex_sha256: str
+    package_path: Path
+    package_sha256: str
+    source_bundle_sha256: str
+    package_identifier: str
+    package_version: str
+    install_root: Path
+    installed_prefix: Path
+    installed_runtime_root: Path
+    provisioner_script_path: Path
+    pkg_manifest_path: Path
+    bundle_manifest_path: Path
+    clean_home: Path
+    clean_cache_root: Path
+    current_codex_path: Path
+    current_codex_version: str
+    current_codex_sha256: str
+    policy_name: str
+    cask_token: str
+    cask_tap: str
+    cask_homepage: str
+    cask_version: str
+    cask_url: str
+    cask_sha256: str
+    archive_executable: str
+    channel_manifest_path: Path
+    launcher_manifest_path: Path
+    acquired_payload_dir: Path
+    acquired_codex_path: Path
+    acquired_version: str
+    acquired_sha256: str
+    acquired_source_kind: str
+    acquired_channel_artifact: dict[str, Any]
+    acquisition_action: str
+    acquisition_mutates_filesystem: bool
+    acquisition_promotion_required: bool
+    acquisition_promotion_ready: bool
+    acquisition_launcher_update_required: bool
+    acquisition_rollback_codex_path: Path
+    reuse_action: str
+    reuse_mutates_filesystem: bool
+    reuse_without_remote_download: bool
+    blocked_without_remote_error: str
+    blocked_without_remote_cache_mutated: bool
+    omnigent_resolved_codex_path: Path
+    host_cache_root: Path
+    host_cache_referenced_by_plans: bool
+
+
+@dataclass(frozen=True)
 class StockCodexCompatPkgCleanAuthProof:
     """Proof result for clean auth onboarding from a pkg-installed runtime."""
 
@@ -10293,6 +10348,517 @@ def run_stock_codex_compat_pkg_clean_provision_proof(
         )
 
 
+def run_stock_codex_compat_pkg_update_acquisition_proof(
+    stock_codex_path: Path,
+) -> StockCodexCompatPkgUpdateAcquisitionProof:
+    """Prove a pkg-installed runtime can acquire stock Codex from the stable channel."""
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    assert_stock_codex_path(stock_codex_path, allow_fork_codex=False)
+    stock_codex_realpath = stock_codex_path.resolve()
+    stock_codex_version = codex_version(stock_codex_realpath)
+    stock_codex_sha256 = sha256_file(stock_codex_realpath)
+    cask = _read_homebrew_codex_cask()
+    cask_url = _json_string(cask, "url")
+    cask_sha256 = _json_string(cask, "sha256").lower()
+    cask_version = _json_string(cask, "version")
+    cask_token = _json_string(cask, "token")
+    cask_tap = _json_string(cask, "tap")
+    cask_homepage = _json_string(cask, "homepage")
+    archive_executable = _homebrew_codex_binary_name(cask)
+    _validate_homebrew_codex_cask_metadata(
+        token=cask_token,
+        homepage=cask_homepage,
+        url=cask_url,
+        sha256=cask_sha256,
+    )
+    selected_version = f"codex-cli {cask_version}"
+    provisioner = _load_stock_codex_provisioner()
+    policy_name = provisioner.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY
+
+    source_repo_root = Path(__file__).resolve().parents[1]
+    host_cache_root = (
+        Path.home() / ".local" / "omnigent" / "codex-stock"
+    ).expanduser().resolve()
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-pkg-update-acquisition-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        artifact_dir = root / "artifacts"
+        artifact_dir.mkdir()
+        package_path = artifact_dir / "omnigent-stock-codex-compat.pkg"
+        payload = _run_stock_codex_compat_pkg_builder_cli_json(
+            [
+                "--repo-root",
+                str(source_repo_root),
+                "--output",
+                str(package_path),
+                "--force",
+            ],
+            repo_root=source_repo_root,
+        )
+        package_proof = _validate_stock_codex_compat_pkg_builder_payload(
+            payload,
+            source_repo_root=source_repo_root,
+        )
+        expanded_payload_root = _expand_stock_codex_compat_pkg(
+            package_proof.package_path,
+            root / "pkg-expanded",
+        )
+        install_root = root / "installed-root"
+        installed_runtime_root = _stage_stock_codex_compat_pkg_install_root(
+            payload_root=expanded_payload_root,
+            install_root=install_root,
+            packaged_runtime_root=package_proof.runtime_root,
+            source_repo_root=source_repo_root,
+        )
+        installed_prefix = install_root / package_proof.install_prefix.relative_to("/")
+        provisioner_script_path = installed_runtime_root / "scripts" / "provision_stock_codex.py"
+        if not provisioner_script_path.is_file():
+            raise SystemExit(
+                "Pkg-installed runtime is missing the stock Codex provisioner.\n"
+                f"expected={provisioner_script_path}"
+            )
+        pkg_manifest_path = installed_prefix / "pkg-manifest.json"
+        bundle_manifest_path = installed_prefix / "bundle-manifest.json"
+        pkg_manifest = json.loads(pkg_manifest_path.read_text(encoding="utf-8"))
+        bundle_manifest = json.loads(bundle_manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(pkg_manifest, dict) or not isinstance(bundle_manifest, dict):
+            raise SystemExit("Installed compatibility pkg manifests were not JSON objects.")
+        pkg_contract = pkg_manifest.get("contract")
+        if not isinstance(pkg_contract, dict):
+            raise SystemExit(f"Installed compatibility pkg contract missing: {pkg_manifest!r}")
+        if (
+            pkg_contract.get("stockCodexProvisioning")
+            != "deferred-to-installed-runtime-command"
+        ):
+            raise SystemExit(
+                "Installed compatibility stock Codex provisioning contract mismatch: "
+                f"{pkg_contract!r}"
+            )
+        provisioner_manifest_path = pkg_manifest.get("stockCodexProvisioner")
+        expected_provisioner_manifest_path = str(
+            package_proof.runtime_root / "scripts" / "provision_stock_codex.py"
+        )
+        if provisioner_manifest_path != expected_provisioner_manifest_path:
+            raise SystemExit(
+                "Installed compatibility pkg manifest recorded the wrong provisioner path: "
+                f"{pkg_manifest!r}"
+            )
+        if bundle_manifest.get("sourceRoot") != "<omitted-from-pkg>":
+            raise SystemExit(
+                "Installed compatibility bundle manifest embedded source root: "
+                f"{bundle_manifest!r}"
+            )
+
+        clean_home = root / "home"
+        clean_tmp = root / "tmp"
+        clean_home.mkdir(mode=0o700)
+        clean_tmp.mkdir(mode=0o700)
+        clean_cache_root = clean_home / ".local" / "omnigent" / "codex-stock"
+        blocked_cache_root = clean_home / ".local" / "omnigent" / "blocked-codex-stock"
+        if clean_cache_root.exists() or blocked_cache_root.exists():
+            raise SystemExit(
+                "Pkg update acquisition clean caches unexpectedly exist before proof.\n"
+                f"cache={clean_cache_root}\nblocked={blocked_cache_root}"
+            )
+
+        current_codex_path = root / "current" / "codex"
+        current_codex_path.parent.mkdir(parents=True)
+        shutil.copy2(stock_codex_realpath, current_codex_path)
+        current_codex_path.chmod(0o755)
+        current_codex_version = codex_version(current_codex_path)
+        current_codex_sha = sha256_file(current_codex_path)
+        if current_codex_version != stock_codex_version or current_codex_sha != stock_codex_sha256:
+            raise SystemExit(
+                "Pkg update acquisition temp current Codex copy changed identity.\n"
+                f"source_version={stock_codex_version!r}\n"
+                f"current_version={current_codex_version!r}\n"
+                f"source_sha={stock_codex_sha256}\ncurrent_sha={current_codex_sha}"
+            )
+
+        channel_manifest_path = root / "official-remote-update-channel.json"
+        channel_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-channel",
+                    "latest": cask_version,
+                    "artifacts": [
+                        {
+                            "version": selected_version,
+                            "url": cask_url,
+                            "sha256": cask_sha256,
+                            "archiveFormat": "tar.gz",
+                            "archiveExecutable": archive_executable,
+                        }
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        launcher_manifest_path = root / "stock-codex-compat-launcher.json"
+        launcher_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-compat-launcher",
+                    "pinnedCodexPath": str(current_codex_path),
+                    "env": {OMNIGENT_STOCK_CODEX_PATH_ENV: str(current_codex_path)},
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        python_path_entries = [str(installed_runtime_root)]
+        if os.environ.get("PYTHONPATH"):
+            python_path_entries.append(os.environ["PYTHONPATH"])
+        env = os.environ.copy()
+        env.update(
+            {
+                "HOME": str(clean_home),
+                "TMPDIR": str(clean_tmp),
+                "PYTHONPATH": os.pathsep.join(python_path_entries),
+            }
+        )
+        env.pop("CODEX_HOME", None)
+        env.pop(OMNIGENT_STOCK_CODEX_PATH_ENV, None)
+        common_command = [
+            sys.executable,
+            str(provisioner_script_path),
+            "--plan-update",
+            "--channel-manifest",
+            str(channel_manifest_path),
+            "--expected-sha256",
+            cask_sha256,
+            "--channel-policy",
+            policy_name,
+            "--current-codex",
+            str(current_codex_path),
+            "--launcher-manifest",
+            str(launcher_manifest_path),
+            "--stage-update",
+            "--json",
+        ]
+
+        blocked_completed = subprocess.run(
+            [
+                *common_command,
+                "--cache-root",
+                str(blocked_cache_root),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=installed_runtime_root,
+            timeout=60,
+        )
+        if blocked_completed.returncode == 0:
+            raise SystemExit(
+                "Pkg-installed remote acquisition unexpectedly succeeded without "
+                "explicit download permission.\n"
+                f"stdout={blocked_completed.stdout}\nstderr={blocked_completed.stderr}"
+            )
+        blocked_without_remote_error = (
+            blocked_completed.stderr or blocked_completed.stdout
+        ).strip()
+        if "allow-remote-channel-download" not in blocked_without_remote_error:
+            raise SystemExit(
+                "Pkg-installed remote acquisition failure did not require explicit "
+                "download opt-in.\n"
+                f"stdout={blocked_completed.stdout}\nstderr={blocked_completed.stderr}"
+            )
+        blocked_without_remote_cache_mutated = blocked_cache_root.exists() and any(
+            blocked_cache_root.rglob("*")
+        )
+        if blocked_without_remote_cache_mutated:
+            raise SystemExit(
+                "Pkg-installed remote acquisition without opt-in mutated its blocked cache.\n"
+                f"cache_root={blocked_cache_root}"
+            )
+
+        acquisition_plan = _run_stock_codex_provisioner_json(
+            [
+                *common_command,
+                "--cache-root",
+                str(clean_cache_root),
+                "--allow-remote-channel-download",
+            ],
+            env=env,
+            cwd=installed_runtime_root,
+            failure_label="Pkg-installed Stock Codex remote update acquisition",
+            timeout=300,
+        )
+        acquisition_action = _json_string(acquisition_plan, "action")
+        acquisition_mutates = _json_bool(
+            acquisition_plan,
+            "mutatesFilesystem",
+            label="Pkg-installed Stock Codex remote update acquisition",
+        )
+        acquisition_target = _json_object(
+            acquisition_plan,
+            "target",
+            label="Pkg-installed Stock Codex remote update acquisition",
+        )
+        acquisition_target_state = _json_string(acquisition_target, "state")
+        acquired_codex_path = Path(_json_string(acquisition_target, "codexPath")).resolve()
+        acquired_payload_dir = Path(_json_string(acquisition_target, "payloadDir")).resolve()
+        if not acquired_codex_path.is_relative_to(clean_cache_root.resolve()):
+            raise SystemExit(
+                "Pkg-installed remote acquisition returned a Codex path outside "
+                "the clean cache.\n"
+                f"cache_root={clean_cache_root}\ncodex_path={acquired_codex_path}"
+            )
+        if not acquired_payload_dir.is_relative_to(clean_cache_root.resolve()):
+            raise SystemExit(
+                "Pkg-installed remote acquisition wrote outside the clean cache.\n"
+                f"cache_root={clean_cache_root}\npayload_dir={acquired_payload_dir}"
+            )
+        acquisition_promotion = _json_object(
+            acquisition_plan,
+            "promotion",
+            label="Pkg-installed Stock Codex remote update acquisition",
+        )
+        acquisition_promotion_required = _json_bool(
+            acquisition_promotion,
+            "required",
+            label="Pkg-installed Stock Codex remote update acquisition promotion",
+        )
+        acquisition_promotion_ready = _json_bool(
+            acquisition_promotion,
+            "ready",
+            label="Pkg-installed Stock Codex remote update acquisition promotion",
+        )
+        acquisition_launcher = _json_object(
+            acquisition_promotion,
+            "launcherManifest",
+            label="Pkg-installed Stock Codex remote update acquisition promotion",
+        )
+        acquisition_launcher_update_required = _json_bool(
+            acquisition_launcher,
+            "updateRequired",
+            label="Pkg-installed Stock Codex remote update acquisition launcher promotion",
+        )
+        acquisition_rollback = _json_object(
+            acquisition_plan,
+            "rollback",
+            label="Pkg-installed Stock Codex remote update acquisition",
+        )
+        acquisition_rollback_codex_path = Path(
+            _json_string(acquisition_rollback, "codexPath")
+        ).resolve()
+        staged_payload = _json_object(
+            acquisition_plan,
+            "stagedPayload",
+            label="Pkg-installed Stock Codex remote update acquisition",
+        )
+        acquired_version = _json_string(staged_payload, "version")
+        acquired_sha = _json_string(staged_payload, "sha256")
+        acquired_source_kind = _json_string(staged_payload, "sourceKind")
+        acquired_channel_artifact = staged_payload.get("channelArtifact")
+        if not isinstance(acquired_channel_artifact, dict):
+            raise SystemExit(
+                "Pkg-installed remote acquisition staged payload omitted channel artifact.\n"
+                f"plan={acquisition_plan!r}"
+            )
+        expected_channel_artifact = {
+            "archiveExecutable": archive_executable,
+            "archiveFormat": "tar.gz",
+            "sha256": cask_sha256,
+            "url": cask_url,
+            "version": selected_version,
+            "versionSlug": cask_version,
+        }
+        if acquisition_action != "staged" or acquisition_target_state != "ready":
+            raise SystemExit(
+                "Pkg-installed remote acquisition did not stage a ready target.\n"
+                f"plan={acquisition_plan!r}"
+            )
+        if not acquisition_mutates:
+            raise SystemExit(
+                "Pkg-installed remote acquisition did not report filesystem mutation: "
+                f"{acquisition_plan!r}"
+            )
+        if not acquisition_promotion_required or not acquisition_promotion_ready:
+            raise SystemExit(
+                "Pkg-installed remote acquisition did not report target-ready "
+                "promotion intent.\n"
+                f"plan={acquisition_plan!r}"
+            )
+        if not acquisition_launcher_update_required:
+            raise SystemExit(
+                "Pkg-installed remote acquisition did not report launcher update intent.\n"
+                f"plan={acquisition_plan!r}"
+            )
+        if acquisition_rollback_codex_path != current_codex_path.resolve():
+            raise SystemExit(
+                "Pkg-installed remote acquisition rollback path did not preserve "
+                "current Codex.\n"
+                f"expected={current_codex_path}\nactual={acquisition_rollback_codex_path}"
+            )
+        if acquired_version != selected_version or acquired_source_kind != "channel":
+            raise SystemExit(
+                "Pkg-installed remote acquisition staged payload metadata mismatch.\n"
+                f"plan={acquisition_plan!r}"
+            )
+        if acquired_channel_artifact != expected_channel_artifact:
+            raise SystemExit(
+                "Pkg-installed remote acquisition staged payload artifact mismatch.\n"
+                f"expected={expected_channel_artifact!r}\nactual={acquired_channel_artifact!r}"
+            )
+        if not acquired_codex_path.is_file() or not os.access(acquired_codex_path, os.X_OK):
+            raise SystemExit(
+                f"Pkg-installed remote-acquired Codex is not executable: {acquired_codex_path}"
+            )
+        actual_acquired_version = codex_version(acquired_codex_path)
+        if actual_acquired_version != selected_version:
+            raise SystemExit(
+                "Pkg-installed remote-acquired Codex binary reported an unexpected version.\n"
+                f"expected={selected_version!r}\nactual={actual_acquired_version!r}"
+            )
+        acquired_manifest_path = acquired_payload_dir / "manifest.json"
+        acquired_manifest = json.loads(acquired_manifest_path.read_text(encoding="utf-8"))
+        if acquired_manifest.get("sourcePath") != cask_url:
+            raise SystemExit(
+                f"Pkg-installed remote acquisition manifest source mismatch: {acquired_manifest!r}"
+            )
+        if acquired_manifest.get("sourceKind") != "channel":
+            raise SystemExit(
+                "Pkg-installed remote acquisition manifest source kind mismatch: "
+                f"{acquired_manifest!r}"
+            )
+        if acquired_manifest.get("channelArtifact") != expected_channel_artifact:
+            raise SystemExit(
+                "Pkg-installed remote acquisition manifest artifact mismatch: "
+                f"{acquired_manifest!r}"
+            )
+
+        reuse_plan = _run_stock_codex_provisioner_json(
+            [
+                *common_command,
+                "--cache-root",
+                str(clean_cache_root),
+            ],
+            env=env,
+            cwd=installed_runtime_root,
+            failure_label="Pkg-installed Stock Codex remote update acquisition reuse",
+            timeout=60,
+        )
+        reuse_action = _json_string(reuse_plan, "action")
+        reuse_mutates = _json_bool(
+            reuse_plan,
+            "mutatesFilesystem",
+            label="Pkg-installed Stock Codex remote update acquisition reuse",
+        )
+        reuse_target = _json_object(
+            reuse_plan,
+            "target",
+            label="Pkg-installed Stock Codex remote update acquisition reuse",
+        )
+        reuse_target_state = _json_string(reuse_target, "state")
+        reuse_target_path = Path(_json_string(reuse_target, "codexPath")).resolve()
+        if reuse_action != "stage-ready" or reuse_target_state != "ready":
+            raise SystemExit(
+                "Pkg-installed remote acquisition reuse did not report a "
+                "preverified ready target.\n"
+                f"plan={reuse_plan!r}"
+            )
+        if reuse_target_path != acquired_codex_path:
+            raise SystemExit(
+                "Pkg-installed remote acquisition reuse selected a different target.\n"
+                f"expected={acquired_codex_path}\nactual={reuse_target_path}"
+            )
+        if reuse_mutates:
+            raise SystemExit(
+                f"Pkg-installed remote acquisition reuse mutated filesystem state: {reuse_plan!r}"
+            )
+
+        with temporary_env({OMNIGENT_STOCK_CODEX_PATH_ENV: str(acquired_codex_path)}):
+            resolved_raw = _find_codex_cli()
+        if resolved_raw is None:
+            raise SystemExit(f"{OMNIGENT_STOCK_CODEX_PATH_ENV} did not resolve a Codex binary.")
+        resolved_path = Path(resolved_raw).expanduser().resolve()
+        if resolved_path != acquired_codex_path:
+            raise SystemExit(
+                "Omnigent resolver did not select the pkg-installed remote-acquired "
+                "Codex payload.\n"
+                f"expected={acquired_codex_path}\nactual={resolved_raw}"
+            )
+
+        plan_text = (
+            json.dumps(acquisition_plan, sort_keys=True)
+            + "\n"
+            + json.dumps(reuse_plan, sort_keys=True)
+            + "\n"
+            + json.dumps(acquired_manifest, sort_keys=True)
+        )
+        host_cache_referenced = str(host_cache_root) in plan_text
+        if host_cache_referenced:
+            raise SystemExit(
+                "Pkg-installed remote acquisition referenced the host stock Codex cache.\n"
+                f"host_cache_root={host_cache_root}"
+            )
+
+        return StockCodexCompatPkgUpdateAcquisitionProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            stock_codex_sha256=stock_codex_sha256,
+            package_path=package_proof.package_path,
+            package_sha256=package_proof.package_sha256,
+            source_bundle_sha256=package_proof.source_bundle_sha256,
+            package_identifier=package_proof.package_identifier,
+            package_version=package_proof.package_version,
+            install_root=install_root,
+            installed_prefix=installed_prefix,
+            installed_runtime_root=installed_runtime_root,
+            provisioner_script_path=provisioner_script_path,
+            pkg_manifest_path=pkg_manifest_path,
+            bundle_manifest_path=bundle_manifest_path,
+            clean_home=clean_home,
+            clean_cache_root=clean_cache_root,
+            current_codex_path=current_codex_path,
+            current_codex_version=current_codex_version,
+            current_codex_sha256=current_codex_sha,
+            policy_name=policy_name,
+            cask_token=cask_token,
+            cask_tap=cask_tap,
+            cask_homepage=cask_homepage,
+            cask_version=cask_version,
+            cask_url=cask_url,
+            cask_sha256=cask_sha256,
+            archive_executable=archive_executable,
+            channel_manifest_path=channel_manifest_path,
+            launcher_manifest_path=launcher_manifest_path,
+            acquired_payload_dir=acquired_payload_dir,
+            acquired_codex_path=acquired_codex_path,
+            acquired_version=acquired_version,
+            acquired_sha256=acquired_sha,
+            acquired_source_kind=acquired_source_kind,
+            acquired_channel_artifact=acquired_channel_artifact,
+            acquisition_action=acquisition_action,
+            acquisition_mutates_filesystem=acquisition_mutates,
+            acquisition_promotion_required=acquisition_promotion_required,
+            acquisition_promotion_ready=acquisition_promotion_ready,
+            acquisition_launcher_update_required=acquisition_launcher_update_required,
+            acquisition_rollback_codex_path=acquisition_rollback_codex_path,
+            reuse_action=reuse_action,
+            reuse_mutates_filesystem=reuse_mutates,
+            reuse_without_remote_download=True,
+            blocked_without_remote_error=blocked_without_remote_error,
+            blocked_without_remote_cache_mutated=blocked_without_remote_cache_mutated,
+            omnigent_resolved_codex_path=resolved_path,
+            host_cache_root=host_cache_root,
+            host_cache_referenced_by_plans=host_cache_referenced,
+        )
+
+
 def run_stock_codex_compat_pkg_clean_auth_proof(
     stock_codex_path: Path,
 ) -> StockCodexCompatPkgCleanAuthProof:
@@ -11043,6 +11609,169 @@ def print_stock_codex_compat_pkg_clean_provision_proof(
         "ASSERTION: the clean-provisioned payload is selected by Omnigent "
         f"through {OMNIGENT_STOCK_CODEX_PATH_ENV}, and a second no-force "
         "provision reuses the same verified payload"
+    )
+
+
+def print_stock_codex_compat_pkg_update_acquisition_proof(
+    proof: StockCodexCompatPkgUpdateAcquisitionProof,
+) -> None:
+    """Emit operator evidence for installed-runtime remote acquisition."""
+    print("stock_codex_compat_pkg_update_acquisition_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_update_acquisition_surface="
+        "pkg-installed-runtime-stable-remote-stock-codex-acquisition"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_stock_codex_path="
+        f"{proof.stock_codex_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_stock_codex_sha256="
+        f"{proof.stock_codex_sha256}"
+    )
+    print(f"stock_codex_compat_pkg_update_acquisition_package_path={proof.package_path}")
+    print(f"stock_codex_compat_pkg_update_acquisition_package_sha256={proof.package_sha256}")
+    print(
+        "stock_codex_compat_pkg_update_acquisition_source_bundle_sha256="
+        f"{proof.source_bundle_sha256}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_identifier="
+        f"{proof.package_identifier}"
+    )
+    print(f"stock_codex_compat_pkg_update_acquisition_version={proof.package_version}")
+    print(f"stock_codex_compat_pkg_update_acquisition_install_root={proof.install_root}")
+    print(
+        "stock_codex_compat_pkg_update_acquisition_installed_prefix="
+        f"{proof.installed_prefix}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_installed_runtime_root="
+        f"{proof.installed_runtime_root}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_provisioner_script="
+        f"{proof.provisioner_script_path}"
+    )
+    print(f"stock_codex_compat_pkg_update_acquisition_pkg_manifest={proof.pkg_manifest_path}")
+    print(
+        "stock_codex_compat_pkg_update_acquisition_bundle_manifest="
+        f"{proof.bundle_manifest_path}"
+    )
+    print(f"stock_codex_compat_pkg_update_acquisition_home={proof.clean_home}")
+    print(f"stock_codex_compat_pkg_update_acquisition_cache_root={proof.clean_cache_root}")
+    print(
+        "stock_codex_compat_pkg_update_acquisition_current_path="
+        f"{proof.current_codex_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_current_version="
+        f"{proof.current_codex_version}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_current_sha256="
+        f"{proof.current_codex_sha256}"
+    )
+    print(f"stock_codex_compat_pkg_update_acquisition_policy_name={proof.policy_name}")
+    print(f"stock_codex_compat_pkg_update_acquisition_cask_token={proof.cask_token}")
+    print(f"stock_codex_compat_pkg_update_acquisition_cask_tap={proof.cask_tap}")
+    print(f"stock_codex_compat_pkg_update_acquisition_cask_homepage={proof.cask_homepage}")
+    print(f"stock_codex_compat_pkg_update_acquisition_cask_version={proof.cask_version}")
+    print(f"stock_codex_compat_pkg_update_acquisition_cask_url={proof.cask_url}")
+    print(f"stock_codex_compat_pkg_update_acquisition_cask_sha256={proof.cask_sha256}")
+    print(
+        "stock_codex_compat_pkg_update_acquisition_archive_executable="
+        f"{proof.archive_executable}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_channel_manifest="
+        f"{proof.channel_manifest_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_launcher_manifest="
+        f"{proof.launcher_manifest_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_payload_dir="
+        f"{proof.acquired_payload_dir}"
+    )
+    print(f"stock_codex_compat_pkg_update_acquisition_path={proof.acquired_codex_path}")
+    print(f"stock_codex_compat_pkg_update_acquisition_acquired_version={proof.acquired_version}")
+    print(f"stock_codex_compat_pkg_update_acquisition_binary_sha256={proof.acquired_sha256}")
+    print(
+        "stock_codex_compat_pkg_update_acquisition_source_kind="
+        f"{proof.acquired_source_kind}"
+    )
+    print(f"stock_codex_compat_pkg_update_acquisition_action={proof.acquisition_action}")
+    print(
+        "stock_codex_compat_pkg_update_acquisition_mutates_filesystem="
+        f"{proof.acquisition_mutates_filesystem}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_promotion_required="
+        f"{proof.acquisition_promotion_required}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_promotion_ready="
+        f"{proof.acquisition_promotion_ready}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_launcher_update_required="
+        f"{proof.acquisition_launcher_update_required}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_rollback_codex_path="
+        f"{proof.acquisition_rollback_codex_path}"
+    )
+    print(f"stock_codex_compat_pkg_update_acquisition_reuse_action={proof.reuse_action}")
+    print(
+        "stock_codex_compat_pkg_update_acquisition_reuse_mutates_filesystem="
+        f"{proof.reuse_mutates_filesystem}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_reuse_without_remote_download="
+        f"{proof.reuse_without_remote_download}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_blocked_without_remote_cache_mutated="
+        f"{proof.blocked_without_remote_cache_mutated}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_blocked_without_remote_error="
+        f"{proof.blocked_without_remote_error!r}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_omnigent_resolved_codex_path="
+        f"{proof.omnigent_resolved_codex_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_host_cache_root="
+        f"{proof.host_cache_root}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_host_cache_referenced_by_plans="
+        f"{proof.host_cache_referenced_by_plans}"
+    )
+    print("stock_codex_compat_pkg_update_acquisition_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: the pkg-installed runtime's bundled stock Codex provisioner "
+        "can execute the stable official remote acquisition gate from a clean "
+        "user profile"
+    )
+    print(
+        "ASSERTION: remote acquisition requires explicit download opt-in, "
+        "verifies the Homebrew/OpenAI GitHub release archive SHA-256, stages "
+        "a channel payload, and records promotion plus rollback intent without "
+        "promoting persistent pointers"
+    )
+    print(
+        "ASSERTION: after acquisition, the same pkg-installed runtime reuses "
+        "the staged target without --allow-remote-channel-download and without "
+        "filesystem mutation"
     )
 
 
@@ -15191,6 +15920,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-pkg-runtime-live",
             "stock-codex-compat-pkg-user-bootstrap",
             "stock-codex-compat-pkg-clean-provision",
+            "stock-codex-compat-pkg-update-acquisition",
             "stock-codex-compat-pkg-clean-auth-onboarding",
             "stock-codex-compat-pkg-signed-notarized",
             "stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
@@ -15312,6 +16042,12 @@ def parse_args() -> argparse.Namespace:
             "payload in a temporary install root and proves the installed "
             "runtime can bootstrap, update, doctor, and roll back a clean "
             "user-level compatibility command. "
+            "'stock-codex-compat-pkg-clean-provision' proves the installed "
+            "runtime can provision stock Codex into a clean user cache from "
+            "a file-backed channel artifact. "
+            "'stock-codex-compat-pkg-update-acquisition' proves the installed "
+            "runtime can acquire the stable official stock Codex release "
+            "through --plan-update --stage-update. "
             "'stock-codex-compat-pkg-signed-notarized' builds the pkg with a "
             "Developer ID Installer identity, submits it through notarytool, "
             "staples it, validates the staple, and checks Gatekeeper; when "
@@ -15841,6 +16577,24 @@ def main() -> int:
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_stock_codex_compat_pkg_clean_provision_proof(
             run_stock_codex_compat_pkg_clean_provision_proof(codex_path)
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-update-acquisition":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-update-acquisition does not use --apple-bundle; "
+                "omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-update-acquisition cannot allow a "
+                "Codex-fork binary."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_pkg_update_acquisition_proof(
+            run_stock_codex_compat_pkg_update_acquisition_proof(codex_path)
         )
         return 0
 

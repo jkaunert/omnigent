@@ -290,6 +290,15 @@ The next gates should split by product mode:
   populated `auth.json` reports available, the classifier uses the
   clean-provisioned stock Codex path, and classifier output does not leak
   synthetic credential material;
+- for `stock-codex-compat`, treat pkg-installed runtime stable stock-Codex
+  acquisition as green: `stock-codex-compat-pkg-update-acquisition` builds and
+  stages the compatibility `.pkg` under a temporary installed-root shape, runs
+  its bundled `scripts/provision_stock_codex.py` under a clean temporary `HOME`,
+  proves remote acquisition is blocked without explicit
+  `--allow-remote-channel-download`, then downloads, verifies, extracts, and
+  stages the official stable Homebrew/OpenAI GitHub release archive, proves
+  reuse without another remote-download flag, and keeps host-cache paths out of
+  emitted plans;
 - for `stock-codex-compat`, treat the wrapped MCP relay-tool gate as blocked:
   `stock-codex-compat-wrapper-relay-tool` starts the real Omnigent
   `tool_relay.json` sidecar and advertises `omnigent_wrapper_relay_probe`, but
@@ -304,9 +313,10 @@ The next gates should split by product mode:
   The update doctor gate is green for fail-closed policy requirement, dry-run
   no-mutation behavior, preverified target detection, launcher promotion intent,
   target-ready promotion material, rollback intent, and up-to-date promotion
-  suppression. The update acquisition gate is green for explicit stable-channel
-  remote download, SHA verification, safe archive extraction, staged-payload
-  reuse, and no-host-cache leakage. Remaining production choices are updater
+  suppression. The update acquisition gates are green for both the source
+  checkout and the pkg-installed runtime: explicit stable-channel remote
+  download, SHA verification, safe archive extraction, staged-payload reuse,
+  and no-host-cache leakage are proven. Remaining production choices are updater
   scheduling, persistent launcher pointer promotion, alpha/pre-release channel
   policy, independent archive signature policy, and broader UI/device bridge
   coverage such as screenshot, snapshot, gesture, or device execution if product
