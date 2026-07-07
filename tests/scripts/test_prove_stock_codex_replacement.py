@@ -3572,6 +3572,106 @@ def test_external_clean_user_command_wraps_sudo_with_clean_env() -> None:
     assert env == {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
 
 
+def test_stock_codex_compat_pkg_clean_vm_requires_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = _write_codex_binary(tmp_path / "stock" / "codex")
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        if path is not None:
+            return None
+        return {
+            "ssh": "/usr/bin/ssh",
+            "scp": "/usr/bin/scp",
+            "tart": "/usr/local/bin/tart",
+        }.get(name)
+
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+
+    proof = _MOD.run_stock_codex_compat_pkg_clean_vm_proof(
+        stock_codex,
+        package_path=package_path,
+        clean_vm_ssh_target=None,
+        clean_vm_tart_name=None,
+        clean_vm_ssh_user=None,
+        clean_vm_ssh_port=22,
+        clean_vm_start_tart=False,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.package_path == package_path.resolve()
+    assert proof.package_sha256 == _MOD.sha256_file(package_path)
+    assert any("--clean-vm-ssh-target" in item for item in proof.missing_prerequisites)
+
+
+def test_stock_codex_compat_pkg_clean_vm_blocks_missing_tart_vm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = _write_codex_binary(tmp_path / "stock" / "codex")
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        if path is not None:
+            return None
+        return {
+            "ssh": "/usr/bin/ssh",
+            "scp": "/usr/bin/scp",
+            "tart": "/usr/local/bin/tart",
+        }.get(name)
+
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+    monkeypatch.setattr(_MOD, "_tart_vm_names", lambda _tart_path: set())
+
+    proof = _MOD.run_stock_codex_compat_pkg_clean_vm_proof(
+        stock_codex,
+        package_path=package_path,
+        clean_vm_ssh_target=None,
+        clean_vm_tart_name="omnigent-clean",
+        clean_vm_ssh_user="admin",
+        clean_vm_ssh_port=22,
+        clean_vm_start_tart=False,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.tart_name == "omnigent-clean"
+    assert proof.ssh_user == "admin"
+    assert any("Tart VM does not exist" in item for item in proof.missing_prerequisites)
+
+
+def test_clean_vm_remote_script_requires_marker_and_noninteractive_sudo() -> None:
+    script = _MOD._clean_vm_remote_script_text()
+
+    assert ".omnigent-stock-codex-compat-clean-user-ok" in script
+    assert "sudo -n true" in script
+    assert "sudo -n installer -pkg" in script
+    assert "sudo -n pkgutil --forget" in script
+    assert "stock_codex_compat_pkg_clean_vm_status=replacement-ready" in script
+    assert "--install-adapter-package" in script
+    assert "--uninstall" in script
+    assert "--expected-sha256" in script
+
+
+def test_clean_vm_ssh_command_avoids_persistent_known_hosts() -> None:
+    command = _MOD._clean_vm_ssh_base_command(
+        ssh_path="/usr/bin/ssh",
+        ssh_target="admin@192.0.2.10",
+        ssh_port=2222,
+    )
+
+    assert command[:3] == ["/usr/bin/ssh", "-p", "2222"]
+    assert "BatchMode=yes" in command
+    assert "StrictHostKeyChecking=no" in command
+    assert "UserKnownHostsFile=/dev/null" in command
+    assert command[-1] == "admin@192.0.2.10"
+
+
 def test_stock_codex_compat_pkg_external_clean_user_uses_marked_home(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
