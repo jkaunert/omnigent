@@ -3660,6 +3660,15 @@ def test_stock_codex_compat_pkg_external_clean_user_uses_marked_home(
         assert timeout > 0
         assert cwd == mounted_target / runtime_root.relative_to("/")
         assert Path(env["HOME"]) == clean_home.resolve()
+        proof_root = clean_home.resolve() / _MOD.EXTERNAL_CLEAN_USER_PROOF_ROOT_NAME
+        assert Path(env["CODEX_HOME"]) == (
+            clean_home.resolve() / ".codex-omnigent-clean-user-canary"
+        )
+        assert Path(env["UV_CACHE_DIR"]) == proof_root / "uv-cache"
+        assert Path(env["UV_TOOL_DIR"]) == proof_root / "uv-tools"
+        assert Path(env["UV_PYTHON_INSTALL_DIR"]) == proof_root / "uv-python"
+        assert Path(env["XDG_CACHE_HOME"]) == proof_root / "xdg-cache"
+        assert Path(env["XDG_DATA_HOME"]) == proof_root / "xdg-data"
         provisioner_commands.append(command)
         cache_root = Path(command[command.index("--cache-root") + 1])
         expected_sha = command[command.index("--expected-sha256") + 1]
@@ -3694,6 +3703,9 @@ def test_stock_codex_compat_pkg_external_clean_user_uses_marked_home(
         assert repo_root == mounted_target / runtime_root.relative_to("/")
         assert script_path == repo_root / "scripts" / "install_stock_codex_compat_launcher.py"
         assert Path(env["HOME"]) == clean_home.resolve()
+        assert Path(env["CODEX_HOME"]) == (
+            clean_home.resolve() / ".codex-omnigent-clean-user-canary"
+        )
         installer_cli_calls.append(args)
         adapter_package_dir = (
             clean_home.resolve()
@@ -3845,6 +3857,9 @@ def test_stock_codex_compat_pkg_external_clean_user_uses_marked_home(
     assert proof.cleanup_receipt_absent is True
     assert proof.target_detached is True
     assert marker_path.is_file()
+    assert sorted(path.relative_to(clean_home) for path in clean_home.rglob("*")) == [
+        Path(_MOD.EXTERNAL_CLEAN_USER_MARKER_NAME)
+    ]
     assert not any(
         path.exists() or path.is_symlink()
         for path in _MOD._external_clean_user_guard_paths(clean_home.resolve())

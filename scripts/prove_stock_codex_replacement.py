@@ -11052,6 +11052,8 @@ def _cleanup_external_clean_user_state(
     clean_cache_root: Path,
     clean_codex_home: Path,
     proof_root: Path,
+    removable_empty_parents: tuple[Path, ...] = (),
+    preexisting_empty_parents: frozenset[Path] = frozenset(),
 ) -> bool:
     """Remove canary-created state while leaving the explicit marker in place."""
     adapter_root = adapter_package_dir.parent
@@ -11068,6 +11070,13 @@ def _cleanup_external_clean_user_state(
             shutil.rmtree(path)
         elif path.exists() or path.is_symlink():
             path.unlink()
+
+    for path in removable_empty_parents:
+        if path in preexisting_empty_parents:
+            continue
+        if path.is_dir() and not path.is_symlink():
+            with contextlib.suppress(OSError):
+                path.rmdir()
 
     return not any(path.exists() or path.is_symlink() for path in cleanup_paths)
 
@@ -11253,6 +11262,15 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
         )
         clean_cache_root = resolved_clean_home / ".local" / "omnigent" / "codex-stock"
         clean_codex_home = resolved_clean_home / ".codex-omnigent-clean-user-canary"
+        removable_empty_parents = (
+            manifest_path.parent,
+            resolved_clean_home / ".local" / "omnigent",
+            clean_bin_dir,
+            resolved_clean_home / ".local",
+        )
+        preexisting_empty_parents = frozenset(
+            path for path in removable_empty_parents if path.exists() or path.is_symlink()
+        )
         try:
             _run_pkg_lifecycle_command(
                 [
@@ -11338,10 +11356,11 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
                 raise SystemExit(
                     "External clean-user receipt has wrong package version.\n"
                     f"expected={structure.package_version}\nactual={receipt_version}"
-                )
+            )
 
             proof_root.mkdir(mode=0o700)
             clean_tmp.mkdir(mode=0o700)
+            clean_codex_home.mkdir(mode=0o700)
             channel_root = proof_root / "stock-codex-channel"
             channel_artifacts = channel_root / "artifacts"
             channel_artifacts.mkdir(parents=True)
@@ -11382,11 +11401,16 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
                 {
                     "HOME": str(resolved_clean_home),
                     "TMPDIR": str(clean_tmp),
+                    "CODEX_HOME": str(clean_codex_home),
                     "PATH": proof_path,
                     "PYTHONPATH": os.pathsep.join(python_path_entries),
+                    "UV_CACHE_DIR": str(proof_root / "uv-cache"),
+                    "UV_TOOL_DIR": str(proof_root / "uv-tools"),
+                    "UV_PYTHON_INSTALL_DIR": str(proof_root / "uv-python"),
+                    "XDG_CACHE_HOME": str(proof_root / "xdg-cache"),
+                    "XDG_DATA_HOME": str(proof_root / "xdg-data"),
                 }
             )
-            env.pop("CODEX_HOME", None)
             env.pop(OMNIGENT_STOCK_CODEX_PATH_ENV, None)
 
             provisioned = _run_stock_codex_provisioner_json(
@@ -11544,7 +11568,6 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
                     f"External clean-user doctor unexpectedly mutates: {doctor_payload!r}"
                 )
 
-            clean_codex_home.mkdir(mode=0o700)
             clean_auth_classifier_path, clean_reason, _clean_output = (
                 _run_installed_runtime_auth_classifier(
                     installed_runtime_root=installed_runtime_root,
@@ -11608,6 +11631,8 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
                 clean_cache_root=clean_cache_root,
                 clean_codex_home=clean_codex_home,
                 proof_root=proof_root,
+                removable_empty_parents=removable_empty_parents,
+                preexisting_empty_parents=preexisting_empty_parents,
             )
             if not cleanup_user_state_removed:
                 raise SystemExit(
@@ -11659,6 +11684,8 @@ def run_stock_codex_compat_pkg_external_clean_user_proof(
                     clean_cache_root=clean_cache_root,
                     clean_codex_home=clean_codex_home,
                     proof_root=proof_root,
+                    removable_empty_parents=removable_empty_parents,
+                    preexisting_empty_parents=preexisting_empty_parents,
                 )
             target_detached = _detach_stock_codex_compat_pkg_target_volume(
                 hdiutil_path=tool_paths["hdiutil"],
