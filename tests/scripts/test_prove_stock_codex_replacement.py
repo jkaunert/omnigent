@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -2736,7 +2737,13 @@ def test_stock_codex_compat_pkg_installer_lifecycle_prebuilt_blocks_after_valida
     )
     distribution_commands: list[list[str]] = []
 
-    def fake_which(name: str) -> str | None:
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        if path is not None:
+            for entry in path.split(os.pathsep):
+                candidate = Path(entry) / name
+                if candidate.is_file() and os.access(candidate, os.X_OK):
+                    return str(candidate)
+            return None
         return {
             "pkgutil": "/usr/sbin/pkgutil",
             "xcrun": "/usr/bin/xcrun",
@@ -3077,4 +3084,355 @@ def test_stock_codex_compat_pkg_installer_lifecycle_uses_mounted_target(
     assert proof.target_detached is True
     assert installer_cli_calls[0][0] == "--install-adapter-package"
     assert installer_cli_calls[1][0] == "--doctor"
+    assert lifecycle_commands[0][0] == "/usr/sbin/installer"
+
+
+def test_stock_codex_compat_pkg_clean_user_canary_uses_installed_pkg_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = _write_codex_binary(tmp_path / "stock" / "codex")
+    stock_version = _MOD.codex_version(stock_codex)
+    stock_sha256 = _MOD.sha256_file(stock_codex)
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+    install_prefix = Path("/Library/Application Support/Omnigent/stock-codex-compat")
+    runtime_root = install_prefix / "runtime"
+    required_payload_files = {
+        "Library/Application Support/Omnigent/stock-codex-compat/pkg-manifest.json": True,
+        "Library/Application Support/Omnigent/stock-codex-compat/bundle-manifest.json": True,
+        (
+            "Library/Application Support/Omnigent/stock-codex-compat/runtime/"
+            "pyproject.toml"
+        ): True,
+        (
+            "Library/Application Support/Omnigent/stock-codex-compat/runtime/"
+            "scripts/install_stock_codex_compat_launcher.py"
+        ): True,
+        (
+            "Library/Application Support/Omnigent/stock-codex-compat/runtime/"
+            "scripts/provision_stock_codex.py"
+        ): True,
+        (
+            "Library/Application Support/Omnigent/stock-codex-compat/runtime/"
+            "omnigent/stock_codex_compat_wrapper.py"
+        ): True,
+    }
+    structure = _MOD.StockCodexCompatPkgStructureProof(
+        package_path=package_path.resolve(),
+        package_sha256=_MOD.sha256_file(package_path),
+        source_bundle_sha256="b" * 64,
+        package_identifier="ai.omnigent.stock-codex-compat",
+        package_version="1.2.3",
+        install_location="/",
+        install_prefix=install_prefix,
+        runtime_root=runtime_root,
+        payload_file_count=len(required_payload_files),
+        required_payload_files=required_payload_files,
+        script_names=("postinstall",),
+        archive_entries=("Bom", "PackageInfo", "Payload", "Scripts"),
+        signature_status="signed by a certificate trusted by macOS",
+        signed=True,
+        pkg_manifest_path=tmp_path / "expanded" / "pkg-manifest.json",
+        bundle_manifest_path=tmp_path / "expanded" / "bundle-manifest.json",
+        pkg_contract={"runtime": "machine-level-runtime-only"},
+        bundle_source_root="<omitted-from-pkg>",
+    )
+    receipt_present = True
+    mounted_target = tmp_path / "mounted-target"
+    lifecycle_commands: list[list[str]] = []
+    provisioner_commands: list[list[str]] = []
+    installer_cli_calls: list[list[str]] = []
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        if path is not None:
+            for entry in path.split(os.pathsep):
+                candidate = Path(entry) / name
+                if candidate.is_file() and os.access(candidate, os.X_OK):
+                    return str(candidate)
+            return None
+        return {
+            "pkgutil": "/usr/sbin/pkgutil",
+            "xcrun": "/usr/bin/xcrun",
+            "spctl": "/usr/sbin/spctl",
+            "installer": "/usr/sbin/installer",
+            "hdiutil": "/usr/bin/hdiutil",
+            "uvx": str(_write_uvx_binary(tmp_path / "tools" / "uvx")),
+        }.get(name)
+
+    def fake_signed_pkg(**kwargs: object) -> Any:
+        assert kwargs["package_path"] == package_path.resolve()
+        assert kwargs["source_repo_root"] == _REPO_ROOT
+        return _MOD._SignedNotarizedStockCodexCompatPkg(
+            structure=structure,
+            notary_submission_id="prebuilt-package",
+            notary_status="prebuilt-staple-validated",
+            notary_output_preview="prebuilt",
+            staple_output_preview="prebuilt",
+            stapler_validate_output_preview="validated",
+            gatekeeper_output_preview="accepted",
+        )
+
+    def fake_create_volume(**kwargs: object) -> tuple[Path, Path, str]:
+        assert kwargs["hdiutil_path"] == "/usr/bin/hdiutil"
+        mounted_target.mkdir()
+        return tmp_path / "target.dmg", mounted_target, "/dev/disk999"
+
+    def write_installed_payload() -> None:
+        installed_prefix = mounted_target / install_prefix.relative_to("/")
+        installed_runtime = mounted_target / runtime_root.relative_to("/")
+        (installed_runtime / "scripts").mkdir(parents=True)
+        (installed_runtime / "omnigent").mkdir()
+        (installed_runtime / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        (installed_runtime / "scripts" / "install_stock_codex_compat_launcher.py").write_text(
+            "#!/usr/bin/env python3\n",
+            encoding="utf-8",
+        )
+        (installed_runtime / "scripts" / "provision_stock_codex.py").write_text(
+            "#!/usr/bin/env python3\n",
+            encoding="utf-8",
+        )
+        (installed_runtime / "omnigent" / "stock_codex_compat_wrapper.py").write_text(
+            "",
+            encoding="utf-8",
+        )
+        (installed_prefix / "pkg-manifest.json").write_text(
+            json.dumps(
+                {
+                    "contract": {"runtime": "machine-level-runtime-only"},
+                    "packageIdentifier": "ai.omnigent.stock-codex-compat",
+                    "packageVersion": "1.2.3",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (installed_prefix / "bundle-manifest.json").write_text(
+            json.dumps({"sourceRoot": "<omitted-from-pkg>"}) + "\n",
+            encoding="utf-8",
+        )
+
+    def fake_lifecycle_command(
+        command: list[str],
+        *,
+        timeout: float,
+        failure_label: str,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal receipt_present
+        assert timeout > 0
+        assert failure_label
+        lifecycle_commands.append(command)
+        if command[0] == "/usr/sbin/installer":
+            assert command[command.index("-target") + 1] == str(mounted_target)
+            write_installed_payload()
+            return subprocess.CompletedProcess(command, 0, stdout="installer ok", stderr="")
+        if command[:3] == ["/usr/sbin/pkgutil", "--volume", str(mounted_target)]:
+            if command[3] == "--pkg-info":
+                if receipt_present:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout=(
+                            "package-id: ai.omnigent.stock-codex-compat\n"
+                            "version: 1.2.3\n"
+                        ),
+                        stderr="",
+                    )
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="not found")
+            if command[3] == "--files":
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout="\n".join(required_payload_files) + "\n",
+                    stderr="",
+                )
+            if command[3] == "--forget":
+                receipt_present = False
+                return subprocess.CompletedProcess(command, 0, stdout="Forgot package", stderr="")
+        raise AssertionError(f"unexpected lifecycle command: {command!r}, check={check}")
+
+    def fake_provisioner_json(
+        command: list[str],
+        *,
+        env: dict[str, str],
+        cwd: Path,
+        failure_label: str,
+        timeout: float = 60,
+    ) -> dict[str, Any]:
+        assert failure_label
+        assert timeout > 0
+        assert cwd == mounted_target / runtime_root.relative_to("/")
+        assert env["HOME"]
+        provisioner_commands.append(command)
+        cache_root = Path(command[command.index("--cache-root") + 1])
+        expected_sha = command[command.index("--expected-sha256") + 1]
+        assert expected_sha == stock_sha256
+        payload_dir = cache_root / "0.142.2"
+        codex_path = _write_codex_binary(payload_dir / "codex", version=stock_version)
+        manifest_path = payload_dir / "manifest.json"
+        manifest_path.write_text(
+            json.dumps({"kind": "omnigent-stock-codex", "sourceKind": "channel"})
+            + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "action": "installed",
+            "codexPath": str(codex_path),
+            "payloadDir": str(payload_dir),
+            "manifestPath": str(manifest_path),
+            "version": stock_version,
+            "sha256": _MOD.sha256_file(codex_path),
+            "sourceKind": "channel",
+            "env": {_MOD.OMNIGENT_STOCK_CODEX_PATH_ENV: str(codex_path)},
+        }
+
+    def fake_installer_cli_json(
+        args: list[str],
+        *,
+        env: dict[str, str],
+        repo_root: Path,
+        script_path: Path,
+    ) -> dict[str, Any]:
+        assert repo_root == mounted_target / runtime_root.relative_to("/")
+        assert script_path == repo_root / "scripts" / "install_stock_codex_compat_launcher.py"
+        installer_cli_calls.append(args)
+        home = Path(env["HOME"])
+        adapter_package_dir = (
+            home / ".local" / "omnigent" / "stock-codex-compat" / "adapter-package"
+        )
+        if args[0] == "--install-adapter-package":
+            adapter_bin = adapter_package_dir / "bin"
+            adapter_bin.mkdir(parents=True)
+            adapter_manifest = adapter_package_dir / "adapter-manifest.json"
+            adapter_manifest.write_text(
+                json.dumps({"tools": [{"name": "fetch_apple_docs"}]}) + "\n",
+                encoding="utf-8",
+            )
+            return {
+                "action": "adapter-package-installed",
+                "adapterPackageDir": str(adapter_package_dir),
+                "adapterBin": str(adapter_bin),
+                "adapterManifest": str(adapter_manifest),
+                "adapterToolNames": ["fetch_apple_docs"],
+                "mutatesFilesystem": True,
+            }
+        if args[0] == "--install":
+            pinned_codex = Path(args[args.index("--pinned-codex-path") + 1])
+            launcher_path = home / ".local" / "bin" / "omnigent-stock-codex-compat"
+            manifest_path = (
+                home / ".local" / "omnigent" / "launchers" / "stock-codex-compat.json"
+            )
+            launcher_path.parent.mkdir(parents=True)
+            manifest_path.parent.mkdir(parents=True)
+            launcher_path.write_text(
+                "#!/bin/sh\n"
+                "if [ \"${1:-}\" = \"--version\" ]; then\n"
+                f"  exec {shlex.quote(str(pinned_codex))} --version\n"
+                "fi\n"
+                "if [ \"${1:-}\" = \"--omnigent-stock-codex-compat-launcher-probe\" ]; then\n"
+                "  cat <<'EOF'\n"
+                "OMNIGENT_STOCK_CODEX_COMPAT_LAUNCHER_OK\n"
+                f"runtime={repo_root}\n"
+                f"codex={pinned_codex}\n"
+                "EOF\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 64\n",
+                encoding="utf-8",
+            )
+            launcher_path.chmod(0o755)
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "repoRoot": str(repo_root),
+                        "pinnedCodexPath": str(pinned_codex),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            rollback_command = (
+                "printf 'compat_launcher_action=uninstalled\\n'; "
+                f"rm -f {shlex.quote(str(launcher_path))} "
+                f"{shlex.quote(str(manifest_path))}; "
+                f"# {repo_root}"
+            )
+            return {
+                "action": "installed",
+                "rollbackCommand": rollback_command,
+                "mutatesFilesystem": True,
+            }
+        assert args[0] == "--doctor"
+        return {
+            "installAllowed": True,
+            "existingTargetState": "managed",
+            "targetSelectedOnPath": True,
+            "mutatesFilesystem": False,
+        }
+
+    def fake_auth_classifier(**kwargs: object) -> tuple[Path, str | None, str]:
+        codex_home = kwargs["codex_home"]
+        assert isinstance(codex_home, Path)
+        return codex_home / "auth.json", "needs-auth", '{"unavailableReason":"needs-auth"}\n'
+
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+    monkeypatch.setattr(_MOD, "_xcrun_find_tool", lambda _xcrun, tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(_MOD, "_effective_user_is_root", lambda: True)
+    monkeypatch.setattr(
+        _MOD,
+        "_validate_prebuilt_signed_notarized_stock_codex_compat_pkg",
+        fake_signed_pkg,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_create_stock_codex_compat_pkg_target_volume",
+        fake_create_volume,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_detach_stock_codex_compat_pkg_target_volume",
+        lambda **kwargs: kwargs["target_device"] == "/dev/disk999",
+    )
+    monkeypatch.setattr(_MOD, "_run_pkg_lifecycle_command", fake_lifecycle_command)
+    monkeypatch.setattr(_MOD, "_run_stock_codex_provisioner_json", fake_provisioner_json)
+    monkeypatch.setattr(
+        _MOD,
+        "_run_stock_codex_compat_installer_cli_json",
+        fake_installer_cli_json,
+    )
+    monkeypatch.setattr(_MOD, "_run_installed_runtime_auth_classifier", fake_auth_classifier)
+
+    proof = _MOD.run_stock_codex_compat_pkg_clean_user_canary_proof(
+        stock_codex,
+        package_path=package_path,
+    )
+
+    assert proof.status == "replacement-ready"
+    assert proof.installed_runtime_root == mounted_target / runtime_root.relative_to("/")
+    assert proof.receipt_package_id == "ai.omnigent.stock-codex-compat"
+    assert proof.provisioned_codex_path is not None
+    assert proof.clean_cache_root is not None
+    assert proof.provisioned_codex_path.is_relative_to(proof.clean_cache_root)
+    assert proof.provisioned_version == stock_version
+    assert proof.adapter_package_action == "adapter-package-installed"
+    assert proof.adapter_package_exists_after_install is True
+    assert proof.install_action == "installed"
+    assert proof.version_output == stock_version
+    assert proof.doctor_install_allowed is True
+    assert proof.doctor_existing_target_state == "managed"
+    assert proof.doctor_target_selected_on_path is True
+    assert proof.doctor_mutates_filesystem is False
+    assert proof.clean_unavailable_reason == "needs-auth"
+    assert proof.launcher_removed_after_rollback is True
+    assert proof.manifest_removed_after_rollback is True
+    assert proof.cleanup_payload_removed is True
+    assert proof.cleanup_receipt_forgotten is True
+    assert proof.cleanup_receipt_absent is True
+    assert proof.target_detached is True
+    assert provisioner_commands
+    assert installer_cli_calls[0][0] == "--install-adapter-package"
+    assert installer_cli_calls[1][0] == "--install"
+    assert installer_cli_calls[2][0] == "--doctor"
     assert lifecycle_commands[0][0] == "/usr/sbin/installer"

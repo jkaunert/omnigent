@@ -1476,6 +1476,65 @@ class StockCodexCompatPkgInstallerLifecycleProof:
     gatekeeper_output_preview: str | None
 
 
+@dataclass(frozen=True)
+class StockCodexCompatPkgCleanUserCanaryProof:
+    """Proof result for a signed pkg install plus clean-user bootstrap canary."""
+
+    status: str
+    missing_prerequisites: tuple[str, ...]
+    tool_paths: dict[str, str | None]
+    stock_codex_path: Path | None
+    stock_codex_version: str | None
+    stock_codex_sha256: str | None
+    package_path: Path | None
+    package_sha256: str | None
+    source_bundle_sha256: str | None
+    package_identifier: str | None
+    package_version: str | None
+    target_image_path: Path | None
+    target_mountpoint: Path | None
+    target_device: str | None
+    installed_prefix: Path | None
+    installed_runtime_root: Path | None
+    installer_script_path: Path | None
+    provisioner_script_path: Path | None
+    receipt_package_id: str | None
+    receipt_version: str | None
+    receipt_required_payload_files_present: dict[str, bool] | None
+    clean_home: Path | None
+    clean_cache_root: Path | None
+    provisioned_codex_path: Path | None
+    provisioned_version: str | None
+    provisioned_sha256: str | None
+    provisioned_source_kind: str | None
+    clean_bin_dir: Path | None
+    launcher_path: Path | None
+    manifest_path: Path | None
+    selected_command_path: Path | None
+    version_output: str | None
+    probe_output: str | None
+    adapter_package_dir: Path | None
+    adapter_package_action: str | None
+    adapter_package_exists_after_install: bool | None
+    install_action: str | None
+    rollback_command: str | None
+    rollback_action: str | None
+    doctor_install_allowed: bool | None
+    doctor_existing_target_state: str | None
+    doctor_target_selected_on_path: bool | None
+    doctor_mutates_filesystem: bool | None
+    clean_codex_home: Path | None
+    clean_auth_classifier_path: Path | None
+    clean_unavailable_reason: str | None
+    launcher_removed_after_rollback: bool | None
+    manifest_removed_after_rollback: bool | None
+    cleanup_payload_removed: bool | None
+    cleanup_receipt_forgotten: bool | None
+    cleanup_receipt_absent: bool | None
+    target_detached: bool | None
+    gatekeeper_output_preview: str | None
+
+
 class LiveProofTimeoutError(Exception):
     """A single live proof step exceeded its configured wall-clock budget."""
 
@@ -10253,6 +10312,609 @@ def run_stock_codex_compat_pkg_installer_lifecycle_proof(
         )
 
 
+def _blocked_stock_codex_compat_pkg_clean_user_canary_proof(
+    *,
+    tool_paths: dict[str, str | None],
+    missing_prerequisites: tuple[str, ...],
+    stock_codex_path: Path | None,
+    stock_codex_version: str | None,
+    stock_codex_sha256: str | None,
+    structure: StockCodexCompatPkgStructureProof | None = None,
+    gatekeeper_output_preview: str | None = None,
+) -> StockCodexCompatPkgCleanUserCanaryProof:
+    return StockCodexCompatPkgCleanUserCanaryProof(
+        status="blocked",
+        missing_prerequisites=missing_prerequisites,
+        tool_paths=tool_paths,
+        stock_codex_path=stock_codex_path,
+        stock_codex_version=stock_codex_version,
+        stock_codex_sha256=stock_codex_sha256,
+        package_path=structure.package_path if structure is not None else None,
+        package_sha256=structure.package_sha256 if structure is not None else None,
+        source_bundle_sha256=(
+            structure.source_bundle_sha256 if structure is not None else None
+        ),
+        package_identifier=structure.package_identifier if structure is not None else None,
+        package_version=structure.package_version if structure is not None else None,
+        target_image_path=None,
+        target_mountpoint=None,
+        target_device=None,
+        installed_prefix=None,
+        installed_runtime_root=None,
+        installer_script_path=None,
+        provisioner_script_path=None,
+        receipt_package_id=None,
+        receipt_version=None,
+        receipt_required_payload_files_present=None,
+        clean_home=None,
+        clean_cache_root=None,
+        provisioned_codex_path=None,
+        provisioned_version=None,
+        provisioned_sha256=None,
+        provisioned_source_kind=None,
+        clean_bin_dir=None,
+        launcher_path=None,
+        manifest_path=None,
+        selected_command_path=None,
+        version_output=None,
+        probe_output=None,
+        adapter_package_dir=None,
+        adapter_package_action=None,
+        adapter_package_exists_after_install=None,
+        install_action=None,
+        rollback_command=None,
+        rollback_action=None,
+        doctor_install_allowed=None,
+        doctor_existing_target_state=None,
+        doctor_target_selected_on_path=None,
+        doctor_mutates_filesystem=None,
+        clean_codex_home=None,
+        clean_auth_classifier_path=None,
+        clean_unavailable_reason=None,
+        launcher_removed_after_rollback=None,
+        manifest_removed_after_rollback=None,
+        cleanup_payload_removed=None,
+        cleanup_receipt_forgotten=None,
+        cleanup_receipt_absent=None,
+        target_detached=None,
+        gatekeeper_output_preview=gatekeeper_output_preview,
+    )
+
+
+def run_stock_codex_compat_pkg_clean_user_canary_proof(
+    stock_codex_path: Path,
+    *,
+    package_path: Path | None,
+) -> StockCodexCompatPkgCleanUserCanaryProof:
+    """Install a signed pkg to a temp volume and run a clean-user canary."""
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    assert_stock_codex_path(stock_codex_path, allow_fork_codex=False)
+    stock_codex_version = codex_version(stock_codex_path)
+    stock_codex_sha256 = sha256_file(stock_codex_path)
+    source_repo_root = Path(__file__).resolve().parents[1]
+    root_missing = (
+        "clean-user canary requires root privileges for /usr/sbin/installer; "
+        "run from an admin-authenticated root shell"
+    )
+    tool_paths = {
+        "pkgutil": shutil.which("pkgutil"),
+        "xcrun": shutil.which("xcrun"),
+        "spctl": shutil.which("spctl"),
+        "stapler": None,
+        "installer": shutil.which("installer"),
+        "hdiutil": shutil.which("hdiutil"),
+        "uvx": shutil.which("uvx"),
+    }
+    if tool_paths["xcrun"]:
+        tool_paths["stapler"] = _xcrun_find_tool(str(tool_paths["xcrun"]), "stapler")
+    missing: list[str] = []
+    if package_path is None:
+        missing.append(
+            "stock-codex-compat-pkg-clean-user-canary requires --pkg-path "
+            "from stock-codex-compat-pkg-signed-notarized"
+        )
+    else:
+        package_path = package_path.expanduser().resolve()
+        if not package_path.is_file():
+            missing.append(f"missing prebuilt compatibility pkg: {package_path}")
+    for tool_name in ("pkgutil", "xcrun", "spctl", "stapler", "installer", "hdiutil", "uvx"):
+        if not tool_paths[tool_name]:
+            missing.append(f"missing tool: {tool_name}")
+    if missing:
+        return _blocked_stock_codex_compat_pkg_clean_user_canary_proof(
+            tool_paths=tool_paths,
+            missing_prerequisites=tuple(missing),
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            stock_codex_sha256=stock_codex_sha256,
+        )
+
+    assert package_path is not None
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-pkg-clean-user-canary-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        signed_pkg = _validate_prebuilt_signed_notarized_stock_codex_compat_pkg(
+            package_path=package_path,
+            root=root,
+            source_repo_root=source_repo_root,
+            tool_paths=tool_paths,
+        )
+        structure = signed_pkg.structure
+        if not _effective_user_is_root():
+            return _blocked_stock_codex_compat_pkg_clean_user_canary_proof(
+                tool_paths=tool_paths,
+                missing_prerequisites=(root_missing,),
+                stock_codex_path=stock_codex_path,
+                stock_codex_version=stock_codex_version,
+                stock_codex_sha256=stock_codex_sha256,
+                structure=structure,
+                gatekeeper_output_preview=signed_pkg.gatekeeper_output_preview,
+            )
+
+        target_image_path, target_mountpoint, target_device = (
+            _create_stock_codex_compat_pkg_target_volume(
+                root=root,
+                hdiutil_path=tool_paths["hdiutil"],
+            )
+        )
+        target_detached = False
+        try:
+            _run_pkg_lifecycle_command(
+                [
+                    tool_paths["installer"],
+                    "-pkg",
+                    str(structure.package_path),
+                    "-target",
+                    str(target_mountpoint),
+                    "-dumplog",
+                    "-verboseR",
+                ],
+                timeout=600,
+                failure_label="Compatibility pkg clean-user canary installer command",
+            )
+            installed_prefix = (
+                target_mountpoint / structure.install_prefix.relative_to("/")
+            ).resolve()
+            installed_runtime_root = _validate_expanded_stock_codex_compat_runtime(
+                payload_root=target_mountpoint,
+                packaged_runtime_root=structure.runtime_root,
+                source_repo_root=source_repo_root,
+            )
+            installer_script_path = (
+                installed_runtime_root
+                / "scripts"
+                / "install_stock_codex_compat_launcher.py"
+            )
+            provisioner_script_path = (
+                installed_runtime_root / "scripts" / "provision_stock_codex.py"
+            )
+            if not provisioner_script_path.is_file():
+                raise SystemExit(
+                    "Canary-installed runtime is missing the stock Codex provisioner.\n"
+                    f"expected={provisioner_script_path}"
+                )
+
+            receipt_info = _run_pkg_lifecycle_command(
+                [
+                    tool_paths["pkgutil"],
+                    "--volume",
+                    str(target_mountpoint),
+                    "--pkg-info",
+                    structure.package_identifier,
+                ],
+                timeout=120,
+                failure_label="Compatibility pkg clean-user canary receipt info",
+            )
+            receipt_files_completed = _run_pkg_lifecycle_command(
+                [
+                    tool_paths["pkgutil"],
+                    "--volume",
+                    str(target_mountpoint),
+                    "--files",
+                    structure.package_identifier,
+                ],
+                timeout=120,
+                failure_label="Compatibility pkg clean-user canary receipt files",
+            )
+            receipt_file_set = {
+                line.strip()
+                for line in receipt_files_completed.stdout.splitlines()
+                if line.strip()
+            }
+            required_receipt_files = {
+                path: path in receipt_file_set for path in structure.required_payload_files
+            }
+            if not all(required_receipt_files.values()):
+                missing_receipt_files = [
+                    path for path, present in required_receipt_files.items() if not present
+                ]
+                raise SystemExit(
+                    "Canary installer receipt omitted required payload files.\n"
+                    f"missing={missing_receipt_files}"
+                )
+            receipt_package_id = _pkgutil_info_value(receipt_info.stdout, "package-id")
+            receipt_version = _pkgutil_info_value(receipt_info.stdout, "version")
+            if receipt_package_id != structure.package_identifier:
+                raise SystemExit(
+                    "Canary installer receipt has wrong package id.\n"
+                    f"expected={structure.package_identifier}\nactual={receipt_package_id}"
+                )
+            if receipt_version != structure.package_version:
+                raise SystemExit(
+                    "Canary installer receipt has wrong package version.\n"
+                    f"expected={structure.package_version}\nactual={receipt_version}"
+                )
+
+            clean_home = root / "home"
+            clean_tmp = root / "tmp"
+            clean_home.mkdir(mode=0o700)
+            clean_tmp.mkdir(mode=0o700)
+            clean_bin_dir = clean_home / ".local" / "bin"
+            launcher_path = clean_bin_dir / "omnigent-stock-codex-compat"
+            manifest_path = (
+                clean_home
+                / ".local"
+                / "omnigent"
+                / "launchers"
+                / "stock-codex-compat.json"
+            )
+            adapter_package_dir = (
+                clean_home
+                / ".local"
+                / "omnigent"
+                / "stock-codex-compat"
+                / "adapter-package"
+            )
+            clean_cache_root = clean_home / ".local" / "omnigent" / "codex-stock"
+            channel_root = root / "stock-codex-channel"
+            channel_artifacts = channel_root / "artifacts"
+            channel_artifacts.mkdir(parents=True)
+            channel_artifact_path = channel_artifacts / "codex"
+            shutil.copy2(stock_codex_path, channel_artifact_path)
+            channel_artifact_path.chmod(0o755)
+            channel_manifest_path = channel_root / "channel.json"
+            channel_manifest_path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "kind": "omnigent-stock-codex-channel",
+                        "latest": stock_codex_version,
+                        "artifacts": [
+                            {
+                                "version": stock_codex_version,
+                                "path": "artifacts/codex",
+                                "sha256": stock_codex_sha256,
+                            }
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            proof_path = (
+                f"{clean_bin_dir}{os.pathsep}{Path(tool_paths['uvx']).parent}{os.pathsep}"
+                f"{os.environ.get('PATH', '')}"
+            )
+            python_path_entries = [str(installed_runtime_root)]
+            if os.environ.get("PYTHONPATH"):
+                python_path_entries.append(os.environ["PYTHONPATH"])
+            env = os.environ.copy()
+            env.update(
+                {
+                    "HOME": str(clean_home),
+                    "TMPDIR": str(clean_tmp),
+                    "PATH": proof_path,
+                    "PYTHONPATH": os.pathsep.join(python_path_entries),
+                }
+            )
+            env.pop("CODEX_HOME", None)
+            env.pop(OMNIGENT_STOCK_CODEX_PATH_ENV, None)
+
+            provisioned = _run_stock_codex_provisioner_json(
+                [
+                    sys.executable,
+                    str(provisioner_script_path),
+                    "--cache-root",
+                    str(clean_cache_root),
+                    "--channel-manifest",
+                    str(channel_manifest_path),
+                    "--expected-sha256",
+                    stock_codex_sha256,
+                    "--json",
+                ],
+                env=env,
+                cwd=installed_runtime_root,
+                failure_label="Canary-installed stock Codex provisioner",
+                timeout=120,
+            )
+            provisioned_codex_path = Path(_json_string(provisioned, "codexPath")).resolve()
+            provisioned_sha256 = _json_string(provisioned, "sha256")
+            provisioned_version = _json_string(provisioned, "version")
+            provisioned_source_kind = _json_string(provisioned, "sourceKind")
+            if not provisioned_codex_path.is_relative_to(clean_cache_root.resolve()):
+                raise SystemExit(
+                    "Canary provisioned Codex outside the clean cache root.\n"
+                    f"cache_root={clean_cache_root}\ncodex_path={provisioned_codex_path}"
+                )
+            if provisioned_sha256.lower() != stock_codex_sha256.lower():
+                raise SystemExit(
+                    "Canary provisioned an unexpected stock Codex binary.\n"
+                    f"expected_sha256={stock_codex_sha256}\nactual={provisioned_sha256}"
+                )
+            if provisioned_version != stock_codex_version:
+                raise SystemExit(
+                    "Canary provisioned an unexpected stock Codex version.\n"
+                    f"expected={stock_codex_version!r}\nactual={provisioned_version!r}"
+                )
+            if provisioned_source_kind != "channel":
+                raise SystemExit(
+                    f"Canary provisioner source kind mismatch: {provisioned!r}"
+                )
+            if not provisioned_codex_path.is_file() or not os.access(
+                provisioned_codex_path,
+                os.X_OK,
+            ):
+                raise SystemExit(
+                    f"Canary-provisioned Codex is not executable: {provisioned_codex_path}"
+                )
+
+            adapter_payload = _run_stock_codex_compat_installer_cli_json(
+                ["--install-adapter-package"],
+                env=env,
+                repo_root=installed_runtime_root,
+                script_path=installer_script_path,
+            )
+            install_payload = _run_stock_codex_compat_installer_cli_json(
+                [
+                    "--install",
+                    "--pinned-codex-path",
+                    str(provisioned_codex_path),
+                    "--repo-root",
+                    str(installed_runtime_root),
+                    "--uvx-path",
+                    str(tool_paths["uvx"]),
+                    "--require-path-selected",
+                ],
+                env=env,
+                repo_root=installed_runtime_root,
+                script_path=installer_script_path,
+            )
+            selected = shutil.which("omnigent-stock-codex-compat", path=env["PATH"])
+            if selected is None:
+                raise SystemExit("Canary did not select compatibility command.")
+            selected_command_path = Path(selected).expanduser().resolve()
+            if selected_command_path != launcher_path.resolve():
+                raise SystemExit(
+                    "Canary selected the wrong compatibility command.\n"
+                    f"expected={launcher_path.resolve()}\nactual={selected_command_path}"
+                )
+            version = subprocess.run(
+                [str(selected_command_path), "--version"],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=10,
+            )
+            version_output = (version.stdout or version.stderr).strip()
+            if version.returncode != 0 or version_output != stock_codex_version:
+                raise SystemExit(
+                    "Canary launcher version delegation failed.\n"
+                    f"expected={stock_codex_version!r}\nactual={version_output!r}\n"
+                    f"exit={version.returncode}"
+                )
+            probe = subprocess.run(
+                [str(selected_command_path), "--omnigent-stock-codex-compat-launcher-probe"],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=10,
+            )
+            probe_output = ((probe.stdout or "") + (probe.stderr or "")).strip()
+            if probe.returncode != 0 or "OMNIGENT_STOCK_CODEX_COMPAT_LAUNCHER_OK" not in (
+                probe_output
+            ):
+                raise SystemExit(
+                    "Canary launcher probe failed.\n"
+                    f"exit={probe.returncode}\noutput={probe_output}"
+                )
+            if str(installed_runtime_root) not in probe_output:
+                raise SystemExit(
+                    "Canary launcher probe did not delegate to installed runtime.\n"
+                    f"expected_runtime={installed_runtime_root}\noutput={probe_output}"
+                )
+            if str(provisioned_codex_path) not in probe_output:
+                raise SystemExit(
+                    "Canary launcher probe did not pin the clean-provisioned Codex.\n"
+                    f"expected_codex={provisioned_codex_path}\noutput={probe_output}"
+                )
+
+            doctor_payload = _run_stock_codex_compat_installer_cli_json(
+                [
+                    "--doctor",
+                    "--pinned-codex-path",
+                    str(provisioned_codex_path),
+                    "--repo-root",
+                    str(installed_runtime_root),
+                    "--uvx-path",
+                    str(tool_paths["uvx"]),
+                    "--require-path-selected",
+                    "--force",
+                ],
+                env=env,
+                repo_root=installed_runtime_root,
+                script_path=installer_script_path,
+            )
+            if doctor_payload.get("installAllowed") is not True:
+                raise SystemExit(f"Canary doctor did not allow update: {doctor_payload!r}")
+            if doctor_payload.get("existingTargetState") != "managed":
+                raise SystemExit(f"Canary doctor missed managed launcher: {doctor_payload!r}")
+            if doctor_payload.get("targetSelectedOnPath") is not True:
+                raise SystemExit(
+                    f"Canary doctor did not see PATH selection: {doctor_payload!r}"
+                )
+            if doctor_payload.get("mutatesFilesystem") is not False:
+                raise SystemExit(f"Canary doctor unexpectedly mutates: {doctor_payload!r}")
+
+            clean_codex_home = root / "codex-home-clean"
+            clean_codex_home.mkdir(mode=0o700)
+            clean_auth_classifier_path, clean_reason, _clean_output = (
+                _run_installed_runtime_auth_classifier(
+                    installed_runtime_root=installed_runtime_root,
+                    home=clean_home,
+                    codex_home=clean_codex_home,
+                    stock_codex_path=provisioned_codex_path,
+                )
+            )
+            if clean_auth_classifier_path != (clean_codex_home / "auth.json").resolve():
+                raise SystemExit(
+                    "Canary auth classifier selected the wrong clean auth path.\n"
+                    f"expected={clean_codex_home / 'auth.json'}\n"
+                    f"actual={clean_auth_classifier_path}"
+                )
+            if clean_reason != "needs-auth":
+                raise SystemExit(
+                    "Canary clean auth classification did not require onboarding.\n"
+                    f"expected=needs-auth\nactual={clean_reason!r}"
+                )
+
+            rollback_command = install_payload.get("rollbackCommand")
+            if not isinstance(rollback_command, str) or not rollback_command:
+                raise SystemExit(f"Canary install omitted rollback command: {install_payload!r}")
+            if str(installed_runtime_root) not in rollback_command:
+                raise SystemExit(
+                    "Canary rollback command did not target installed runtime.\n"
+                    f"expected_runtime={installed_runtime_root}\n"
+                    f"rollback_command={rollback_command}"
+                )
+            rollback = _run_shell_command_for_proof(
+                rollback_command,
+                env=env,
+                cwd=installed_runtime_root,
+                timeout=240,
+            )
+            if "compat_launcher_action=uninstalled" not in rollback.stdout:
+                raise SystemExit(
+                    "Canary generated rollback command did not uninstall launcher.\n"
+                    f"stdout={rollback.stdout}\nstderr={rollback.stderr}"
+                )
+            launcher_removed = not launcher_path.exists()
+            manifest_removed = not manifest_path.exists()
+            if not launcher_removed or not manifest_removed:
+                raise SystemExit(
+                    "Canary rollback left launcher artifacts behind.\n"
+                    f"launcher_exists={launcher_path.exists()}\n"
+                    f"manifest_exists={manifest_path.exists()}"
+                )
+            adapter_package_exists_after_install = (
+                adapter_package_dir.is_dir()
+                and Path(str(adapter_payload["adapterBin"])).is_dir()
+                and Path(str(adapter_payload["adapterManifest"])).is_file()
+            )
+
+            if installed_prefix.exists():
+                shutil.rmtree(installed_prefix)
+            cleanup_payload_removed = not installed_prefix.exists()
+            forget = _run_pkg_lifecycle_command(
+                [
+                    tool_paths["pkgutil"],
+                    "--volume",
+                    str(target_mountpoint),
+                    "--forget",
+                    structure.package_identifier,
+                ],
+                timeout=120,
+                failure_label="Compatibility pkg clean-user canary receipt forget",
+            )
+            receipt_after_cleanup = _run_pkg_lifecycle_command(
+                [
+                    tool_paths["pkgutil"],
+                    "--volume",
+                    str(target_mountpoint),
+                    "--pkg-info",
+                    structure.package_identifier,
+                ],
+                timeout=120,
+                failure_label="Compatibility pkg clean-user canary receipt absence check",
+                check=False,
+            )
+            cleanup_receipt_absent = receipt_after_cleanup.returncode != 0
+            if not cleanup_payload_removed or not cleanup_receipt_absent:
+                raise SystemExit(
+                    "Canary cleanup left package state behind.\n"
+                    f"payload_removed={cleanup_payload_removed}\n"
+                    f"receipt_absent={cleanup_receipt_absent}\n"
+                    f"receipt_after_stdout={receipt_after_cleanup.stdout}\n"
+                    f"receipt_after_stderr={receipt_after_cleanup.stderr}"
+                )
+        finally:
+            target_detached = _detach_stock_codex_compat_pkg_target_volume(
+                hdiutil_path=tool_paths["hdiutil"],
+                target_device=target_device,
+            )
+
+        return StockCodexCompatPkgCleanUserCanaryProof(
+            status="replacement-ready",
+            missing_prerequisites=(),
+            tool_paths=tool_paths,
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            stock_codex_sha256=stock_codex_sha256,
+            package_path=structure.package_path,
+            package_sha256=structure.package_sha256,
+            source_bundle_sha256=structure.source_bundle_sha256,
+            package_identifier=structure.package_identifier,
+            package_version=structure.package_version,
+            target_image_path=target_image_path,
+            target_mountpoint=target_mountpoint,
+            target_device=target_device,
+            installed_prefix=installed_prefix,
+            installed_runtime_root=installed_runtime_root,
+            installer_script_path=installer_script_path,
+            provisioner_script_path=provisioner_script_path,
+            receipt_package_id=receipt_package_id,
+            receipt_version=receipt_version,
+            receipt_required_payload_files_present=required_receipt_files,
+            clean_home=clean_home,
+            clean_cache_root=clean_cache_root,
+            provisioned_codex_path=provisioned_codex_path,
+            provisioned_version=provisioned_version,
+            provisioned_sha256=provisioned_sha256,
+            provisioned_source_kind=provisioned_source_kind,
+            clean_bin_dir=clean_bin_dir,
+            launcher_path=launcher_path,
+            manifest_path=manifest_path,
+            selected_command_path=selected_command_path,
+            version_output=version_output,
+            probe_output=probe_output,
+            adapter_package_dir=adapter_package_dir,
+            adapter_package_action=str(adapter_payload["action"]),
+            adapter_package_exists_after_install=adapter_package_exists_after_install,
+            install_action=str(install_payload["action"]),
+            rollback_command=rollback_command,
+            rollback_action="uninstalled",
+            doctor_install_allowed=bool(doctor_payload["installAllowed"]),
+            doctor_existing_target_state=str(doctor_payload["existingTargetState"]),
+            doctor_target_selected_on_path=bool(doctor_payload["targetSelectedOnPath"]),
+            doctor_mutates_filesystem=bool(doctor_payload["mutatesFilesystem"]),
+            clean_codex_home=clean_codex_home,
+            clean_auth_classifier_path=clean_auth_classifier_path,
+            clean_unavailable_reason=str(clean_reason),
+            launcher_removed_after_rollback=launcher_removed,
+            manifest_removed_after_rollback=manifest_removed,
+            cleanup_payload_removed=cleanup_payload_removed,
+            cleanup_receipt_forgotten=forget.returncode == 0,
+            cleanup_receipt_absent=cleanup_receipt_absent,
+            target_detached=target_detached,
+            gatekeeper_output_preview=signed_pkg.gatekeeper_output_preview,
+        )
+
+
 def _expand_stock_codex_compat_pkg(package_path: Path, expand_dir: Path) -> Path:
     """Expand a flat compatibility pkg and return the expanded payload root."""
     pkgutil = shutil.which("pkgutil")
@@ -13251,6 +13913,216 @@ def print_stock_codex_compat_pkg_installer_lifecycle_proof(
         "adapter-package bootstrap and doctor, then the proof removes the "
         "payload, forgets the target-volume receipt, and detaches the temporary "
         "image"
+    )
+
+
+def print_stock_codex_compat_pkg_clean_user_canary_proof(
+    proof: StockCodexCompatPkgCleanUserCanaryProof,
+) -> None:
+    """Emit operator evidence for the signed pkg clean-user canary proof."""
+    print("stock_codex_compat_pkg_clean_user_canary_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_surface="
+        "signed-pkg-temp-volume-clean-user-bootstrap-provision-auth-rollback"
+    )
+    print(f"stock_codex_compat_pkg_clean_user_canary_status={proof.status}")
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_missing_prerequisites="
+        f"{json.dumps(list(proof.missing_prerequisites), sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_tool_paths="
+        f"{json.dumps(proof.tool_paths, sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_stock_codex_path="
+        f"{proof.stock_codex_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_stock_codex_sha256="
+        f"{proof.stock_codex_sha256}"
+    )
+    print(f"stock_codex_compat_pkg_clean_user_canary_package_path={proof.package_path}")
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_package_sha256="
+        f"{proof.package_sha256}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_source_bundle_sha256="
+        f"{proof.source_bundle_sha256}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_identifier="
+        f"{proof.package_identifier}"
+    )
+    print(f"stock_codex_compat_pkg_clean_user_canary_version={proof.package_version}")
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_target_image="
+        f"{proof.target_image_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_target_mountpoint="
+        f"{proof.target_mountpoint}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_target_device="
+        f"{proof.target_device}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_installed_prefix="
+        f"{proof.installed_prefix}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_installed_runtime_root="
+        f"{proof.installed_runtime_root}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_installer_script="
+        f"{proof.installer_script_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_provisioner_script="
+        f"{proof.provisioner_script_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_receipt_package_id="
+        f"{proof.receipt_package_id}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_receipt_version="
+        f"{proof.receipt_version}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_receipt_required_payload_files="
+        f"{json.dumps(proof.receipt_required_payload_files_present or {}, sort_keys=True)}"
+    )
+    print(f"stock_codex_compat_pkg_clean_user_canary_home={proof.clean_home}")
+    print(f"stock_codex_compat_pkg_clean_user_canary_cache_root={proof.clean_cache_root}")
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_provisioned_codex_path="
+        f"{proof.provisioned_codex_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_provisioned_version="
+        f"{proof.provisioned_version}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_provisioned_sha256="
+        f"{proof.provisioned_sha256}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_provisioned_source_kind="
+        f"{proof.provisioned_source_kind}"
+    )
+    print(f"stock_codex_compat_pkg_clean_user_canary_bin_dir={proof.clean_bin_dir}")
+    print(f"stock_codex_compat_pkg_clean_user_canary_launcher_path={proof.launcher_path}")
+    print(f"stock_codex_compat_pkg_clean_user_canary_manifest_path={proof.manifest_path}")
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_selected_command_path="
+        f"{proof.selected_command_path}"
+    )
+    print(f"stock_codex_compat_pkg_clean_user_canary_version_output={proof.version_output}")
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_adapter_package_dir="
+        f"{proof.adapter_package_dir}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_adapter_package_action="
+        f"{proof.adapter_package_action}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_adapter_package_exists_after_install="
+        f"{proof.adapter_package_exists_after_install}"
+    )
+    print(f"stock_codex_compat_pkg_clean_user_canary_install_action={proof.install_action}")
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_rollback_command="
+        f"{proof.rollback_command}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_rollback_action="
+        f"{proof.rollback_action}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_doctor_install_allowed="
+        f"{proof.doctor_install_allowed}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_doctor_existing_target_state="
+        f"{proof.doctor_existing_target_state}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_doctor_target_selected_on_path="
+        f"{proof.doctor_target_selected_on_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_doctor_mutates_filesystem="
+        f"{proof.doctor_mutates_filesystem}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_clean_codex_home="
+        f"{proof.clean_codex_home}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_clean_auth_classifier_path="
+        f"{proof.clean_auth_classifier_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_clean_unavailable_reason="
+        f"{proof.clean_unavailable_reason}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_launcher_removed_after_rollback="
+        f"{proof.launcher_removed_after_rollback}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_manifest_removed_after_rollback="
+        f"{proof.manifest_removed_after_rollback}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_cleanup_payload_removed="
+        f"{proof.cleanup_payload_removed}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_cleanup_receipt_forgotten="
+        f"{proof.cleanup_receipt_forgotten}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_cleanup_receipt_absent="
+        f"{proof.cleanup_receipt_absent}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_target_detached="
+        f"{proof.target_detached}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_gatekeeper_output="
+        f"{proof.gatekeeper_output_preview!r}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_user_canary_probe_output="
+        f"{_preview_text(proof.probe_output or '', limit=1000)!r}"
+    )
+    if proof.status == "blocked":
+        print(
+            "ASSERTION: signed pkg clean-user canary is blocked by local "
+            "admin installer, image, package validation, or uvx prerequisites"
+        )
+        return
+    print("stock_codex_compat_pkg_clean_user_canary_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: a Developer ID signed, notarized, and Gatekeeper-accepted "
+        "pkg can install to a temporary target volume and drive clean-user "
+        "stock Codex provisioning plus compatibility launcher bootstrap"
+    )
+    print(
+        "ASSERTION: the clean user path reaches needs-auth classification, "
+        "rolls back the user launcher, removes installed payload and receipt "
+        "state, and detaches the temporary image"
     )
 
 
@@ -17828,6 +18700,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-pkg-clean-auth-onboarding",
             "stock-codex-compat-pkg-signed-notarized",
             "stock-codex-compat-pkg-installer-lifecycle",
+            "stock-codex-compat-pkg-clean-user-canary",
             "stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
             "stock-codex-compat-wrapper-xcodebuild-bridge-test-adapter",
             "stock-codex-compat-wrapper-relay-tool",
@@ -17969,6 +18842,13 @@ def parse_args() -> argparse.Namespace:
             "receipt metadata and the installed runtime doctor, then removes "
             "payload and receipt state before detaching the image; macOS "
             "installer requires root/admin privileges for the live install step. "
+            "'stock-codex-compat-pkg-clean-user-canary' consumes --pkg-path, "
+            "installs the signed/notarized pkg onto a temporary mounted target "
+            "volume, provisions stock Codex into a clean user cache from the "
+            "installed runtime, bootstraps and rolls back the clean user's "
+            "compatibility launcher, classifies clean auth as needs-auth, then "
+            "removes payload and receipt state before detaching the image; macOS "
+            "installer requires root/admin privileges for the live install step. "
             "'stock-codex-compat-wrapper-xcodebuild-bridge-adapter' proves "
             "that XcodeBuildMCP simulator build/run can execute through the "
             "same wrapper-owned file bridge while stock Codex stays in "
@@ -18074,8 +18954,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Optional prebuilt signed/notarized compatibility pkg consumed by "
-            "stock-codex-compat-pkg-installer-lifecycle. When set, lifecycle "
-            "validation skips signing and notarization credentials."
+            "stock-codex-compat-pkg-installer-lifecycle and "
+            "stock-codex-compat-pkg-clean-user-canary. When set, validation "
+            "skips signing and notarization credentials."
         ),
     )
     parser.add_argument(
@@ -18624,6 +19505,37 @@ def main() -> int:
                 sign_identity=args.pkg_sign_identity,
                 signing_keychain=args.pkg_sign_keychain,
                 notarytool_profile=args.notarytool_profile,
+                package_path=args.pkg_path,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-clean-user-canary":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-user-canary does not use "
+                "--apple-bundle; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-user-canary cannot allow a "
+                "Codex-fork binary."
+            )
+        if args.pkg_output_path is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-user-canary consumes --pkg-path; "
+                "produce persistent packages with stock-codex-compat-pkg-signed-notarized."
+            )
+        if args.pkg_path is None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-user-canary requires --pkg-path "
+                "from stock-codex-compat-pkg-signed-notarized."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_pkg_clean_user_canary_proof(
+            run_stock_codex_compat_pkg_clean_user_canary_proof(
+                codex_path,
                 package_path=args.pkg_path,
             )
         )
