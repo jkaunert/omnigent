@@ -298,6 +298,160 @@ def test_stock_codex_production_channel_policy_proof_reuses_and_rejects(
     assert proof.host_cache_referenced is False
 
 
+def test_stock_codex_update_acquisition_proof_stages_and_reuses_remote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host_home = tmp_path / "host-home"
+    stock_codex = _write_codex_binary(
+        tmp_path / "bin" / "codex",
+        version="codex-cli 0.142.5",
+    )
+    cask_url = (
+        "https://github.com/openai/codex/releases/download/"
+        "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+    )
+    cask_sha = "a" * 64
+    cask = {
+        "token": "codex",
+        "tap": "homebrew/cask",
+        "homepage": "https://github.com/openai/codex",
+        "url": cask_url,
+        "sha256": cask_sha,
+        "version": "0.143.0",
+        "artifacts": [
+            {"binary": ["codex-aarch64-apple-darwin", {"target": "codex"}]},
+        ],
+    }
+    expected_artifact = {
+        "archiveExecutable": "codex-aarch64-apple-darwin",
+        "archiveFormat": "tar.gz",
+        "sha256": cask_sha,
+        "url": cask_url,
+        "version": "codex-cli 0.143.0",
+        "versionSlug": "0.143.0",
+    }
+    monkeypatch.setenv("HOME", str(host_home))
+    monkeypatch.setattr(_MOD, "_read_homebrew_codex_cask", lambda: cask)
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = False,
+        capture_output: bool = False,
+        text: bool = False,
+        env: dict[str, str] | None = None,
+        cwd: Path | None = None,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text, env, cwd, timeout
+        if len(cmd) >= 2 and cmd[1:] == ["--version"]:
+            version = "codex-cli 0.143.0" if "0.143.0" in cmd[0] else "codex-cli 0.142.5"
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"{version}\n", stderr="")
+        if len(cmd) >= 2 and Path(cmd[1]).name == "provision_stock_codex.py":
+            args = cmd[2:]
+            cache_root = Path(args[args.index("--cache-root") + 1])
+            allow_remote = "--allow-remote-channel-download" in args
+            target_dir = cache_root / "0.143.0"
+            target_path = target_dir / "codex"
+            if not allow_remote and not target_path.exists():
+                return subprocess.CompletedProcess(
+                    cmd,
+                    1,
+                    stdout="",
+                    stderr="error: Remote channel downloads require "
+                    "--allow-remote-channel-download.\n",
+                )
+            mutates = False
+            action = "stage-ready"
+            if allow_remote:
+                _write_codex_binary(target_path, version="codex-cli 0.143.0")
+                mutates = True
+                action = "staged"
+                manifest = {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex",
+                    "sourceKind": "channel",
+                    "version": "codex-cli 0.143.0",
+                    "versionSlug": "0.143.0",
+                    "sha256": _MOD.sha256_file(target_path),
+                    "sourcePath": cask_url,
+                    "sourceRealpath": cask_url,
+                    "channelArtifact": expected_artifact,
+                }
+                (target_dir / "manifest.json").write_text(
+                    json.dumps(manifest) + "\n",
+                    encoding="utf-8",
+                )
+            sha = _MOD.sha256_file(target_path)
+            plan = {
+                "kind": "omnigent-stock-codex-update-plan",
+                "schemaVersion": 1,
+                "action": action,
+                "mutatesFilesystem": mutates,
+                "target": {
+                    "state": "ready",
+                    "payloadDir": str(target_dir),
+                    "codexPath": str(target_path),
+                    "error": None,
+                },
+                "promotion": {
+                    "required": True,
+                    "ready": True,
+                    "env": {_MOD.OMNIGENT_STOCK_CODEX_PATH_ENV: str(target_path)},
+                    "launcherManifest": {
+                        "updateRequired": True,
+                        "ready": True,
+                    },
+                },
+                "rollback": {
+                    "codexPath": str(tmp_path / "current" / "codex"),
+                    "payloadRetention": "versioned-cache-keeps-previous-payload",
+                },
+                "stagedPayload": {
+                    "codexPath": str(target_path),
+                    "payloadDir": str(target_dir),
+                    "manifestPath": str(target_dir / "manifest.json"),
+                    "version": "codex-cli 0.143.0",
+                    "versionSlug": "0.143.0",
+                    "sha256": sha,
+                    "sourcePath": cask_url,
+                    "sourceRealpath": cask_url,
+                    "sourceKind": "channel",
+                    "channelArtifact": expected_artifact,
+                },
+            }
+            current_arg = args[args.index("--current-codex") + 1]
+            plan["rollback"]["codexPath"] = current_arg
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(plan), stderr="")
+        raise AssertionError(f"unexpected subprocess command: {cmd!r}")
+
+    monkeypatch.setattr(_MOD.subprocess, "run", fake_run)
+
+    proof = _MOD.run_stock_codex_update_acquisition_proof(stock_codex)
+
+    assert proof.source_codex_path == stock_codex.resolve()
+    assert proof.source_codex_version == "codex-cli 0.142.5"
+    assert proof.policy_name == "official-openai-github-release"
+    assert proof.cask_version == "0.143.0"
+    assert proof.cask_url == cask_url
+    assert proof.acquisition_action == "staged"
+    assert proof.acquisition_mutates_filesystem is True
+    assert proof.acquisition_promotion_required is True
+    assert proof.acquisition_promotion_ready is True
+    assert proof.acquisition_launcher_update_required is True
+    assert proof.acquired_version == "codex-cli 0.143.0"
+    assert proof.acquired_source_kind == "channel"
+    assert proof.acquired_channel_artifact == expected_artifact
+    assert proof.reuse_action == "stage-ready"
+    assert proof.reuse_mutates_filesystem is False
+    assert proof.reuse_without_remote_download is True
+    assert "allow-remote-channel-download" in proof.blocked_without_remote_error
+    assert proof.blocked_without_remote_cache_mutated is False
+    assert proof.host_cache_root == host_home / ".local" / "omnigent" / "codex-stock"
+    assert proof.host_cache_referenced_by_plans is False
+
+
 def test_stock_codex_compat_proof_installs_plugin_and_bridge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

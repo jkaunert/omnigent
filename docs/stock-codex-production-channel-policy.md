@@ -31,8 +31,11 @@ version and SHA-256 in the installed payload manifest before the payload is used
 The production channel proof exercises the exact pin path. The update doctor
 proof exercises version comparison, dry-run planning, preverified target
 detection, promotion intent, rollback intent, and up-to-date promotion
-suppression. Automatic update scheduling, staged rollout policy, and persistent
-launcher pointer promotion are separate product decisions.
+suppression. The update acquisition proof exercises explicit remote download,
+SHA-256 verification, safe archive extraction, reusable staged payloads, and
+promotion/rollback planning without promoting persistent pointers. Automatic
+update scheduling, staged rollout policy, pre-release channel adoption, and
+persistent launcher pointer promotion are separate product decisions.
 
 ## Rollback
 
@@ -73,3 +76,22 @@ mutation when the selected target is absent, promotion material is withheld
 until `promotion.ready=true`, preverified targets report `stage-ready` with
 launcher promotion and rollback intent, and already-current targets report
 `up-to-date` with promotion suppressed.
+
+Run the update acquisition gate:
+
+```sh
+uvx --from . python scripts/prove_stock_codex_replacement.py \
+  --proof stock-codex-update-acquisition \
+  --codex-path ~/.local/omnigent/codex-stock/0.142.5/codex
+```
+
+The proof is temp-rooted. It reads the official Homebrew cask metadata with
+auto-update disabled, writes an official OpenAI GitHub release channel
+manifest, proves remote acquisition fails closed without
+`--allow-remote-channel-download`, downloads the selected release archive only
+with explicit opt-in, verifies the expected cask SHA-256, extracts the declared
+executable, records channel provenance, proves reuse without another remote
+download, and verifies the acquired payload resolves through
+`OMNIGENT_STOCK_CODEX_PATH`. On 2026-07-07, the official stable cask and GitHub
+latest release both selected `0.142.5`; `0.143.0-alpha.37` existed as a
+pre-release and is not part of this stable production-channel policy.

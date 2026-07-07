@@ -89,6 +89,17 @@ cache mutation when a selected target is absent, withholds promotion material
 until `promotion.ready=true`, reports `stage-ready` with launcher promotion and
 rollback intent for a preverified target, suppresses promotion for `up-to-date`,
 and keeps host cache paths out of emitted update plans.
+The `stock-codex-update-acquisition` proof is now green for stable official
+remote acquisition execution: it reads Homebrew cask metadata with auto-update
+disabled, validates the `official-openai-github-release` policy, proves remote
+download is blocked without `--allow-remote-channel-download`, downloads the
+selected OpenAI GitHub release archive only with explicit opt-in and expected
+SHA-256, extracts the declared executable, records channel provenance, proves
+reuse without another remote-download flag or mutation, and keeps host cache
+paths out of emitted plans. On 2026-07-07, both the official cask and GitHub
+latest stable release selected `0.142.5`; `0.143.0-alpha.37` existed as a
+pre-release and remains outside this stable production-channel policy unless
+we intentionally add a separate alpha/pre-release gate.
 The existing `/opt/homebrew/bin/codex` Omnigent-managed launcher now delegates
 to that `0.142.5` payload while preserving the original Homebrew backup path.
 The `clean-auth-onboarding` proof remains green for the local auth boundary:
@@ -293,11 +304,14 @@ The next gates should split by product mode:
   The update doctor gate is green for fail-closed policy requirement, dry-run
   no-mutation behavior, preverified target detection, launcher promotion intent,
   target-ready promotion material, rollback intent, and up-to-date promotion
-  suppression. Remaining production choices are updater scheduling, persistent
-  launcher pointer promotion, independent archive signature policy, and broader
-  UI/device bridge coverage such as screenshot, snapshot, gesture, or device
-  execution if product scope requires them. Raw unwrapped stock Codex
-  Electron/CLI route parity remains blocked;
+  suppression. The update acquisition gate is green for explicit stable-channel
+  remote download, SHA verification, safe archive extraction, staged-payload
+  reuse, and no-host-cache leakage. Remaining production choices are updater
+  scheduling, persistent launcher pointer promotion, alpha/pre-release channel
+  policy, independent archive signature policy, and broader UI/device bridge
+  coverage such as screenshot, snapshot, gesture, or device execution if product
+  scope requires them. Raw unwrapped stock Codex Electron/CLI route parity
+  remains blocked;
 - decide whether automated browser/device login UX, token freshness validation,
   or cross-machine credential packaging is product scope; or
 - broaden the Apple workflow smoke to release/readiness/review only if product
