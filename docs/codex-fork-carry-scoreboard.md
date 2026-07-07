@@ -273,14 +273,12 @@ The next gates should split by product mode:
   stock `codex exec` never invokes it (`0` relay executor calls) even after
   enabling every generically enableable current feature and prompting an
   explicit `tool_search` fallback;
-- for `stock-codex-compat`, the signed/notarized package gate is implemented
-  and currently blocked only on local Developer ID Installer plus notarytool
-  credentials. This host has a Developer ID Application identity, but that is
-  insufficient for `.pkg` signing; remaining production gates are
-  credential-backed execution of that gate, remote official stock-Codex
-  acquisition/update policy if product scope requires it, broader UI/device
-  bridge coverage such as screenshot, snapshot, gesture, or device execution,
-  and diagnostics. Raw
+- for `stock-codex-compat`, the signed/notarized package gate is green with
+  Developer ID Installer signing, Apple notarization, stapling, stapler
+  validation, and Gatekeeper acceptance. Remaining production gates are remote
+  official stock-Codex acquisition/update policy if product scope requires it,
+  broader UI/device bridge coverage such as screenshot, snapshot, gesture, or
+  device execution, and diagnostics. Raw
   unwrapped stock Codex Electron/CLI route parity remains blocked;
 - for both modes, decide whether the temporary Homebrew/GitHub remote proof
   should become a persistent updater/install command, and what independent
