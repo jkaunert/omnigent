@@ -3649,6 +3649,16 @@ def test_clean_vm_remote_script_requires_marker_and_noninteractive_sudo() -> Non
     script = _MOD._clean_vm_remote_script_text()
 
     assert ".omnigent-stock-codex-compat-clean-user-ok" in script
+    assert 'export PATH="$HOME/.local/bin:$PATH"' in script
+    assert "ditto" in script
+    assert 'ditto "$runtime_root" "$user_runtime_root"' in script
+    assert 'uvx --from "$user_runtime_root" python "$stock_provisioner"' in script
+    assert '--repo-root "$user_runtime_root"' in script
+    assert "sed -E 's/^[^0-9]*([0-9]+(\\.[0-9]+)+" in script
+    assert 'export OMNIGENT_STOCK_CODEX_PATH="$provisioned_codex"' in script
+    assert 'probe_output="$("$selected" --omnigent-stock-codex-compat-launcher-probe)"' in script
+    assert 'fail "launcher probe sentinel missing"' in script
+    assert '| grep -q "OMNIGENT_STOCK_CODEX_COMPAT_LAUNCHER_OK"' not in script
     assert "sudo -n true" in script
     assert "sudo -n installer -pkg" in script
     assert "sudo -n pkgutil --forget" in script

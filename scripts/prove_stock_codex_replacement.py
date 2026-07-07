@@ -12221,6 +12221,7 @@ launcher_path="$HOME/.local/bin/omnigent-stock-codex-compat"
 manifest_path="$HOME/.local/omnigent/launchers/stock-codex-compat.json"
 adapter_root="$HOME/.local/omnigent/stock-codex-compat"
 adapter_package_dir="$adapter_root/adapter-package"
+user_runtime_root="$adapter_root/runtime"
 
 fail() {
   printf 'stock_codex_compat_pkg_clean_vm_error=%s\n' "$*" >&2
@@ -12243,7 +12244,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for tool in shasum spctl pkgutil installer uvx sudo awk sed dirname grep; do
+export PATH="$HOME/.local/bin:$PATH"
+for tool in shasum spctl pkgutil installer uvx sudo awk sed dirname grep ditto; do
   have "$tool"
 done
 sudo -n true >/dev/null 2>&1 || fail "sudo requires interactive authentication"
@@ -12277,13 +12279,20 @@ actual_stock_version="$("$stock_codex_artifact" --version)"
 spctl -a -vv -t install "$pkg_path"
 sudo -n installer -pkg "$pkg_path" -target /
 pkgutil --pkg-info "$pkg_id"
-launcher_installer="$runtime_root/scripts/install_stock_codex_compat_launcher.py"
-stock_provisioner="$runtime_root/scripts/provision_stock_codex.py"
-[ -f "$launcher_installer" ] || fail "installed launcher installer missing"
-[ -f "$stock_provisioner" ] || fail "installed stock Codex provisioner missing"
+installed_launcher_installer="$runtime_root/scripts/install_stock_codex_compat_launcher.py"
+installed_stock_provisioner="$runtime_root/scripts/provision_stock_codex.py"
+[ -f "$installed_launcher_installer" ] || fail "installed launcher installer missing"
+[ -f "$installed_stock_provisioner" ] || fail "installed stock Codex provisioner missing"
 [ -f "$runtime_root/omnigent/stock_codex_compat_wrapper.py" ] || fail "installed wrapper missing"
 
-mkdir -p "$clean_tmp" "$clean_codex_home"
+mkdir -p "$clean_tmp" "$clean_codex_home" "$adapter_root"
+ditto "$runtime_root" "$user_runtime_root"
+launcher_installer="$user_runtime_root/scripts/install_stock_codex_compat_launcher.py"
+stock_provisioner="$user_runtime_root/scripts/provision_stock_codex.py"
+[ -f "$launcher_installer" ] || fail "staged launcher installer missing"
+[ -f "$stock_provisioner" ] || fail "staged stock Codex provisioner missing"
+[ -f "$user_runtime_root/omnigent/stock_codex_compat_wrapper.py" ] || \
+  fail "staged wrapper missing"
 uvx_path="$(command -v uvx)"
 export HOME
 export TMPDIR="$clean_tmp"
@@ -12295,26 +12304,27 @@ export XDG_CACHE_HOME="$proof_root/xdg-cache"
 export XDG_DATA_HOME="$proof_root/xdg-data"
 export PATH="$HOME/.local/bin:$(dirname "$uvx_path"):$PATH"
 
-uvx --from "$runtime_root" python "$stock_provisioner" \
+uvx --from "$user_runtime_root" python "$stock_provisioner" \
   --cache-root "$clean_cache_root" \
   --channel-manifest "$channel_manifest" \
   --expected-sha256 "$expected_stock_sha" \
   --json
 version_slug="$(
   printf '%s\n' "$expected_stock_version" |
-    sed -E 's/.*([0-9]+(\.[0-9]+)+([-._A-Za-z0-9]+)?).*/\1/'
+    sed -E 's/^[^0-9]*([0-9]+(\.[0-9]+)+([-._A-Za-z0-9]+)?).*/\1/'
 )"
 provisioned_codex="$clean_cache_root/$version_slug/codex"
 [ -x "$provisioned_codex" ] || fail "provisioned stock Codex missing: $provisioned_codex"
 [ "$("$provisioned_codex" --version)" = "$expected_stock_version" ] || \
   fail "provisioned stock Codex version mismatch"
+export OMNIGENT_STOCK_CODEX_PATH="$provisioned_codex"
 
-uvx --from "$runtime_root" python "$launcher_installer" \
+uvx --from "$user_runtime_root" python "$launcher_installer" \
   --install-adapter-package --json
-uvx --from "$runtime_root" python "$launcher_installer" \
+uvx --from "$user_runtime_root" python "$launcher_installer" \
   --install \
   --pinned-codex-path "$provisioned_codex" \
-  --repo-root "$runtime_root" \
+  --repo-root "$user_runtime_root" \
   --uvx-path "$uvx_path" \
   --require-path-selected \
   --json
@@ -12322,18 +12332,21 @@ selected="$(command -v omnigent-stock-codex-compat)"
 [ "$selected" = "$launcher_path" ] || fail "selected wrong launcher: $selected"
 [ "$("$selected" --version)" = "$expected_stock_version" ] || \
   fail "launcher version delegation mismatch"
-"$selected" --omnigent-stock-codex-compat-launcher-probe |
-  grep -q "OMNIGENT_STOCK_CODEX_COMPAT_LAUNCHER_OK"
-uvx --from "$runtime_root" python "$launcher_installer" \
+probe_output="$("$selected" --omnigent-stock-codex-compat-launcher-probe)"
+case "$probe_output" in
+  *OMNIGENT_STOCK_CODEX_COMPAT_LAUNCHER_OK*) ;;
+  *) fail "launcher probe sentinel missing" ;;
+esac
+uvx --from "$user_runtime_root" python "$launcher_installer" \
   --doctor \
   --pinned-codex-path "$provisioned_codex" \
-  --repo-root "$runtime_root" \
+  --repo-root "$user_runtime_root" \
   --uvx-path "$uvx_path" \
   --require-path-selected \
   --force \
   --json
 
-uvx --from "$runtime_root" python - <<'PY'
+uvx --from "$user_runtime_root" python - <<'PY'
 import json
 from omnigent import codex_native
 source = codex_native._resolve_codex_auth_source()
@@ -12343,7 +12356,7 @@ if reason != "needs-auth":
     raise SystemExit(f"expected needs-auth for clean VM CODEX_HOME, got {reason!r}")
 PY
 
-uvx --from "$runtime_root" python "$launcher_installer" \
+uvx --from "$user_runtime_root" python "$launcher_installer" \
   --uninstall \
   --launcher-path "$launcher_path" \
   --manifest-path "$manifest_path" \
@@ -12360,6 +12373,7 @@ fi
 printf 'stock_codex_compat_pkg_clean_vm_status=replacement-ready\n'
 printf 'stock_codex_compat_pkg_clean_vm_home=%s\n' "$HOME"
 printf 'stock_codex_compat_pkg_clean_vm_runtime_root=%s\n' "$runtime_root"
+printf 'stock_codex_compat_pkg_clean_vm_user_runtime_root=%s\n' "$user_runtime_root"
 printf 'stock_codex_compat_pkg_clean_vm_provisioned_codex=%s\n' "$provisioned_codex"
 '''
 
@@ -12649,7 +12663,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                         tart_ip=tart_ip,
                         remote_work_dir=remote_work_dir,
                         remote_status=f"exit-{remote.returncode}",
-                        remote_output_preview=_preview_text(remote_output, limit=4000),
+                        remote_output_preview=_preview_text(remote_output, limit=12000),
                         tart_started=tart_started,
                     )
                 )
