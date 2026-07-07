@@ -1098,6 +1098,7 @@ class StockCodexCompatPkgSigningPrerequisites:
     sign_identity_source: str
     signing_keychain: Path | None
     developer_id_installer_identities: tuple[str, ...]
+    developer_id_application_identities: tuple[str, ...]
     notarytool_profile: str | None
 
 
@@ -1112,6 +1113,7 @@ class StockCodexCompatPkgSignedNotarizedProof:
     sign_identity_source: str
     signing_keychain: Path | None
     developer_id_installer_identities: tuple[str, ...]
+    developer_id_application_identities: tuple[str, ...]
     notarytool_profile: str | None
     package_path: Path | None
     package_sha256: str | None
@@ -6727,9 +6729,10 @@ def _xcrun_find_tool(xcrun_path: str, tool_name: str) -> str | None:
     return path or None
 
 
-def _developer_id_installer_identities(
+def _developer_id_identities(
     *,
     signing_keychain: Path | None,
+    identity_family: str,
 ) -> tuple[str, ...]:
     security = shutil.which("security")
     if not security:
@@ -6747,13 +6750,37 @@ def _developer_id_installer_identities(
     if completed.returncode != 0:
         return ()
     identities: list[str] = []
+    marker = f"Developer ID {identity_family}:"
     for line in completed.stdout.splitlines():
-        if "Developer ID Installer:" not in line:
+        if marker not in line:
             continue
-        match = re.search(r'"(?P<identity>[^"]*Developer ID Installer:[^"]*)"', line)
+        match = re.search(
+            rf'"(?P<identity>[^"]*{re.escape(marker)}[^"]*)"',
+            line,
+        )
         if match:
             identities.append(match.group("identity"))
     return tuple(sorted(set(identities)))
+
+
+def _developer_id_installer_identities(
+    *,
+    signing_keychain: Path | None,
+) -> tuple[str, ...]:
+    return _developer_id_identities(
+        signing_keychain=signing_keychain,
+        identity_family="Installer",
+    )
+
+
+def _developer_id_application_identities(
+    *,
+    signing_keychain: Path | None,
+) -> tuple[str, ...]:
+    return _developer_id_identities(
+        signing_keychain=signing_keychain,
+        identity_family="Application",
+    )
 
 
 def _stock_codex_compat_pkg_signing_prerequisites(
@@ -6788,8 +6815,16 @@ def _stock_codex_compat_pkg_signing_prerequisites(
         missing.append(f"missing signing keychain: {signing_keychain}")
 
     identities = _developer_id_installer_identities(signing_keychain=signing_keychain)
+    application_identities = _developer_id_application_identities(
+        signing_keychain=signing_keychain,
+    )
     identity_source = "explicit" if sign_identity else "missing"
     resolved_identity = sign_identity.strip() if sign_identity else None
+    if resolved_identity and "Developer ID Application:" in resolved_identity:
+        missing.append(
+            "Developer ID Application identities cannot sign installer packages; "
+            "use a Developer ID Installer identity"
+        )
     if not resolved_identity:
         if len(identities) == 1:
             resolved_identity = identities[0]
@@ -6802,6 +6837,11 @@ def _stock_codex_compat_pkg_signing_prerequisites(
             )
         else:
             missing.append(f"set {PKG_SIGN_IDENTITY_ENV} or --pkg-sign-identity")
+            if application_identities:
+                missing.append(
+                    "Developer ID Application identity is present, but a "
+                    "Developer ID Installer identity is required for .pkg signing"
+                )
     if not notarytool_profile:
         missing.append(f"set {NOTARYTOOL_PROFILE_ENV} or --notarytool-profile")
 
@@ -6813,6 +6853,7 @@ def _stock_codex_compat_pkg_signing_prerequisites(
         sign_identity_source=identity_source,
         signing_keychain=signing_keychain,
         developer_id_installer_identities=identities,
+        developer_id_application_identities=application_identities,
         notarytool_profile=notarytool_profile,
     )
 
@@ -6883,6 +6924,9 @@ def run_stock_codex_compat_pkg_signed_notarized_proof(
             signing_keychain=prerequisites.signing_keychain,
             developer_id_installer_identities=(
                 prerequisites.developer_id_installer_identities
+            ),
+            developer_id_application_identities=(
+                prerequisites.developer_id_application_identities
             ),
             notarytool_profile=prerequisites.notarytool_profile,
             package_path=None,
@@ -6991,6 +7035,9 @@ def run_stock_codex_compat_pkg_signed_notarized_proof(
             signing_keychain=prerequisites.signing_keychain,
             developer_id_installer_identities=(
                 prerequisites.developer_id_installer_identities
+            ),
+            developer_id_application_identities=(
+                prerequisites.developer_id_application_identities
             ),
             notarytool_profile=prerequisites.notarytool_profile,
             package_path=structure.package_path,
@@ -8601,6 +8648,10 @@ def print_stock_codex_compat_pkg_signed_notarized_proof(
     print(
         "stock_codex_compat_pkg_signed_notarized_developer_id_installer_count="
         f"{len(proof.developer_id_installer_identities)}"
+    )
+    print(
+        "stock_codex_compat_pkg_signed_notarized_developer_id_application_count="
+        f"{len(proof.developer_id_application_identities)}"
     )
     print(f"stock_codex_compat_pkg_signed_notarized_package_path={proof.package_path}")
     print(f"stock_codex_compat_pkg_signed_notarized_package_sha256={proof.package_sha256}")

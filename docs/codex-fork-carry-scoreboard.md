@@ -275,11 +275,12 @@ The next gates should split by product mode:
   explicit `tool_search` fallback;
 - for `stock-codex-compat`, the signed/notarized package gate is implemented
   and currently blocked only on local Developer ID Installer plus notarytool
-  credentials; remaining production gates are credential-backed execution of
-  that gate, remote official stock-Codex acquisition/update policy if product
-  scope requires it, broader bridge coverage such as XcodeBuildMCP tests or UI
-  automation, and diagnostics. Raw unwrapped stock Codex Electron/CLI route
-  parity remains blocked;
+  credentials. This host has a Developer ID Application identity, but that is
+  insufficient for `.pkg` signing; remaining production gates are
+  credential-backed execution of that gate, remote official stock-Codex
+  acquisition/update policy if product scope requires it, broader bridge
+  coverage such as XcodeBuildMCP tests or UI automation, and diagnostics. Raw
+  unwrapped stock Codex Electron/CLI route parity remains blocked;
 - for both modes, decide whether the temporary Homebrew/GitHub remote proof
   should become a persistent updater/install command, and what independent
   signature or notarization policy is required;

@@ -1580,6 +1580,9 @@ def test_stock_codex_compat_pkg_signed_notarized_blocks_when_prereqs_missing(
             sign_identity_source="missing",
             signing_keychain=None,
             developer_id_installer_identities=(),
+            developer_id_application_identities=(
+                "Developer ID Application: Example (ABCDE12345)",
+            ),
             notarytool_profile=None,
         )
 
@@ -1597,8 +1600,56 @@ def test_stock_codex_compat_pkg_signed_notarized_blocks_when_prereqs_missing(
 
     assert proof.status == "blocked"
     assert proof.missing_prerequisites == ("set OMNIGENT_PKG_SIGN_IDENTITY",)
+    assert proof.developer_id_application_identities == (
+        "Developer ID Application: Example (ABCDE12345)",
+    )
     assert proof.package_path is None
     assert proof.signed is None
+
+
+def test_stock_codex_compat_pkg_signing_prereqs_explain_application_identity_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool_paths = {
+        "pkgbuild": "/usr/bin/pkgbuild",
+        "pkgutil": "/usr/sbin/pkgutil",
+        "xcrun": "/usr/bin/xcrun",
+        "spctl": "/usr/sbin/spctl",
+    }
+    monkeypatch.setattr(_MOD.shutil, "which", lambda name: tool_paths.get(name))
+    monkeypatch.setattr(
+        _MOD,
+        "_xcrun_find_tool",
+        lambda _xcrun_path, tool_name: f"/usr/bin/{tool_name}",
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_developer_id_installer_identities",
+        lambda *, signing_keychain: (),
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_developer_id_application_identities",
+        lambda *, signing_keychain: (
+            "Developer ID Application: Example (ABCDE12345)",
+        ),
+    )
+
+    prerequisites = _MOD._stock_codex_compat_pkg_signing_prerequisites(
+        sign_identity=None,
+        signing_keychain=None,
+        notarytool_profile=None,
+    )
+
+    assert prerequisites.status == "blocked"
+    assert prerequisites.developer_id_installer_identities == ()
+    assert prerequisites.developer_id_application_identities == (
+        "Developer ID Application: Example (ABCDE12345)",
+    )
+    assert (
+        "Developer ID Application identity is present, but a Developer ID "
+        "Installer identity is required for .pkg signing"
+    ) in prerequisites.missing_prerequisites
 
 
 def test_stock_codex_compat_pkg_signed_notarized_runs_distribution_checks(
@@ -1627,6 +1678,7 @@ def test_stock_codex_compat_pkg_signed_notarized_runs_distribution_checks(
             developer_id_installer_identities=(
                 "Developer ID Installer: Example (ABCDE12345)",
             ),
+            developer_id_application_identities=(),
             notarytool_profile="omnigent-notary",
         )
 
