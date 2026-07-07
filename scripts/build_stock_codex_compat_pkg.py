@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an unsigned macOS pkg for the stock-Codex compatibility runtime."""
+"""Build a macOS pkg for the stock-Codex compatibility runtime."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def required_payload_files_for(install_prefix: Path) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class StockCodexCompatPkgInspection:
-    """Inspection result for an unsigned stock-Codex compatibility pkg."""
+    """Inspection result for a stock-Codex compatibility pkg."""
 
     package_identifier: str
     package_version: str
@@ -110,6 +110,8 @@ class StockCodexCompatPkgBuildResult:
     package_version: str
     install_location: str
     install_prefix: Path
+    signing_identity: str | None
+    signing_keychain: Path | None
     runtime_root: Path
     included_payload_file_count: int
     created_at: str
@@ -128,6 +130,8 @@ class StockCodexCompatPkgBuildResult:
             "packageVersion": self.package_version,
             "installLocation": self.install_location,
             "installPrefix": str(self.install_prefix),
+            "signingIdentity": self.signing_identity,
+            "signingKeychain": str(self.signing_keychain) if self.signing_keychain else None,
             "runtimeRoot": str(self.runtime_root),
             "includedPayloadFileCount": self.included_payload_file_count,
             "createdAt": self.created_at,
@@ -391,6 +395,7 @@ def _copy_runtime_payload(
     package_version: str,
     install_prefix: Path,
     created_at: str,
+    signed_package: bool = False,
 ) -> None:
     runtime_source = extracted_bundle_root / RUNTIME_ROOT_NAME
     bundle_manifest_source = extracted_bundle_root / BUNDLE_MANIFEST_NAME
@@ -410,6 +415,19 @@ def _copy_runtime_payload(
         encoding="utf-8",
     )
 
+    contract = {
+        "package": "signed-flat-pkg-structure"
+        if signed_package
+        else "unsigned-flat-pkg-structure",
+        "runtime": "machine-level-runtime-only",
+        "userBootstrap": "deferred-to-installed-runtime-command",
+        "stockCodexProvisioning": "deferred-to-installed-runtime-command",
+        "stockCodex": "external-pinned-payload",
+        "auth": "not-packaged",
+    }
+    if signed_package:
+        contract["signature"] = "developer-id-installer"
+
     pkg_manifest = {
         "kind": PKG_KIND,
         "schemaVersion": PKG_SCHEMA_VERSION,
@@ -426,19 +444,48 @@ def _copy_runtime_payload(
         "wrapperEntrypoint": "omnigent-stock-codex-wrapper",
         "defaultLauncherCommand": "omnigent-stock-codex-compat",
         "sourceBundleSha256": source_bundle_sha256,
-        "contract": {
-            "package": "unsigned-flat-pkg-structure",
-            "runtime": "machine-level-runtime-only",
-            "userBootstrap": "deferred-to-installed-runtime-command",
-            "stockCodexProvisioning": "deferred-to-installed-runtime-command",
-            "stockCodex": "external-pinned-payload",
-            "auth": "not-packaged",
-        },
+        "contract": contract,
     }
     (install_prefix_root / PKG_MANIFEST_NAME).write_text(
         json.dumps(pkg_manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _pkgbuild_command(
+    *,
+    pkgbuild: str,
+    payload_root: Path,
+    scripts_root: Path,
+    package_identifier: str,
+    package_version: str,
+    output_path: Path,
+    sign_identity: str | None = None,
+    signing_keychain: Path | None = None,
+) -> list[str]:
+    """Build the pkgbuild command, including optional Developer ID signing."""
+    command = [
+        pkgbuild,
+        "--root",
+        str(payload_root),
+        "--scripts",
+        str(scripts_root),
+        "--identifier",
+        package_identifier,
+        "--version",
+        package_version,
+        "--install-location",
+        "/",
+        "--ownership",
+        "recommended",
+    ]
+    if sign_identity:
+        command.extend(["--sign", sign_identity])
+        if signing_keychain is not None:
+            command.extend(["--keychain", str(signing_keychain)])
+        command.append("--timestamp")
+    command.append(str(output_path))
+    return command
 
 
 def build_stock_codex_compat_pkg(
@@ -449,10 +496,15 @@ def build_stock_codex_compat_pkg(
     package_identifier: str = DEFAULT_PACKAGE_IDENTIFIER,
     package_version: str | None = None,
     install_prefix: Path = DEFAULT_INSTALL_PREFIX,
+    sign_identity: str | None = None,
+    signing_keychain: Path | None = None,
 ) -> StockCodexCompatPkgBuildResult:
-    """Build and inspect an unsigned flat pkg from the portable runtime bundle."""
+    """Build and inspect a flat pkg from the portable runtime bundle."""
     repo_root = repo_root.expanduser().resolve()
     output_path = output_path.expanduser()
+    signing_keychain = (
+        signing_keychain.expanduser().resolve() if signing_keychain is not None else None
+    )
     if output_path.exists() and not force:
         raise PkgBuildError(f"Package already exists; rerun with --force: {output_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -485,6 +537,7 @@ def build_stock_codex_compat_pkg(
             package_version=package_version,
             install_prefix=install_prefix,
             created_at=created_at,
+            signed_package=bool(sign_identity),
         )
         scripts_root = root / "scripts"
         scripts_root.mkdir()
@@ -495,22 +548,16 @@ def build_stock_codex_compat_pkg(
         env = os.environ.copy()
         env["COPYFILE_DISABLE"] = "1"
         _run_checked(
-            [
-                pkgbuild,
-                "--root",
-                str(payload_root),
-                "--scripts",
-                str(scripts_root),
-                "--identifier",
-                package_identifier,
-                "--version",
-                package_version,
-                "--install-location",
-                "/",
-                "--ownership",
-                "recommended",
-                str(output_path),
-            ],
+            _pkgbuild_command(
+                pkgbuild=pkgbuild,
+                payload_root=payload_root,
+                scripts_root=scripts_root,
+                package_identifier=package_identifier,
+                package_version=package_version,
+                output_path=output_path,
+                sign_identity=sign_identity,
+                signing_keychain=signing_keychain,
+            ),
             cwd=repo_root,
             env=env,
             timeout=180,
@@ -530,6 +577,8 @@ def build_stock_codex_compat_pkg(
         package_version=package_version,
         install_location="/",
         install_prefix=install_prefix,
+        signing_identity=sign_identity,
+        signing_keychain=signing_keychain,
         runtime_root=install_prefix / RUNTIME_ROOT_NAME,
         included_payload_file_count=len(inspection.payload_files),
         created_at=created_at,
@@ -539,7 +588,7 @@ def build_stock_codex_compat_pkg(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build the unsigned stock-Codex compatibility macOS pkg."
+        description="Build the stock-Codex compatibility macOS pkg."
     )
     parser.add_argument(
         "--repo-root",
@@ -555,6 +604,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--identifier", default=DEFAULT_PACKAGE_IDENTIFIER)
     parser.add_argument("--version", default=None)
     parser.add_argument("--install-prefix", type=Path, default=DEFAULT_INSTALL_PREFIX)
+    parser.add_argument(
+        "--sign-identity",
+        default=None,
+        help="Optional Developer ID Installer identity to sign the pkg.",
+    )
+    parser.add_argument(
+        "--signing-keychain",
+        type=Path,
+        default=None,
+        help="Optional keychain path containing the signing identity.",
+    )
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser.parse_args(argv)
@@ -570,6 +630,8 @@ def print_result(result: StockCodexCompatPkgBuildResult, *, as_json: bool) -> No
     print(f"stock_codex_compat_pkg_version={result.package_version}")
     print(f"stock_codex_compat_pkg_install_location={result.install_location}")
     print(f"stock_codex_compat_pkg_install_prefix={result.install_prefix}")
+    print(f"stock_codex_compat_pkg_signing_identity={result.signing_identity}")
+    print(f"stock_codex_compat_pkg_signing_keychain={result.signing_keychain}")
     print(f"stock_codex_compat_pkg_runtime_root={result.runtime_root}")
     print(f"stock_codex_compat_pkg_signature_status={result.inspection.signature_status}")
     print(f"stock_codex_compat_pkg_signed={result.inspection.signed}")
@@ -589,6 +651,8 @@ def main(argv: list[str] | None = None) -> int:
             package_identifier=args.identifier,
             package_version=args.version,
             install_prefix=args.install_prefix,
+            sign_identity=args.sign_identity,
+            signing_keychain=args.signing_keychain,
         )
     except PkgBuildError as exc:
         print(f"error: {exc}", file=sys.stderr)

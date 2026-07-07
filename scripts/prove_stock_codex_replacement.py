@@ -252,6 +252,9 @@ DEFAULT_PATH_CUTOVER_FALLBACK_STEPS = (
     "If temporary cleanup is interrupted, remove only omnigent-stock-codex-proof-* temp trees "
     "after preserving any needed logs.",
 )
+PKG_SIGN_IDENTITY_ENV = "OMNIGENT_PKG_SIGN_IDENTITY"
+PKG_SIGN_KEYCHAIN_ENV = "OMNIGENT_PKG_SIGN_KEYCHAIN"
+NOTARYTOOL_PROFILE_ENV = "OMNIGENT_NOTARYTOOL_PROFILE"
 LAUNCHER_ACTIVATION_SENTINEL = "OMNIGENT_CODEX_LAUNCHER_ACTIVATION_OK"
 LAUNCHER_ACTIVATION_PROBE_ARG = "--omnigent-launcher-probe"
 APP_BUNDLE_ENTRYPOINT_NAME = "Omnigent Codex"
@@ -1082,6 +1085,47 @@ class StockCodexCompatPkgCleanAuthProof:
     synthetic_available_reason: str | None
     onboarding_command: str
     credential_material_leaked: bool
+
+
+@dataclass(frozen=True)
+class StockCodexCompatPkgSigningPrerequisites:
+    """Prerequisite classification for signed/notarized pkg validation."""
+
+    status: str
+    missing_prerequisites: tuple[str, ...]
+    tool_paths: dict[str, str | None]
+    sign_identity: str | None
+    sign_identity_source: str
+    signing_keychain: Path | None
+    developer_id_installer_identities: tuple[str, ...]
+    notarytool_profile: str | None
+
+
+@dataclass(frozen=True)
+class StockCodexCompatPkgSignedNotarizedProof:
+    """Proof result for signed, notarized, stapled pkg validation."""
+
+    status: str
+    missing_prerequisites: tuple[str, ...]
+    tool_paths: dict[str, str | None]
+    sign_identity: str | None
+    sign_identity_source: str
+    signing_keychain: Path | None
+    developer_id_installer_identities: tuple[str, ...]
+    notarytool_profile: str | None
+    package_path: Path | None
+    package_sha256: str | None
+    source_bundle_sha256: str | None
+    package_identifier: str | None
+    package_version: str | None
+    signature_status: str | None
+    signed: bool | None
+    notary_submission_id: str | None
+    notary_status: str | None
+    notary_output_preview: str | None
+    staple_output_preview: str | None
+    stapler_validate_output_preview: str | None
+    gatekeeper_output_preview: str | None
 
 
 class LiveProofTimeoutError(Exception):
@@ -6520,6 +6564,7 @@ def _validate_stock_codex_compat_pkg_builder_payload(
     payload: dict[str, Any],
     *,
     source_repo_root: Path,
+    expect_signed: bool = False,
 ) -> StockCodexCompatPkgStructureProof:
     """Validate compatibility pkg builder JSON and return common proof evidence."""
     if payload.get("kind") != "omnigent-stock-codex-compat-pkg":
@@ -6553,10 +6598,17 @@ def _validate_stock_codex_compat_pkg_builder_payload(
         raise SystemExit(f"Compatibility pkg install prefix mismatch: {install_prefix}")
     if str(runtime_root) != f"{install_prefix}/runtime":
         raise SystemExit(f"Compatibility pkg runtime root mismatch: {runtime_root}")
-    if inspection.get("signed") is not False:
-        raise SystemExit(f"Compatibility pkg was expected to be unsigned: {inspection!r}")
-    if inspection.get("signatureStatus") != "no signature":
-        raise SystemExit(f"Compatibility pkg signature status mismatch: {inspection!r}")
+    signature_status = str(inspection.get("signatureStatus"))
+    if expect_signed:
+        if inspection.get("signed") is not True:
+            raise SystemExit(f"Compatibility pkg was expected to be signed: {inspection!r}")
+        if signature_status.lower() == "no signature":
+            raise SystemExit(f"Compatibility pkg signature status mismatch: {inspection!r}")
+    else:
+        if inspection.get("signed") is not False:
+            raise SystemExit(f"Compatibility pkg was expected to be unsigned: {inspection!r}")
+        if signature_status != "no signature":
+            raise SystemExit(f"Compatibility pkg signature status mismatch: {inspection!r}")
     if inspection.get("allRequiredPayloadFilesPresent") is not True:
         raise SystemExit(
             "Compatibility pkg missed required payload files.\n"
@@ -6626,7 +6678,7 @@ def _validate_stock_codex_compat_pkg_builder_payload(
         required_payload_files=required_payload,
         script_names=tuple(str(name) for name in script_names_raw),
         archive_entries=tuple(str(entry) for entry in archive_entries_raw),
-        signature_status=str(inspection.get("signatureStatus")),
+        signature_status=signature_status,
         signed=bool(inspection.get("signed")),
         pkg_manifest_path=Path(_json_string(inspection, "pkgManifestPath")),
         bundle_manifest_path=Path(_json_string(inspection, "bundleManifestPath")),
@@ -6658,6 +6710,315 @@ def run_stock_codex_compat_pkg_structure_proof() -> StockCodexCompatPkgStructure
         return _validate_stock_codex_compat_pkg_builder_payload(
             payload,
             source_repo_root=source_repo_root,
+        )
+
+
+def _xcrun_find_tool(xcrun_path: str, tool_name: str) -> str | None:
+    completed = subprocess.run(
+        [xcrun_path, "--find", tool_name],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        return None
+    path = completed.stdout.strip()
+    return path or None
+
+
+def _developer_id_installer_identities(
+    *,
+    signing_keychain: Path | None,
+) -> tuple[str, ...]:
+    security = shutil.which("security")
+    if not security:
+        return ()
+    command = [security, "find-identity", "-v", "-p", "basic"]
+    if signing_keychain is not None:
+        command.append(str(signing_keychain))
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        return ()
+    identities: list[str] = []
+    for line in completed.stdout.splitlines():
+        if "Developer ID Installer:" not in line:
+            continue
+        match = re.search(r'"(?P<identity>[^"]*Developer ID Installer:[^"]*)"', line)
+        if match:
+            identities.append(match.group("identity"))
+    return tuple(sorted(set(identities)))
+
+
+def _stock_codex_compat_pkg_signing_prerequisites(
+    *,
+    sign_identity: str | None,
+    signing_keychain: Path | None,
+    notarytool_profile: str | None,
+) -> StockCodexCompatPkgSigningPrerequisites:
+    signing_keychain = (
+        signing_keychain.expanduser().resolve() if signing_keychain is not None else None
+    )
+    tool_paths: dict[str, str | None] = {
+        "pkgbuild": shutil.which("pkgbuild"),
+        "pkgutil": shutil.which("pkgutil"),
+        "xcrun": shutil.which("xcrun"),
+        "spctl": shutil.which("spctl"),
+        "notarytool": None,
+        "stapler": None,
+    }
+    missing: list[str] = []
+    for tool_name in ("pkgbuild", "pkgutil", "xcrun", "spctl"):
+        if not tool_paths[tool_name]:
+            missing.append(f"missing tool: {tool_name}")
+    if tool_paths["xcrun"]:
+        tool_paths["notarytool"] = _xcrun_find_tool(str(tool_paths["xcrun"]), "notarytool")
+        tool_paths["stapler"] = _xcrun_find_tool(str(tool_paths["xcrun"]), "stapler")
+    if not tool_paths["notarytool"]:
+        missing.append("missing xcrun notarytool")
+    if not tool_paths["stapler"]:
+        missing.append("missing xcrun stapler")
+    if signing_keychain is not None and not signing_keychain.exists():
+        missing.append(f"missing signing keychain: {signing_keychain}")
+
+    identities = _developer_id_installer_identities(signing_keychain=signing_keychain)
+    identity_source = "explicit" if sign_identity else "missing"
+    resolved_identity = sign_identity.strip() if sign_identity else None
+    if not resolved_identity:
+        if len(identities) == 1:
+            resolved_identity = identities[0]
+            identity_source = "autodiscovered-developer-id-installer"
+        elif len(identities) > 1:
+            identity_source = "ambiguous"
+            missing.append(
+                f"set {PKG_SIGN_IDENTITY_ENV} or --pkg-sign-identity; "
+                "multiple Developer ID Installer identities are installed"
+            )
+        else:
+            missing.append(f"set {PKG_SIGN_IDENTITY_ENV} or --pkg-sign-identity")
+    if not notarytool_profile:
+        missing.append(f"set {NOTARYTOOL_PROFILE_ENV} or --notarytool-profile")
+
+    return StockCodexCompatPkgSigningPrerequisites(
+        status="ready" if not missing else "blocked",
+        missing_prerequisites=tuple(missing),
+        tool_paths=tool_paths,
+        sign_identity=resolved_identity,
+        sign_identity_source=identity_source,
+        signing_keychain=signing_keychain,
+        developer_id_installer_identities=identities,
+        notarytool_profile=notarytool_profile,
+    )
+
+
+def _run_pkg_distribution_command(
+    command: list[str],
+    *,
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if completed.returncode != 0:
+        raise SystemExit(
+            "Signed/notarized pkg validation command failed.\n"
+            f"command={command!r}\n"
+            f"exit={completed.returncode}\n"
+            f"stdout={completed.stdout}\n"
+            f"stderr={completed.stderr}"
+        )
+    return completed
+
+
+def _notary_submit_result(completed: subprocess.CompletedProcess[str]) -> tuple[str, str]:
+    combined_output = ((completed.stdout or "") + "\n" + (completed.stderr or "")).strip()
+    submission_id = ""
+    status = ""
+    if completed.stdout.strip():
+        with contextlib.suppress(json.JSONDecodeError):
+            payload = json.loads(completed.stdout)
+            if isinstance(payload, dict):
+                submission_id = str(payload.get("id") or "")
+                status = str(payload.get("status") or "")
+    if not status:
+        for line in combined_output.splitlines():
+            stripped = line.strip()
+            if stripped.lower().startswith("id:"):
+                submission_id = stripped.split(":", 1)[1].strip()
+            if stripped.lower().startswith("status:"):
+                status = stripped.split(":", 1)[1].strip()
+    return submission_id, status
+
+
+def run_stock_codex_compat_pkg_signed_notarized_proof(
+    *,
+    sign_identity: str | None,
+    signing_keychain: Path | None,
+    notarytool_profile: str | None,
+) -> StockCodexCompatPkgSignedNotarizedProof:
+    """Build, sign, notarize, staple, and Gatekeeper-check the compatibility pkg."""
+    source_repo_root = Path(__file__).resolve().parents[1]
+    prerequisites = _stock_codex_compat_pkg_signing_prerequisites(
+        sign_identity=sign_identity,
+        signing_keychain=signing_keychain,
+        notarytool_profile=notarytool_profile,
+    )
+    if prerequisites.status != "ready":
+        return StockCodexCompatPkgSignedNotarizedProof(
+            status="blocked",
+            missing_prerequisites=prerequisites.missing_prerequisites,
+            tool_paths=prerequisites.tool_paths,
+            sign_identity=prerequisites.sign_identity,
+            sign_identity_source=prerequisites.sign_identity_source,
+            signing_keychain=prerequisites.signing_keychain,
+            developer_id_installer_identities=(
+                prerequisites.developer_id_installer_identities
+            ),
+            notarytool_profile=prerequisites.notarytool_profile,
+            package_path=None,
+            package_sha256=None,
+            source_bundle_sha256=None,
+            package_identifier=None,
+            package_version=None,
+            signature_status=None,
+            signed=None,
+            notary_submission_id=None,
+            notary_status=None,
+            notary_output_preview=None,
+            staple_output_preview=None,
+            stapler_validate_output_preview=None,
+            gatekeeper_output_preview=None,
+        )
+
+    assert prerequisites.sign_identity is not None
+    assert prerequisites.notarytool_profile is not None
+    assert prerequisites.tool_paths["xcrun"] is not None
+    assert prerequisites.tool_paths["spctl"] is not None
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-pkg-signed-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        artifact_dir = root / "artifacts"
+        artifact_dir.mkdir()
+        package_path = artifact_dir / "omnigent-stock-codex-compat.pkg"
+        build_args = [
+            "--repo-root",
+            str(source_repo_root),
+            "--output",
+            str(package_path),
+            "--force",
+            "--sign-identity",
+            prerequisites.sign_identity,
+        ]
+        if prerequisites.signing_keychain is not None:
+            build_args.extend(["--signing-keychain", str(prerequisites.signing_keychain)])
+        payload = _run_stock_codex_compat_pkg_builder_cli_json(
+            build_args,
+            repo_root=source_repo_root,
+        )
+        structure = _validate_stock_codex_compat_pkg_builder_payload(
+            payload,
+            source_repo_root=source_repo_root,
+            expect_signed=True,
+        )
+        notary_completed = _run_pkg_distribution_command(
+            [
+                str(prerequisites.tool_paths["xcrun"]),
+                "notarytool",
+                "submit",
+                str(structure.package_path),
+                "--keychain-profile",
+                prerequisites.notarytool_profile,
+                "--wait",
+                "--output-format",
+                "json",
+            ],
+            timeout=1800,
+        )
+        notary_submission_id, notary_status = _notary_submit_result(notary_completed)
+        if notary_status.lower() != "accepted":
+            raise SystemExit(
+                "Compatibility pkg notarization was not accepted.\n"
+                f"status={notary_status!r}\n"
+                f"stdout={notary_completed.stdout}\n"
+                f"stderr={notary_completed.stderr}"
+            )
+        staple_completed = _run_pkg_distribution_command(
+            [
+                str(prerequisites.tool_paths["xcrun"]),
+                "stapler",
+                "staple",
+                str(structure.package_path),
+            ],
+            timeout=300,
+        )
+        stapler_validate_completed = _run_pkg_distribution_command(
+            [
+                str(prerequisites.tool_paths["xcrun"]),
+                "stapler",
+                "validate",
+                str(structure.package_path),
+            ],
+            timeout=300,
+        )
+        gatekeeper_completed = _run_pkg_distribution_command(
+            [
+                str(prerequisites.tool_paths["spctl"]),
+                "-a",
+                "-vv",
+                "-t",
+                "install",
+                str(structure.package_path),
+            ],
+            timeout=120,
+        )
+        return StockCodexCompatPkgSignedNotarizedProof(
+            status="replacement-ready",
+            missing_prerequisites=(),
+            tool_paths=prerequisites.tool_paths,
+            sign_identity=prerequisites.sign_identity,
+            sign_identity_source=prerequisites.sign_identity_source,
+            signing_keychain=prerequisites.signing_keychain,
+            developer_id_installer_identities=(
+                prerequisites.developer_id_installer_identities
+            ),
+            notarytool_profile=prerequisites.notarytool_profile,
+            package_path=structure.package_path,
+            package_sha256=structure.package_sha256,
+            source_bundle_sha256=structure.source_bundle_sha256,
+            package_identifier=structure.package_identifier,
+            package_version=structure.package_version,
+            signature_status=structure.signature_status,
+            signed=structure.signed,
+            notary_submission_id=notary_submission_id,
+            notary_status=notary_status,
+            notary_output_preview=_preview_text(
+                (notary_completed.stdout or "") + (notary_completed.stderr or ""),
+                limit=1000,
+            ),
+            staple_output_preview=_preview_text(
+                (staple_completed.stdout or "") + (staple_completed.stderr or ""),
+                limit=1000,
+            ),
+            stapler_validate_output_preview=_preview_text(
+                (stapler_validate_completed.stdout or "")
+                + (stapler_validate_completed.stderr or ""),
+                limit=1000,
+            ),
+            gatekeeper_output_preview=_preview_text(
+                (gatekeeper_completed.stdout or "") + (gatekeeper_completed.stderr or ""),
+                limit=1000,
+            ),
         )
 
 
@@ -8203,6 +8564,92 @@ def print_stock_codex_compat_pkg_structure_proof(
         "ASSERTION: the pkg installs only the machine-level runtime payload; "
         "user bootstrap, stock-Codex provisioning, auth, signing, and "
         "notarization remain separate gates"
+    )
+
+
+def print_stock_codex_compat_pkg_signed_notarized_proof(
+    proof: StockCodexCompatPkgSignedNotarizedProof,
+) -> None:
+    """Emit operator evidence for the signed/notarized pkg proof."""
+    print("stock_codex_compat_pkg_signed_notarized_rehearsal=selected")
+    print("stock_codex_compat_pkg_signed_notarized_surface=signed-notarized-pkg")
+    print(f"stock_codex_compat_pkg_signed_notarized_status={proof.status}")
+    print(
+        "stock_codex_compat_pkg_signed_notarized_missing_prerequisites="
+        f"{json.dumps(list(proof.missing_prerequisites), sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_signed_notarized_tool_paths="
+        f"{json.dumps(proof.tool_paths, sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_signed_notarized_sign_identity="
+        f"{proof.sign_identity}"
+    )
+    print(
+        "stock_codex_compat_pkg_signed_notarized_sign_identity_source="
+        f"{proof.sign_identity_source}"
+    )
+    print(
+        "stock_codex_compat_pkg_signed_notarized_signing_keychain="
+        f"{proof.signing_keychain}"
+    )
+    print(
+        "stock_codex_compat_pkg_signed_notarized_notarytool_profile="
+        f"{proof.notarytool_profile}"
+    )
+    print(
+        "stock_codex_compat_pkg_signed_notarized_developer_id_installer_count="
+        f"{len(proof.developer_id_installer_identities)}"
+    )
+    print(f"stock_codex_compat_pkg_signed_notarized_package_path={proof.package_path}")
+    print(f"stock_codex_compat_pkg_signed_notarized_package_sha256={proof.package_sha256}")
+    print(
+        "stock_codex_compat_pkg_signed_notarized_source_bundle_sha256="
+        f"{proof.source_bundle_sha256}"
+    )
+    print(
+        "stock_codex_compat_pkg_signed_notarized_identifier="
+        f"{proof.package_identifier}"
+    )
+    print(f"stock_codex_compat_pkg_signed_notarized_version={proof.package_version}")
+    print(
+        "stock_codex_compat_pkg_signed_notarized_signature_status="
+        f"{proof.signature_status}"
+    )
+    print(f"stock_codex_compat_pkg_signed_notarized_signed={proof.signed}")
+    print(
+        "stock_codex_compat_pkg_signed_notarized_notary_submission_id="
+        f"{proof.notary_submission_id}"
+    )
+    print(f"stock_codex_compat_pkg_signed_notarized_notary_status={proof.notary_status}")
+    print(
+        "stock_codex_compat_pkg_signed_notarized_notary_output="
+        f"{proof.notary_output_preview!r}"
+    )
+    print(
+        "stock_codex_compat_pkg_signed_notarized_staple_output="
+        f"{proof.staple_output_preview!r}"
+    )
+    print(
+        "stock_codex_compat_pkg_signed_notarized_stapler_validate_output="
+        f"{proof.stapler_validate_output_preview!r}"
+    )
+    print(
+        "stock_codex_compat_pkg_signed_notarized_gatekeeper_output="
+        f"{proof.gatekeeper_output_preview!r}"
+    )
+    if proof.status == "blocked":
+        print(
+            "ASSERTION: signed/notarized pkg validation is blocked by local "
+            "signing or notary prerequisites, not by the compatibility runtime "
+            "or unsigned package contract"
+        )
+        return
+    print(
+        "ASSERTION: stock-codex-compat can be built as a Developer ID signed "
+        "pkg, notarized, stapled, validated by stapler, and accepted by "
+        "Gatekeeper for installation"
     )
 
 
@@ -12456,6 +12903,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-pkg-user-bootstrap",
             "stock-codex-compat-pkg-clean-provision",
             "stock-codex-compat-pkg-clean-auth-onboarding",
+            "stock-codex-compat-pkg-signed-notarized",
             "stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
             "stock-codex-compat-wrapper-relay-tool",
             "app-bundle-entrypoint",
@@ -12560,6 +13008,11 @@ def parse_args() -> argparse.Namespace:
             "payload in a temporary install root and proves the installed "
             "runtime can bootstrap, update, doctor, and roll back a clean "
             "user-level compatibility command. "
+            "'stock-codex-compat-pkg-signed-notarized' builds the pkg with a "
+            "Developer ID Installer identity, submits it through notarytool, "
+            "staples it, validates the staple, and checks Gatekeeper; when "
+            "credentials are absent it reports a blocked prerequisite state "
+            "instead of a harness failure. "
             "'stock-codex-compat-wrapper-xcodebuild-bridge-adapter' proves "
             "that XcodeBuildMCP simulator build/run can execute through the "
             "same wrapper-owned file bridge while stock Codex stays in "
@@ -12622,6 +13075,35 @@ def parse_args() -> argparse.Namespace:
             "Optional patched AXe binary for XcodeBuildMCP UI automation. "
             f"When set, it is exposed only as {OMNIGENT_XCODEBUILDMCP_AXE_PATH_ENV} "
             "during the selected live proof."
+        ),
+    )
+    parser.add_argument(
+        "--pkg-sign-identity",
+        default=os.environ.get(PKG_SIGN_IDENTITY_ENV),
+        help=(
+            "Developer ID Installer identity for signed pkg validation. "
+            f"Defaults to {PKG_SIGN_IDENTITY_ENV}."
+        ),
+    )
+    parser.add_argument(
+        "--pkg-sign-keychain",
+        type=Path,
+        default=(
+            Path(os.environ[PKG_SIGN_KEYCHAIN_ENV])
+            if os.environ.get(PKG_SIGN_KEYCHAIN_ENV)
+            else None
+        ),
+        help=(
+            "Optional keychain path for the pkg signing identity. Defaults to "
+            f"{PKG_SIGN_KEYCHAIN_ENV}."
+        ),
+    )
+    parser.add_argument(
+        "--notarytool-profile",
+        default=os.environ.get(NOTARYTOOL_PROFILE_ENV),
+        help=(
+            "notarytool keychain profile for pkg notarization. Defaults to "
+            f"{NOTARYTOOL_PROFILE_ENV}."
         ),
     )
     return parser.parse_args()
@@ -13004,6 +13486,31 @@ def main() -> int:
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_stock_codex_compat_pkg_clean_auth_proof(
             run_stock_codex_compat_pkg_clean_auth_proof(codex_path)
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-signed-notarized":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-signed-notarized does not use "
+                "--apple-bundle; omit it."
+            )
+        if args.codex_path is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-signed-notarized does not use "
+                "--codex-path; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-signed-notarized cannot allow a "
+                "Codex-fork binary."
+            )
+        print_stock_codex_compat_pkg_signed_notarized_proof(
+            run_stock_codex_compat_pkg_signed_notarized_proof(
+                sign_identity=args.pkg_sign_identity,
+                signing_keychain=args.pkg_sign_keychain,
+                notarytool_profile=args.notarytool_profile,
+            )
         )
         return 0
 

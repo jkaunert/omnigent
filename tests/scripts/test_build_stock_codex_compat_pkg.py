@@ -130,3 +130,26 @@ def test_build_stock_codex_compat_pkg_cli_outputs_compact_json(
     assert payload["inspection"]["signed"] is False
     assert payload["inspection"]["allRequiredPayloadFilesPresent"] is True
     assert "payloadFiles" not in payload["inspection"]
+
+
+def test_pkgbuild_command_includes_developer_id_signing_args(tmp_path: Path) -> None:
+    output_path = tmp_path / "signed.pkg"
+    keychain_path = tmp_path / "signing.keychain-db"
+
+    command = _MOD._pkgbuild_command(
+        pkgbuild="/usr/bin/pkgbuild",
+        payload_root=tmp_path / "payload",
+        scripts_root=tmp_path / "scripts",
+        package_identifier="ai.omnigent.stock-codex-compat",
+        package_version="1.2.3",
+        output_path=output_path,
+        sign_identity="Developer ID Installer: Example, Inc. (ABCDE12345)",
+        signing_keychain=keychain_path,
+    )
+
+    assert command[-1] == str(output_path)
+    assert command[command.index("--sign") + 1] == (
+        "Developer ID Installer: Example, Inc. (ABCDE12345)"
+    )
+    assert command[command.index("--keychain") + 1] == str(keychain_path)
+    assert "--timestamp" in command

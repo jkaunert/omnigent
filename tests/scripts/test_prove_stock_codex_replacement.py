@@ -1558,3 +1558,162 @@ def test_stock_codex_compat_pkg_clean_auth_proof_uses_installed_runtime(
     assert proof.credential_material_leaked is False
     assert str(proof.clean_codex_home) in proof.onboarding_command
     assert str(proof.provisioned_codex_path) in proof.onboarding_command
+
+
+def test_stock_codex_compat_pkg_signed_notarized_blocks_when_prereqs_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_prerequisites(**kwargs: object) -> Any:
+        assert kwargs["sign_identity"] is None
+        return _MOD.StockCodexCompatPkgSigningPrerequisites(
+            status="blocked",
+            missing_prerequisites=("set OMNIGENT_PKG_SIGN_IDENTITY",),
+            tool_paths={
+                "pkgbuild": None,
+                "pkgutil": "/usr/sbin/pkgutil",
+                "xcrun": "/usr/bin/xcrun",
+                "spctl": "/usr/sbin/spctl",
+                "notarytool": "/usr/bin/notarytool",
+                "stapler": "/usr/bin/stapler",
+            },
+            sign_identity=None,
+            sign_identity_source="missing",
+            signing_keychain=None,
+            developer_id_installer_identities=(),
+            notarytool_profile=None,
+        )
+
+    monkeypatch.setattr(
+        _MOD,
+        "_stock_codex_compat_pkg_signing_prerequisites",
+        fake_prerequisites,
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_signed_notarized_proof(
+        sign_identity=None,
+        signing_keychain=None,
+        notarytool_profile=None,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.missing_prerequisites == ("set OMNIGENT_PKG_SIGN_IDENTITY",)
+    assert proof.package_path is None
+    assert proof.signed is None
+
+
+def test_stock_codex_compat_pkg_signed_notarized_runs_distribution_checks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_build_args: list[str] = []
+    distribution_commands: list[list[str]] = []
+
+    def fake_prerequisites(**kwargs: object) -> Any:
+        assert kwargs["sign_identity"] == "Developer ID Installer: Example (ABCDE12345)"
+        assert kwargs["notarytool_profile"] == "omnigent-notary"
+        return _MOD.StockCodexCompatPkgSigningPrerequisites(
+            status="ready",
+            missing_prerequisites=(),
+            tool_paths={
+                "pkgbuild": "/usr/bin/pkgbuild",
+                "pkgutil": "/usr/sbin/pkgutil",
+                "xcrun": "/usr/bin/xcrun",
+                "spctl": "/usr/sbin/spctl",
+                "notarytool": "/usr/bin/notarytool",
+                "stapler": "/usr/bin/stapler",
+            },
+            sign_identity="Developer ID Installer: Example (ABCDE12345)",
+            sign_identity_source="explicit",
+            signing_keychain=None,
+            developer_id_installer_identities=(
+                "Developer ID Installer: Example (ABCDE12345)",
+            ),
+            notarytool_profile="omnigent-notary",
+        )
+
+    def fake_builder(args: list[str], *, repo_root: Path) -> dict[str, Any]:
+        del repo_root
+        captured_build_args.extend(args)
+        output_path = Path(args[args.index("--output") + 1])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"signed pkg fixture")
+        package_sha = _MOD.sha256_file(output_path)
+        return {
+            "kind": "omnigent-stock-codex-compat-pkg",
+            "packagePath": str(output_path),
+            "packageSha256": package_sha,
+            "sourceBundleSha256": "a" * 64,
+            "packageIdentifier": "ai.omnigent.stock-codex-compat",
+            "packageVersion": "1.2.3",
+            "installLocation": "/",
+            "installPrefix": "/Library/Application Support/Omnigent/stock-codex-compat",
+            "runtimeRoot": (
+                "/Library/Application Support/Omnigent/stock-codex-compat/runtime"
+            ),
+            "inspection": {
+                "signed": True,
+                "signatureStatus": "signed by a certificate trusted by macOS",
+                "allRequiredPayloadFilesPresent": True,
+                "requiredPayloadFiles": {
+                    (
+                        "Library/Application Support/Omnigent/"
+                        "stock-codex-compat/pkg-manifest.json"
+                    ): True,
+                },
+                "scriptNames": ["postinstall"],
+                "archiveEntries": ["Bom", "PackageInfo", "Payload", "Scripts"],
+                "pkgManifestPath": str(output_path.parent / "pkg-manifest.json"),
+                "bundleManifestPath": str(output_path.parent / "bundle-manifest.json"),
+                "payloadFileCount": 42,
+                "pkgManifest": {
+                    "contract": {
+                        "runtime": "machine-level-runtime-only",
+                        "userBootstrap": "deferred-to-installed-runtime-command",
+                    },
+                },
+                "bundleManifest": {"sourceRoot": "<omitted-from-pkg>"},
+            },
+        }
+
+    def fake_distribution_command(
+        command: list[str],
+        *,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        assert timeout > 0
+        distribution_commands.append(command)
+        if command[1:3] == ["notarytool", "submit"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout='{"id":"notary-submission-1","status":"Accepted"}',
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(
+        _MOD,
+        "_stock_codex_compat_pkg_signing_prerequisites",
+        fake_prerequisites,
+    )
+    monkeypatch.setattr(_MOD, "_run_stock_codex_compat_pkg_builder_cli_json", fake_builder)
+    monkeypatch.setattr(_MOD, "_run_pkg_distribution_command", fake_distribution_command)
+
+    proof = _MOD.run_stock_codex_compat_pkg_signed_notarized_proof(
+        sign_identity="Developer ID Installer: Example (ABCDE12345)",
+        signing_keychain=None,
+        notarytool_profile="omnigent-notary",
+    )
+
+    assert proof.status == "replacement-ready"
+    assert proof.signed is True
+    assert proof.signature_status == "signed by a certificate trusted by macOS"
+    assert proof.notary_submission_id == "notary-submission-1"
+    assert proof.notary_status == "Accepted"
+    assert captured_build_args[captured_build_args.index("--sign-identity") + 1] == (
+        "Developer ID Installer: Example (ABCDE12345)"
+    )
+    assert distribution_commands[0][1:3] == ["notarytool", "submit"]
+    assert distribution_commands[0][-3:] == ["--wait", "--output-format", "json"]
+    assert distribution_commands[1][1:3] == ["stapler", "staple"]
+    assert distribution_commands[2][1:3] == ["stapler", "validate"]
+    assert distribution_commands[3][:5] == ["/usr/sbin/spctl", "-a", "-vv", "-t", "install"]
