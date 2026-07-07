@@ -17,6 +17,7 @@ import importlib.util
 import io
 import json
 import os
+import platform
 import plistlib
 import re
 import shlex
@@ -506,6 +507,39 @@ class StockCodexHomebrewRemoteChannelProof:
     provisioned_sha256: str
     provisioned_source_kind: str
     omnigent_resolved_codex_path: Path
+
+
+@dataclass(frozen=True)
+class StockCodexProductionChannelPolicyProof:
+    """Non-mutating proof result for production stock-Codex channel policy."""
+
+    source_codex_path: Path
+    source_codex_realpath: Path
+    source_codex_version: str
+    source_codex_sha256: str
+    policy_name: str
+    policy_manifest_path: Path
+    official_channel_manifest_path: Path
+    official_archive_url: str
+    official_archive_sha256: str
+    archive_executable: str
+    clean_home: Path
+    cache_root: Path
+    payload_dir: Path
+    provisioned_codex_path: Path
+    provisioned_manifest_path: Path
+    provisioned_version: str
+    provisioned_sha256: str
+    provisioned_source_kind: str
+    provisioned_channel_artifact: dict[str, Any]
+    omnigent_resolved_codex_path: Path
+    offline_reuse_without_remote_download: bool
+    rejected_channel_manifest_path: Path
+    rejected_cache_root: Path
+    rejected_error: str
+    rejected_cache_mutated: bool
+    host_cache_root: Path
+    host_cache_referenced: bool
 
 
 @dataclass(frozen=True)
@@ -1892,6 +1926,421 @@ def print_stock_codex_homebrew_remote_channel_proof(
     print(
         "ASSERTION: this proof used a temporary cache and did not mutate "
         "persistent launcher defaults, CODEX_HOME, or the Codex fork"
+    )
+
+
+def _load_stock_codex_provisioner() -> Any:
+    """Load the stock-Codex provisioner script for fixture seeding."""
+    script_path = Path(__file__).resolve().with_name("provision_stock_codex.py")
+    spec = importlib.util.spec_from_file_location(
+        "omnigent_stock_codex_provisioner",
+        script_path,
+    )
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"Could not load stock Codex provisioner: {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _stock_codex_archive_executable_name() -> str:
+    """Return the expected stock-Codex release executable name for this host."""
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if system == "darwin":
+        if machine in {"arm64", "aarch64"}:
+            return "codex-aarch64-apple-darwin"
+        if machine in {"x86_64", "amd64"}:
+            return "codex-x86_64-apple-darwin"
+    if system == "linux":
+        if machine in {"x86_64", "amd64"}:
+            return "codex-x86_64-unknown-linux-musl"
+        if machine in {"arm64", "aarch64"}:
+            return "codex-aarch64-unknown-linux-musl"
+    return "codex-aarch64-apple-darwin"
+
+
+def _run_stock_codex_provisioner_json(
+    command: list[str],
+    *,
+    env: dict[str, str],
+    cwd: Path,
+    failure_label: str,
+    timeout: float = 60,
+) -> dict[str, Any]:
+    """Run a stock-Codex provisioner command and parse its JSON output."""
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=cwd,
+        timeout=timeout,
+    )
+    if completed.returncode != 0:
+        raise SystemExit(
+            f"{failure_label} failed with exit {completed.returncode}.\n"
+            f"command={shlex.join(command)}\n"
+            f"stdout={completed.stdout}\nstderr={completed.stderr}"
+        )
+    try:
+        parsed = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            f"{failure_label} did not emit JSON.\nstdout={completed.stdout}\n"
+            f"stderr={completed.stderr}"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise SystemExit(f"{failure_label} emitted non-object JSON: {parsed!r}")
+    return parsed
+
+
+def run_stock_codex_production_channel_policy_proof(
+    source_codex_path: Path,
+) -> StockCodexProductionChannelPolicyProof:
+    """Prove production channel policy, offline reuse, rejection, and resolver selection."""
+    source_codex_realpath = source_codex_path.expanduser().resolve()
+    source_digest = sha256_file(source_codex_realpath)
+    source_version = codex_version(source_codex_realpath)
+    version_slug = _codex_version_dir_name(source_version)
+    repo_root = Path(__file__).resolve().parents[1]
+    provisioner_script = repo_root / "scripts" / "provision_stock_codex.py"
+    provisioner = _load_stock_codex_provisioner()
+    policy_name = provisioner.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY
+    archive_executable = _stock_codex_archive_executable_name()
+    official_archive_url = (
+        "https://github.com/openai/codex/releases/download/"
+        f"rust-v{version_slug}/{archive_executable}.tar.gz"
+    )
+    host_cache_root = (
+        Path.home() / ".local" / "omnigent" / "codex-stock"
+    ).expanduser().resolve()
+
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-production-channel-policy-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        clean_home = root / "home"
+        clean_tmp = root / "tmp"
+        clean_home.mkdir(mode=0o700)
+        clean_tmp.mkdir(mode=0o700)
+        cache_root = clean_home / ".local" / "omnigent" / "codex-stock"
+
+        archive_path = root / "official-archive-fixture.tar.gz"
+        with tarfile.open(archive_path, "w:gz") as archive:
+            archive.add(source_codex_realpath, arcname=archive_executable)
+        archive_sha = sha256_file(archive_path)
+
+        policy_manifest_path = root / "stock-codex-channel-policy.json"
+        policy_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-channel-policy",
+                    "name": policy_name,
+                    "versionPin": "exact",
+                    "acceptedSource": {
+                        "urlScheme": "https",
+                        "urlHost": "github.com",
+                        "urlPathPrefix": "/openai/codex/releases/download/",
+                        "archiveFormat": "tar.gz",
+                    },
+                    "reuse": {
+                        "mode": "verify-existing-before-network",
+                        "forceRequiredForMismatchedPayload": True,
+                    },
+                    "rollback": {
+                        "mode": "versioned-cache-retains-older-payloads",
+                        "persistent-pointerUpdates": "deferred",
+                    },
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        channel_manifest_path = root / "official-channel.json"
+        channel_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-channel",
+                    "latest": version_slug,
+                    "artifacts": [
+                        {
+                            "version": source_version,
+                            "url": official_archive_url,
+                            "sha256": archive_sha,
+                            "archiveFormat": "tar.gz",
+                            "archiveExecutable": archive_executable,
+                        }
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        artifact = provisioner.select_channel_artifact(
+            channel_manifest=channel_manifest_path,
+            requested_version=None,
+            requested_platform=None,
+        )
+        payload_dir = cache_root / version_slug
+        provisioner.copy_codex_payload(
+            source_binary=source_codex_realpath,
+            destination_payload_dir=payload_dir,
+            version=source_version,
+            digest=source_digest,
+            source_kind="channel",
+            manifest_source_path=official_archive_url,
+            manifest_source_realpath=official_archive_url,
+            channel_manifest_path=channel_manifest_path,
+            channel_artifact=artifact,
+        )
+
+        env = os.environ.copy()
+        env.update({"HOME": str(clean_home), "TMPDIR": str(clean_tmp)})
+        env.pop("CODEX_HOME", None)
+        env.pop(OMNIGENT_STOCK_CODEX_PATH_ENV, None)
+
+        provisioned = _run_stock_codex_provisioner_json(
+            [
+                sys.executable,
+                str(provisioner_script),
+                "--cache-root",
+                str(cache_root),
+                "--channel-manifest",
+                str(channel_manifest_path),
+                "--expected-sha256",
+                archive_sha,
+                "--channel-policy",
+                policy_name,
+                "--json",
+            ],
+            env=env,
+            cwd=repo_root,
+            failure_label="Production stock Codex channel policy reuse proof",
+        )
+        provisioned_path = Path(_json_string(provisioned, "codexPath")).resolve()
+        provisioned_manifest_path = Path(_json_string(provisioned, "manifestPath")).resolve()
+        provisioned_sha = _json_string(provisioned, "sha256")
+        provisioned_version = _json_string(provisioned, "version")
+        provisioned_source_kind = _json_string(provisioned, "sourceKind")
+        channel_artifact = provisioned.get("channelArtifact")
+        if not isinstance(channel_artifact, dict):
+            raise SystemExit(
+                "Production channel policy proof omitted channel artifact provenance: "
+                f"{provisioned!r}"
+            )
+        if provisioned_path != payload_dir / "codex":
+            raise SystemExit(
+                "Production channel policy proof did not reuse the preverified payload.\n"
+                f"expected={payload_dir / 'codex'}\nactual={provisioned_path}"
+            )
+        if provisioned_sha != source_digest or provisioned_version != source_version:
+            raise SystemExit(
+                "Production channel policy proof returned unexpected stock Codex metadata.\n"
+                f"expected_sha={source_digest}\nactual_sha={provisioned_sha}\n"
+                f"expected_version={source_version!r}\nactual_version={provisioned_version!r}"
+            )
+        if provisioned_source_kind != "channel":
+            raise SystemExit(
+                f"Production channel policy proof source kind mismatch: {provisioned!r}"
+            )
+        manifest = json.loads(provisioned_manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("channelArtifact") != artifact.as_manifest_dict():
+            raise SystemExit(
+                "Production channel policy proof manifest artifact mismatch.\n"
+                f"expected={artifact.as_manifest_dict()!r}\nactual={manifest.get('channelArtifact')!r}"
+            )
+        with temporary_env({OMNIGENT_STOCK_CODEX_PATH_ENV: str(provisioned_path)}):
+            resolved_raw = _find_codex_cli()
+        if resolved_raw is None:
+            raise SystemExit(f"{OMNIGENT_STOCK_CODEX_PATH_ENV} did not resolve a Codex binary.")
+        resolved_path = Path(resolved_raw).expanduser().resolve()
+        if resolved_path != provisioned_path:
+            raise SystemExit(
+                "Omnigent resolver did not select the production-channel payload.\n"
+                f"expected={provisioned_path}\nactual={resolved_raw}"
+            )
+
+        rejected_manifest_path = root / "rejected-channel.json"
+        rejected_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-channel",
+                    "latest": version_slug,
+                    "artifacts": [
+                        {
+                            "version": source_version,
+                            "url": "https://example.com/openai/codex/releases/download/codex.tar.gz",
+                            "sha256": archive_sha,
+                            "archiveFormat": "tar.gz",
+                            "archiveExecutable": archive_executable,
+                        }
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rejected_cache_root = root / "rejected-cache"
+        rejected_completed = subprocess.run(
+            [
+                sys.executable,
+                str(provisioner_script),
+                "--cache-root",
+                str(rejected_cache_root),
+                "--channel-manifest",
+                str(rejected_manifest_path),
+                "--expected-sha256",
+                archive_sha,
+                "--allow-remote-channel-download",
+                "--channel-policy",
+                policy_name,
+                "--json",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=repo_root,
+            timeout=30,
+        )
+        if rejected_completed.returncode == 0:
+            raise SystemExit(
+                "Production channel policy accepted a non-official artifact URL.\n"
+                f"stdout={rejected_completed.stdout}\nstderr={rejected_completed.stderr}"
+            )
+        rejected_error = (rejected_completed.stderr or rejected_completed.stdout).strip()
+        if "violates" not in rejected_error:
+            raise SystemExit(
+                "Production channel policy rejection did not explain the policy failure.\n"
+                f"stdout={rejected_completed.stdout}\nstderr={rejected_completed.stderr}"
+            )
+        rejected_cache_mutated = rejected_cache_root.exists() and any(
+            rejected_cache_root.rglob("*")
+        )
+        if rejected_cache_mutated:
+            raise SystemExit(
+                "Production channel policy rejection mutated the rejected cache root.\n"
+                f"cache_root={rejected_cache_root}"
+            )
+
+        proof_text = (
+            json.dumps(provisioned, sort_keys=True)
+            + "\n"
+            + json.dumps(manifest, sort_keys=True)
+        )
+        host_cache_referenced = str(host_cache_root) in proof_text
+        if host_cache_referenced:
+            raise SystemExit(
+                "Production channel policy proof referenced the host stock Codex cache.\n"
+                f"host_cache_root={host_cache_root}"
+            )
+
+        return StockCodexProductionChannelPolicyProof(
+            source_codex_path=source_codex_path,
+            source_codex_realpath=source_codex_realpath,
+            source_codex_version=source_version,
+            source_codex_sha256=source_digest,
+            policy_name=policy_name,
+            policy_manifest_path=policy_manifest_path,
+            official_channel_manifest_path=channel_manifest_path,
+            official_archive_url=official_archive_url,
+            official_archive_sha256=archive_sha,
+            archive_executable=archive_executable,
+            clean_home=clean_home,
+            cache_root=cache_root,
+            payload_dir=payload_dir,
+            provisioned_codex_path=provisioned_path,
+            provisioned_manifest_path=provisioned_manifest_path,
+            provisioned_version=provisioned_version,
+            provisioned_sha256=provisioned_sha,
+            provisioned_source_kind=provisioned_source_kind,
+            provisioned_channel_artifact=channel_artifact,
+            omnigent_resolved_codex_path=resolved_path,
+            offline_reuse_without_remote_download=True,
+            rejected_channel_manifest_path=rejected_manifest_path,
+            rejected_cache_root=rejected_cache_root,
+            rejected_error=rejected_error,
+            rejected_cache_mutated=rejected_cache_mutated,
+            host_cache_root=host_cache_root,
+            host_cache_referenced=host_cache_referenced,
+        )
+
+
+def print_stock_codex_production_channel_policy_proof(
+    proof: StockCodexProductionChannelPolicyProof,
+) -> None:
+    """Emit operator evidence for the production stock-Codex channel policy proof."""
+    print("stock_codex_production_channel_policy_rehearsal=selected")
+    print(f"stock_codex_production_channel_policy_name={proof.policy_name}")
+    print(f"stock_codex_production_channel_policy_manifest={proof.policy_manifest_path}")
+    print(f"stock_codex_production_channel_source_path={proof.source_codex_path}")
+    print(f"stock_codex_production_channel_source_realpath={proof.source_codex_realpath}")
+    print(f"stock_codex_production_channel_source_version={proof.source_codex_version}")
+    print(f"stock_codex_production_channel_source_sha256={proof.source_codex_sha256}")
+    print(f"stock_codex_production_channel_manifest={proof.official_channel_manifest_path}")
+    print(f"stock_codex_production_channel_archive_url={proof.official_archive_url}")
+    print(f"stock_codex_production_channel_archive_sha256={proof.official_archive_sha256}")
+    print(f"stock_codex_production_channel_archive_executable={proof.archive_executable}")
+    print(f"stock_codex_production_channel_clean_home={proof.clean_home}")
+    print(f"stock_codex_production_channel_cache_root={proof.cache_root}")
+    print(f"stock_codex_production_channel_payload_dir={proof.payload_dir}")
+    print(f"stock_codex_production_channel_path={proof.provisioned_codex_path}")
+    print(f"stock_codex_production_channel_version={proof.provisioned_version}")
+    print(f"stock_codex_production_channel_sha256={proof.provisioned_sha256}")
+    print(f"stock_codex_production_channel_source_kind={proof.provisioned_source_kind}")
+    print(f"stock_codex_production_channel_payload_manifest={proof.provisioned_manifest_path}")
+    print(
+        "stock_codex_production_channel_offline_reuse_without_remote_download="
+        f"{proof.offline_reuse_without_remote_download}"
+    )
+    print(
+        f"stock_codex_production_channel_resolved_codex_path="
+        f"{proof.omnigent_resolved_codex_path}"
+    )
+    print(
+        f"stock_codex_production_channel_rejected_manifest="
+        f"{proof.rejected_channel_manifest_path}"
+    )
+    print(f"stock_codex_production_channel_rejected_cache_root={proof.rejected_cache_root}")
+    print(
+        "stock_codex_production_channel_rejected_cache_mutated="
+        f"{proof.rejected_cache_mutated}"
+    )
+    print(f"stock_codex_production_channel_rejected_error={proof.rejected_error!r}")
+    print(f"stock_codex_production_channel_host_cache_root={proof.host_cache_root}")
+    print(
+        f"stock_codex_production_channel_host_cache_referenced="
+        f"{proof.host_cache_referenced}"
+    )
+    print("stock_codex_production_channel_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: production channel policy accepts only HTTPS OpenAI Codex "
+        "GitHub release tarballs with declared archive executables"
+    )
+    print(
+        "ASSERTION: a matching channel-managed payload is verified and reused "
+        "before any remote download is allowed"
+    )
+    print(
+        "ASSERTION: non-official channel URLs fail closed before mutating the "
+        "target cache root"
+    )
+    print(
+        "ASSERTION: this proof is temp-rooted, preserves the host stock Codex "
+        "cache, and relies on the existing remote-channel proof for live download transport"
     )
 
 
@@ -13609,6 +14058,7 @@ def parse_args() -> argparse.Namespace:
             "pinned-codex-provision",
             "stock-codex-channel",
             "stock-codex-homebrew-remote-channel",
+            "stock-codex-production-channel-policy",
             "clean-auth-onboarding",
             "stock-codex-compat",
             "stock-codex-compat-live",
@@ -13674,6 +14124,10 @@ def parse_args() -> argparse.Namespace:
             "'stock-codex-homebrew-remote-channel' proves Homebrew Codex cask "
             "metadata can feed the opt-in OpenAI GitHub release archive "
             "download path in an isolated cache. "
+            "'stock-codex-production-channel-policy' proves the official "
+            "OpenAI GitHub release channel policy, clean-cache offline reuse, "
+            "non-official URL rejection, and resolver selection without "
+            "mutating global state. "
             "'clean-auth-onboarding' proves clean CODEX_HOME needs-auth "
             "classification plus populated auth detection without running "
             "interactive login. "
@@ -13881,6 +14335,22 @@ def main() -> int:
             )
         print_stock_codex_homebrew_remote_channel_proof(
             run_stock_codex_homebrew_remote_channel_proof()
+        )
+        return 0
+
+    if requested_proof == "stock-codex-production-channel-policy":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-production-channel-policy does not use --apple-bundle; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-production-channel-policy cannot allow a Codex-fork binary."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_production_channel_policy_proof(
+            run_stock_codex_production_channel_policy_proof(codex_path)
         )
         return 0
 

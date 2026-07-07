@@ -261,6 +261,43 @@ def test_clean_auth_onboarding_proof_requires_real_auth(
     assert "Current real Codex auth source is not available" in str(excinfo.value)
 
 
+def test_stock_codex_production_channel_policy_proof_reuses_and_rejects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host_home = tmp_path / "host-home"
+    stock_codex = _write_codex_binary(tmp_path / "bin" / "codex")
+    monkeypatch.setenv("HOME", str(host_home))
+
+    proof = _MOD.run_stock_codex_production_channel_policy_proof(stock_codex)
+
+    assert proof.source_codex_path == stock_codex.resolve()
+    assert proof.source_codex_version == "codex-cli 0.142.2"
+    assert proof.policy_name == "official-openai-github-release"
+    assert proof.policy_manifest_path.name == "stock-codex-channel-policy.json"
+    assert proof.official_channel_manifest_path.name == "official-channel.json"
+    assert proof.official_archive_url.startswith(
+        "https://github.com/openai/codex/releases/download/"
+    )
+    assert proof.official_archive_url.endswith(".tar.gz")
+    assert len(proof.official_archive_sha256) == 64
+    assert proof.cache_root == proof.clean_home / ".local" / "omnigent" / "codex-stock"
+    assert proof.payload_dir == proof.cache_root / "0.142.2"
+    assert proof.provisioned_codex_path == proof.payload_dir / "codex"
+    assert proof.provisioned_version == "codex-cli 0.142.2"
+    assert proof.provisioned_sha256 == proof.source_codex_sha256
+    assert proof.provisioned_source_kind == "channel"
+    assert proof.provisioned_channel_artifact["url"] == proof.official_archive_url
+    assert proof.provisioned_channel_artifact["sha256"] == proof.official_archive_sha256
+    assert proof.omnigent_resolved_codex_path == proof.provisioned_codex_path
+    assert proof.offline_reuse_without_remote_download is True
+    assert proof.rejected_channel_manifest_path.name == "rejected-channel.json"
+    assert "violates" in proof.rejected_error
+    assert proof.rejected_cache_mutated is False
+    assert proof.host_cache_root == host_home / ".local" / "omnigent" / "codex-stock"
+    assert proof.host_cache_referenced is False
+
+
 def test_stock_codex_compat_proof_installs_plugin_and_bridge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

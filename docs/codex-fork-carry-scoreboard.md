@@ -77,6 +77,12 @@ manifest provenance, SHA-256 verification, channel provenance, and
 `0.142.5` persistently installed at
 `~/.local/omnigent/codex-stock/0.142.5/codex`, sourced from the official
 Homebrew/OpenAI GitHub release archive and recorded with `sourceKind: channel`.
+The `stock-codex-production-channel-policy` proof is now green for the
+`official-openai-github-release` policy: it accepts only HTTPS OpenAI Codex
+GitHub release tarballs with declared archive executables, verifies matching
+channel-managed payloads before any remote download is allowed, rejects
+non-official URLs before cache mutation, and proves resolver selection from a
+clean temporary cache.
 The existing `/opt/homebrew/bin/codex` Omnigent-managed launcher now delegates
 to that `0.142.5` payload while preserving the original Homebrew backup path.
 The `clean-auth-onboarding` proof remains green for the local auth boundary:
@@ -275,14 +281,14 @@ The next gates should split by product mode:
   explicit `tool_search` fallback;
 - for `stock-codex-compat`, the signed/notarized package gate is green with
   Developer ID Installer signing, Apple notarization, stapling, stapler
-  validation, and Gatekeeper acceptance. Remaining production gates are remote
-  official stock-Codex acquisition/update policy if product scope requires it,
-  broader UI/device bridge coverage such as screenshot, snapshot, gesture, or
-  device execution. Raw unwrapped stock Codex Electron/CLI route parity remains
-  blocked;
-- for both modes, decide whether the temporary Homebrew/GitHub remote proof
-  should become a persistent updater/install command, and what independent
-  signature or notarization policy is required;
+  validation, and Gatekeeper acceptance. The production stock-Codex channel
+  policy gate is green for official-source validation, clean-cache reuse before
+  network access, fail-closed non-official URL rejection, and resolver selection.
+  Remaining production choices are updater scheduling, persistent launcher
+  pointer promotion, independent archive signature policy, and broader UI/device
+  bridge coverage such as screenshot, snapshot, gesture, or device execution if
+  product scope requires them. Raw unwrapped stock Codex Electron/CLI route
+  parity remains blocked;
 - decide whether automated browser/device login UX, token freshness validation,
   or cross-machine credential packaging is product scope; or
 - broaden the Apple workflow smoke to release/readiness/review only if product

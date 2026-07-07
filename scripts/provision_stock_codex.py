@@ -26,6 +26,8 @@ DEFAULT_CACHE_ROOT = Path.home() / ".local" / "omnigent" / "codex-stock"
 MANIFEST_NAME = "manifest.json"
 STOCK_CODEX_MANIFEST_KIND = "omnigent-stock-codex"
 CHANNEL_MANIFEST_KIND = "omnigent-stock-codex-channel"
+OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY = "official-openai-github-release"
+CHANNEL_POLICY_CHOICES = (OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY,)
 
 
 @dataclass(frozen=True)
@@ -75,6 +77,19 @@ class StagedChannelArtifact:
 
 
 @dataclass(frozen=True)
+class StockCodexChannelPolicy:
+    """Policy for accepting production stock-Codex channel artifacts."""
+
+    name: str
+    source_field: str
+    scheme: str
+    netloc: str
+    path_prefix: str
+    path_suffix: str
+    archive_format: str
+
+
+@dataclass(frozen=True)
 class ProvisionedStockCodex:
     """Verified stock Codex payload installed in the Omnigent cache."""
 
@@ -116,6 +131,21 @@ class ProvisionedStockCodex:
 
 class ProvisioningError(RuntimeError):
     """The stock Codex payload could not be provisioned or verified."""
+
+
+def stock_codex_channel_policy(policy_name: str) -> StockCodexChannelPolicy:
+    """Return a named stock-Codex channel policy."""
+    if policy_name == OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY:
+        return StockCodexChannelPolicy(
+            name=policy_name,
+            source_field="url",
+            scheme="https",
+            netloc="github.com",
+            path_prefix="/openai/codex/releases/download/",
+            path_suffix=".tar.gz",
+            archive_format="tar.gz",
+        )
+    raise ProvisioningError(f"Unknown stock Codex channel policy: {policy_name!r}")
 
 
 def _is_executable(path: Path) -> bool:
@@ -421,6 +451,80 @@ def _artifact_matches_version(
     return requested_version in {artifact.version, artifact.version_slug}
 
 
+def validate_channel_artifact_policy(
+    artifact: StockCodexChannelArtifact,
+    *,
+    policy_name: str | None,
+) -> None:
+    """Fail closed when a selected artifact violates the requested channel policy."""
+    if policy_name is None:
+        return
+    policy = stock_codex_channel_policy(policy_name)
+    parsed = urlparse(artifact.source)
+    violations: list[str] = []
+    if artifact.source_field != policy.source_field:
+        violations.append(f"source field must be {policy.source_field!r}")
+    if parsed.scheme != policy.scheme:
+        violations.append(f"URL scheme must be {policy.scheme!r}")
+    if parsed.netloc != policy.netloc:
+        violations.append(f"URL host must be {policy.netloc!r}")
+    if not parsed.path.startswith(policy.path_prefix):
+        violations.append(f"URL path must start with {policy.path_prefix!r}")
+    if not parsed.path.endswith(policy.path_suffix):
+        violations.append(f"URL path must end with {policy.path_suffix!r}")
+    if artifact.archive_format != policy.archive_format:
+        violations.append(f"archiveFormat must be {policy.archive_format!r}")
+    if not artifact.archive_executable:
+        violations.append("archiveExecutable is required")
+    else:
+        path_parts = parsed.path.split("/")
+        expected_filename = f"{artifact.archive_executable}.tar.gz"
+        if len(path_parts) != 7 or path_parts[1:5] != [
+            "openai",
+            "codex",
+            "releases",
+            "download",
+        ]:
+            violations.append(
+                "URL path must be "
+                "/openai/codex/releases/download/<tag>/<archiveExecutable>.tar.gz"
+            )
+        elif not path_parts[5] or path_parts[6] != expected_filename:
+            violations.append(
+                "URL archive filename must match archiveExecutable plus '.tar.gz'"
+            )
+    if violations:
+        raise ProvisioningError(
+            f"Channel artifact violates {policy.name!r}: " + "; ".join(violations)
+        )
+
+
+def verify_channel_payload_for_artifact(
+    payload_dir: Path,
+    *,
+    artifact: StockCodexChannelArtifact,
+) -> ProvisionedStockCodex:
+    """Verify an existing channel-managed payload without touching the artifact source."""
+    provisioned = verify_payload(payload_dir, expected_source_kind="channel")
+    if provisioned.version != artifact.version:
+        raise ProvisioningError(
+            f"Provisioned Codex version mismatch: expected={artifact.version!r} "
+            f"actual={provisioned.version!r}"
+        )
+    expected_artifact = artifact.as_manifest_dict()
+    if provisioned.channel_artifact != expected_artifact:
+        raise ProvisioningError(
+            "Provisioned Codex channel artifact mismatch: "
+            f"expected={expected_artifact!r} actual={provisioned.channel_artifact!r}"
+        )
+    if artifact.archive_format is None and provisioned.sha256.lower() != artifact.sha256.lower():
+        raise ProvisioningError(
+            "Provisioned Codex sha256 mismatch for channel artifact: "
+            f"expected={artifact.sha256} actual={provisioned.sha256}"
+        )
+    return provisioned
+
+
 def select_channel_artifact(
     *,
     channel_manifest: Path,
@@ -698,6 +802,7 @@ def provision_stock_codex_from_channel(
     force: bool,
     allow_fork_codex: bool,
     allow_remote_channel_download: bool,
+    channel_policy: str | None = None,
 ) -> ProvisionedStockCodex:
     """Provision or reuse a verified stock Codex payload from a channel manifest."""
     channel_manifest = channel_manifest.expanduser()
@@ -706,11 +811,21 @@ def provision_stock_codex_from_channel(
         requested_version=channel_version,
         requested_platform=channel_platform,
     )
+    validate_channel_artifact_policy(artifact, policy_name=channel_policy)
     if expected_sha256 is not None and artifact.sha256.lower() != expected_sha256.lower():
         raise ProvisioningError(
             f"Channel artifact sha256 mismatch: expected={expected_sha256} "
             f"actual={artifact.sha256}"
         )
+    payload_dir = payload_dir_for(cache_root, artifact.version)
+    if payload_dir.exists() and not force:
+        try:
+            return verify_channel_payload_for_artifact(payload_dir, artifact=artifact)
+        except ProvisioningError as exc:
+            raise ProvisioningError(
+                f"Existing channel-managed Codex payload is stale or mismatched: {exc}. "
+                "Rerun with --force to replace it."
+            ) from exc
     with tempfile.TemporaryDirectory(prefix="omnigent-stock-codex-channel-") as temp_root:
         staged = stage_channel_artifact(
             artifact,
@@ -720,18 +835,6 @@ def provision_stock_codex_from_channel(
             allow_remote_channel_download=allow_remote_channel_download,
         )
         payload_dir = payload_dir_for(cache_root, staged.version)
-        if payload_dir.exists() and not force:
-            try:
-                return verify_payload(
-                    payload_dir,
-                    expected_sha256=staged.binary_sha256,
-                    expected_source_kind="channel",
-                )
-            except ProvisioningError as exc:
-                raise ProvisioningError(
-                    f"Existing channel-managed Codex payload is stale or mismatched: {exc}. "
-                    "Rerun with --force to replace it."
-                ) from exc
         copy_codex_payload(
             source_binary=staged.staged_path,
             destination_payload_dir=payload_dir,
@@ -797,6 +900,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Allow http(s) artifacts in --channel-manifest after SHA-256 verification.",
     )
+    parser.add_argument(
+        "--channel-policy",
+        choices=CHANNEL_POLICY_CHOICES,
+        default=None,
+        help=(
+            "Optional production policy for the selected channel artifact. "
+            f"Current policy: {OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY}."
+        ),
+    )
     output = parser.add_mutually_exclusive_group()
     output.add_argument(
         "--print-path",
@@ -825,6 +937,7 @@ def main(argv: list[str] | None = None) -> int:
                 force=args.force,
                 allow_fork_codex=args.allow_fork_codex,
                 allow_remote_channel_download=args.allow_remote_channel_download,
+                channel_policy=args.channel_policy,
             )
         else:
             if args.channel_version is not None or args.channel_platform is not None:
@@ -835,6 +948,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise ProvisioningError(
                     "--allow-remote-channel-download requires --channel-manifest"
                 )
+            if args.channel_policy is not None:
+                raise ProvisioningError("--channel-policy requires --channel-manifest")
             provisioned = provision_stock_codex(
                 cache_root=args.cache_root,
                 source_binary=args.source_binary,

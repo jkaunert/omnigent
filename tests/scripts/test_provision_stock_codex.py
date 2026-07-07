@@ -342,6 +342,255 @@ def test_provision_stock_codex_from_remote_archive_channel_manifest(tmp_path: Pa
     assert manifest["sha256"] == provisioned.sha256
 
 
+def test_official_openai_github_channel_policy_accepts_release_archive() -> None:
+    artifact = _MOD.StockCodexChannelArtifact(
+        version="codex-cli 0.142.2",
+        platform=_MOD.current_channel_platform(),
+        source=(
+            "https://github.com/openai/codex/releases/download/"
+            "rust-v0.142.2/codex-aarch64-apple-darwin.tar.gz"
+        ),
+        source_field="url",
+        sha256="a" * 64,
+        archive_format="tar.gz",
+        archive_executable="codex-aarch64-apple-darwin",
+    )
+
+    _MOD.validate_channel_artifact_policy(
+        artifact,
+        policy_name=_MOD.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY,
+    )
+
+
+def test_official_openai_github_channel_policy_rejects_non_official_url() -> None:
+    artifact = _MOD.StockCodexChannelArtifact(
+        version="codex-cli 0.142.2",
+        platform=_MOD.current_channel_platform(),
+        source="https://example.com/openai/codex/releases/download/codex.tar.gz",
+        source_field="url",
+        sha256="a" * 64,
+        archive_format="tar.gz",
+        archive_executable="codex-aarch64-apple-darwin",
+    )
+
+    with pytest.raises(_MOD.ProvisioningError, match="violates"):
+        _MOD.validate_channel_artifact_policy(
+            artifact,
+            policy_name=_MOD.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY,
+        )
+
+
+def test_official_openai_github_channel_policy_rejects_archive_name_mismatch() -> None:
+    artifact = _MOD.StockCodexChannelArtifact(
+        version="codex-cli 0.142.2",
+        platform=_MOD.current_channel_platform(),
+        source=(
+            "https://github.com/openai/codex/releases/download/"
+            "rust-v0.142.2/not-the-declared-executable.tar.gz"
+        ),
+        source_field="url",
+        sha256="a" * 64,
+        archive_format="tar.gz",
+        archive_executable="codex-aarch64-apple-darwin",
+    )
+
+    with pytest.raises(_MOD.ProvisioningError, match="archive filename"):
+        _MOD.validate_channel_artifact_policy(
+            artifact,
+            policy_name=_MOD.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY,
+        )
+
+
+def test_official_openai_github_channel_policy_rejects_nested_release_path() -> None:
+    artifact = _MOD.StockCodexChannelArtifact(
+        version="codex-cli 0.142.2",
+        platform=_MOD.current_channel_platform(),
+        source=(
+            "https://github.com/openai/codex/releases/download/"
+            "rust-v0.142.2/nested/codex-aarch64-apple-darwin.tar.gz"
+        ),
+        source_field="url",
+        sha256="a" * 64,
+        archive_format="tar.gz",
+        archive_executable="codex-aarch64-apple-darwin",
+    )
+
+    with pytest.raises(_MOD.ProvisioningError, match="URL path"):
+        _MOD.validate_channel_artifact_policy(
+            artifact,
+            policy_name=_MOD.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY,
+        )
+
+
+def test_remote_channel_reuses_existing_matching_payload_without_download(
+    tmp_path: Path,
+) -> None:
+    source_binary = _write_codex_binary(tmp_path / "source" / "codex")
+    source_sha = _MOD.sha256_file(source_binary)
+    archive_sha = "b" * 64
+    release_url = (
+        "https://github.com/openai/codex/releases/download/"
+        "rust-v0.142.2/codex-aarch64-apple-darwin.tar.gz"
+    )
+    channel_manifest = tmp_path / "channel.json"
+    channel_manifest.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "kind": _MOD.CHANNEL_MANIFEST_KIND,
+                "latest": "0.142.2",
+                "artifacts": [
+                    {
+                        "version": "codex-cli 0.142.2",
+                        "platform": _MOD.current_channel_platform(),
+                        "url": release_url,
+                        "sha256": archive_sha,
+                        "archiveFormat": "tar.gz",
+                        "archiveExecutable": "codex-aarch64-apple-darwin",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact = _MOD.select_channel_artifact(
+        channel_manifest=channel_manifest,
+        requested_version=None,
+        requested_platform=None,
+    )
+    cache_root = tmp_path / "cache"
+    payload_dir = cache_root / "0.142.2"
+    _MOD.copy_codex_payload(
+        source_binary=source_binary,
+        destination_payload_dir=payload_dir,
+        version="codex-cli 0.142.2",
+        digest=source_sha,
+        source_kind="channel",
+        manifest_source_path=release_url,
+        manifest_source_realpath=release_url,
+        channel_manifest_path=channel_manifest,
+        channel_artifact=artifact,
+    )
+
+    provisioned = _MOD.provision_stock_codex_from_channel(
+        cache_root=cache_root,
+        channel_manifest=channel_manifest,
+        channel_version=None,
+        channel_platform=None,
+        expected_sha256=archive_sha,
+        force=False,
+        allow_fork_codex=False,
+        allow_remote_channel_download=False,
+        channel_policy=_MOD.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY,
+    )
+
+    assert provisioned.payload_dir == payload_dir
+    assert provisioned.sha256 == source_sha
+    assert provisioned.channel_artifact == artifact.as_manifest_dict()
+
+
+def test_local_channel_reuse_requires_payload_sha_to_match_artifact_sha(
+    tmp_path: Path,
+) -> None:
+    source_binary = _write_codex_binary(tmp_path / "artifacts" / "codex")
+    wrong_binary = _write_codex_binary(
+        tmp_path / "wrong" / "codex",
+        version="codex-cli 0.142.2",
+    )
+    with wrong_binary.open("a", encoding="utf-8") as handle:
+        handle.write("# different payload\n")
+    source_sha = _MOD.sha256_file(source_binary)
+    wrong_sha = _MOD.sha256_file(wrong_binary)
+    channel_manifest = tmp_path / "channel.json"
+    channel_manifest.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "kind": _MOD.CHANNEL_MANIFEST_KIND,
+                "latest": "0.142.2",
+                "artifacts": [
+                    {
+                        "version": "codex-cli 0.142.2",
+                        "platform": _MOD.current_channel_platform(),
+                        "path": str(source_binary),
+                        "sha256": source_sha,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact = _MOD.select_channel_artifact(
+        channel_manifest=channel_manifest,
+        requested_version=None,
+        requested_platform=None,
+    )
+    cache_root = tmp_path / "cache"
+    _MOD.copy_codex_payload(
+        source_binary=wrong_binary,
+        destination_payload_dir=cache_root / "0.142.2",
+        version="codex-cli 0.142.2",
+        digest=wrong_sha,
+        source_kind="channel",
+        manifest_source_path=str(source_binary),
+        manifest_source_realpath=str(source_binary.resolve()),
+        channel_manifest_path=channel_manifest,
+        channel_artifact=artifact,
+    )
+
+    with pytest.raises(_MOD.ProvisioningError, match="sha256 mismatch"):
+        _MOD.provision_stock_codex_from_channel(
+            cache_root=cache_root,
+            channel_manifest=channel_manifest,
+            channel_version=None,
+            channel_platform=None,
+            expected_sha256=source_sha,
+            force=False,
+            allow_fork_codex=False,
+            allow_remote_channel_download=False,
+        )
+
+
+def test_official_channel_policy_rejects_before_cache_mutation(tmp_path: Path) -> None:
+    channel_manifest = tmp_path / "channel.json"
+    channel_manifest.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "kind": _MOD.CHANNEL_MANIFEST_KIND,
+                "latest": "0.142.2",
+                "artifacts": [
+                    {
+                        "version": "codex-cli 0.142.2",
+                        "platform": _MOD.current_channel_platform(),
+                        "url": "https://example.com/codex.tar.gz",
+                        "sha256": "b" * 64,
+                        "archiveFormat": "tar.gz",
+                        "archiveExecutable": "codex-aarch64-apple-darwin",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    cache_root = tmp_path / "cache"
+
+    with pytest.raises(_MOD.ProvisioningError, match="violates"):
+        _MOD.provision_stock_codex_from_channel(
+            cache_root=cache_root,
+            channel_manifest=channel_manifest,
+            channel_version=None,
+            channel_platform=None,
+            expected_sha256=None,
+            force=False,
+            allow_fork_codex=False,
+            allow_remote_channel_download=True,
+            channel_policy=_MOD.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY,
+        )
+
+    assert not cache_root.exists()
+
+
 def test_channel_manifest_sha_mismatch_fails_before_install(tmp_path: Path) -> None:
     source_binary = _write_codex_binary(tmp_path / "artifacts" / "codex")
     channel_manifest = tmp_path / "channel.json"
@@ -444,3 +693,12 @@ def test_main_rejects_remote_download_flag_without_channel_manifest(
     assert "--allow-remote-channel-download requires --channel-manifest" in (
         capsys.readouterr().err
     )
+
+
+def test_main_rejects_channel_policy_without_channel_manifest(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = _MOD.main(["--channel-policy", _MOD.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY])
+
+    assert rc == 1
+    assert "--channel-policy requires --channel-manifest" in capsys.readouterr().err
