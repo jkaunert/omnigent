@@ -142,6 +142,8 @@ def bootstrap(args: argparse.Namespace) -> dict[str, Any]:
         args.expected_sha256,
         "--json",
     ]
+    if args.channel_policy:
+        provision_command.extend(["--channel-policy", args.channel_policy])
     if args.allow_remote_channel_download:
         provision_command.append("--allow-remote-channel-download")
     provision = _run_json(provision_command, timeout=args.provision_timeout)
@@ -263,6 +265,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--channel-manifest", type=Path, required=True)
     parser.add_argument("--expected-sha256", required=True)
     parser.add_argument("--allow-remote-channel-download", action="store_true")
+    parser.add_argument("--channel-policy", default=None)
     parser.add_argument("--launcher-path", type=Path, default=DEFAULT_LAUNCHER_PATH)
     parser.add_argument("--manifest-path", type=Path, default=DEFAULT_MANIFEST_PATH)
     parser.add_argument("--adapter-package-dir", type=Path, default=DEFAULT_ADAPTER_PACKAGE_DIR)

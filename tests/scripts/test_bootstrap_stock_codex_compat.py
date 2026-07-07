@@ -262,6 +262,8 @@ def test_bootstrap_uses_staged_runtime_to_provision_and_install(
             str(channel_manifest),
             "--expected-sha256",
             "0" * 64,
+            "--channel-policy",
+            "official-openai-github-release",
             "--launcher-path",
             str(launcher_path),
             "--manifest-path",
@@ -287,6 +289,14 @@ def test_bootstrap_uses_staged_runtime_to_provision_and_install(
     ]
     assert all(args[args.index("--from") + 1] == str(staged_runtime) for args in invocations)
     assert any(any("provision_stock_codex.py" in item for item in args) for args in invocations)
+    provision_invocation = next(
+        args for args in invocations if any("provision_stock_codex.py" in item for item in args)
+    )
+    assert "--channel-policy" in provision_invocation
+    assert (
+        provision_invocation[provision_invocation.index("--channel-policy") + 1]
+        == "official-openai-github-release"
+    )
     assert any("--install-adapter-package" in args for args in invocations)
     assert any("--install" in args for args in invocations)
     assert any("--doctor" in args for args in invocations)

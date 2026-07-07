@@ -1624,6 +1624,31 @@ class StockCodexCompatPkgCleanVmProof:
     remote_output_preview: str | None
     tart_started: bool
     tart_stopped: bool
+    proof_variant: str = "file-backed-channel"
+    cask_token: str | None = None
+    cask_tap: str | None = None
+    cask_homepage: str | None = None
+    cask_version: str | None = None
+    cask_url: str | None = None
+    cask_sha256: str | None = None
+    archive_executable: str | None = None
+    channel_policy: str | None = None
+    host_stock_codex_uploaded: bool | None = None
+
+
+@dataclass(frozen=True)
+class _OfficialStockCodexRemoteChannel:
+    """Official Homebrew/OpenAI GitHub channel metadata for VM acquisition."""
+
+    policy_name: str
+    cask_token: str
+    cask_tap: str
+    cask_homepage: str
+    cask_version: str
+    cask_url: str
+    cask_sha256: str
+    selected_version: str
+    archive_executable: str
 
 
 class LiveProofTimeoutError(Exception):
@@ -12239,6 +12264,36 @@ def _resolve_clean_vm_ssh_target(
     return f"{ssh_user}@{tart_ip}", tart_ip, tart_started, ()
 
 
+def _official_stock_codex_remote_channel() -> _OfficialStockCodexRemoteChannel:
+    """Return validated official stock-Codex release metadata for remote acquisition."""
+    cask = _read_homebrew_codex_cask()
+    cask_url = _json_string(cask, "url")
+    cask_sha256 = _json_string(cask, "sha256").lower()
+    cask_version = _json_string(cask, "version")
+    cask_token = _json_string(cask, "token")
+    cask_tap = _json_string(cask, "tap")
+    cask_homepage = _json_string(cask, "homepage")
+    archive_executable = _homebrew_codex_binary_name(cask)
+    _validate_homebrew_codex_cask_metadata(
+        token=cask_token,
+        homepage=cask_homepage,
+        url=cask_url,
+        sha256=cask_sha256,
+    )
+    provisioner = _load_stock_codex_provisioner()
+    return _OfficialStockCodexRemoteChannel(
+        policy_name=provisioner.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY,
+        cask_token=cask_token,
+        cask_tap=cask_tap,
+        cask_homepage=cask_homepage,
+        cask_version=cask_version,
+        cask_url=cask_url,
+        cask_sha256=cask_sha256,
+        selected_version=f"codex-cli {cask_version}",
+        archive_executable=archive_executable,
+    )
+
+
 def _clean_vm_remote_script_text() -> str:
     """Return the shell script executed inside a disposable clean VM."""
     return r'''#!/bin/bash
@@ -12409,6 +12464,268 @@ printf 'stock_codex_compat_pkg_clean_vm_provisioned_codex=%s\n' "$provisioned_co
 '''
 
 
+def _clean_vm_remote_acquisition_script_text() -> str:
+    """Return the clean-VM script that downloads stock Codex inside the VM."""
+    return r'''#!/bin/bash
+set -euo pipefail
+
+pkg_path="$1"
+channel_manifest="$2"
+expected_pkg_sha="$3"
+expected_channel_sha="$4"
+expected_stock_version="$5"
+expected_channel_url="$6"
+channel_policy="$7"
+pkg_id="ai.omnigent.stock-codex-compat"
+install_prefix="/Library/Application Support/Omnigent/stock-codex-compat"
+runtime_root="$install_prefix/runtime"
+marker="$HOME/.omnigent-stock-codex-compat-clean-user-ok"
+proof_root="$HOME/.omnigent-stock-codex-compat-clean-vm-remote-acquisition-proof"
+clean_tmp="$proof_root/tmp"
+clean_codex_home="$HOME/.codex-omnigent-clean-user-canary"
+clean_cache_root="$HOME/.local/omnigent/codex-stock"
+launcher_path="$HOME/.local/bin/omnigent-stock-codex-compat"
+manifest_path="$HOME/.local/omnigent/launchers/stock-codex-compat.json"
+adapter_root="$HOME/.local/omnigent/stock-codex-compat"
+adapter_package_dir="$adapter_root/adapter-package"
+user_runtime_root="$adapter_root/runtime"
+
+fail() {
+  printf 'stock_codex_compat_pkg_clean_vm_remote_acquisition_error=%s\n' "$*" >&2
+  exit 70
+}
+
+have() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing tool: $1"
+}
+
+cleanup() {
+  rm -rf "$clean_codex_home" "$clean_cache_root" "$adapter_root" "$proof_root" || true
+  rm -f "$launcher_path" "$manifest_path" || true
+  rmdir "$HOME/.local/omnigent/launchers" 2>/dev/null || true
+  rmdir "$HOME/.local/omnigent" 2>/dev/null || true
+  rmdir "$HOME/.local/bin" 2>/dev/null || true
+  rmdir "$HOME/.local" 2>/dev/null || true
+  sudo -n rm -rf "$install_prefix" >/dev/null 2>&1 || true
+  sudo -n pkgutil --forget "$pkg_id" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+export PATH="$HOME/.local/bin:$PATH"
+for tool in shasum spctl pkgutil installer uvx sudo awk sed dirname grep; do
+  have "$tool"
+done
+sudo -n true >/dev/null 2>&1 || fail "sudo requires interactive authentication"
+
+[ -f "$marker" ] || fail "clean VM user home is not marked disposable: $marker"
+[ -f "$pkg_path" ] || fail "missing uploaded package: $pkg_path"
+[ -f "$channel_manifest" ] || fail "missing uploaded channel manifest: $channel_manifest"
+grep -q '"url"' "$channel_manifest" || fail "remote acquisition channel manifest lacks url"
+if grep -q '"path"' "$channel_manifest"; then
+  fail "remote acquisition channel manifest must not contain path-backed artifacts"
+fi
+
+for path in \
+  "$launcher_path" \
+  "$manifest_path" \
+  "$adapter_root" \
+  "$clean_cache_root" \
+  "$clean_codex_home" \
+  "$proof_root"; do
+  [ ! -e "$path" ] || fail "clean VM user state already exists: $path"
+done
+[ ! -e "$install_prefix" ] || fail "clean VM package payload already exists: $install_prefix"
+if pkgutil --pkg-info "$pkg_id" >/dev/null 2>&1; then
+  fail "clean VM package receipt already exists: $pkg_id"
+fi
+
+actual_pkg_sha="$(shasum -a 256 "$pkg_path" | awk '{print $1}')"
+[ "$actual_pkg_sha" = "$expected_pkg_sha" ] || fail "package sha mismatch: $actual_pkg_sha"
+
+spctl -a -vv -t install "$pkg_path"
+sudo -n installer -pkg "$pkg_path" -target /
+pkgutil --pkg-info "$pkg_id"
+installed_launcher_installer="$runtime_root/scripts/install_stock_codex_compat_launcher.py"
+installed_stock_provisioner="$runtime_root/scripts/provision_stock_codex.py"
+installed_bootstrapper="$runtime_root/scripts/bootstrap_stock_codex_compat.sh"
+[ -f "$installed_launcher_installer" ] || fail "installed launcher installer missing"
+[ -f "$installed_stock_provisioner" ] || fail "installed stock Codex provisioner missing"
+[ -f "$installed_bootstrapper" ] || fail "installed bootstrapper missing"
+[ -f "$runtime_root/omnigent/stock_codex_compat_wrapper.py" ] || fail "installed wrapper missing"
+
+mkdir -p "$clean_tmp" "$clean_codex_home"
+uvx_path="$(command -v uvx)"
+export HOME
+export TMPDIR="$clean_tmp"
+export CODEX_HOME="$clean_codex_home"
+export UV_CACHE_DIR="$proof_root/uv-cache"
+export UV_TOOL_DIR="$proof_root/uv-tools"
+export UV_PYTHON_INSTALL_DIR="$proof_root/uv-python"
+export XDG_CACHE_HOME="$proof_root/xdg-cache"
+export XDG_DATA_HOME="$proof_root/xdg-data"
+export PATH="$HOME/.local/bin:$(dirname "$uvx_path"):$PATH"
+
+bootstrap_output="$("$installed_bootstrapper" \
+  --user-runtime-root "$user_runtime_root" \
+  --uvx-path "$uvx_path" \
+  --cache-root "$clean_cache_root" \
+  --channel-manifest "$channel_manifest" \
+  --expected-sha256 "$expected_channel_sha" \
+  --allow-remote-channel-download \
+  --channel-policy "$channel_policy" \
+  --require-path-selected \
+  --force \
+  --json)"
+bootstrap_output_path="$proof_root/bootstrap-output.json"
+printf '%s\n' "$bootstrap_output" > "$bootstrap_output_path"
+printf '%s\n' "$bootstrap_output"
+[ -f "$user_runtime_root/scripts/install_stock_codex_compat_launcher.py" ] || \
+  fail "staged launcher installer missing"
+[ -f "$user_runtime_root/scripts/provision_stock_codex.py" ] || \
+  fail "staged stock Codex provisioner missing"
+[ -f "$user_runtime_root/omnigent/stock_codex_compat_wrapper.py" ] || \
+  fail "staged wrapper missing"
+launcher_installer="$user_runtime_root/scripts/install_stock_codex_compat_launcher.py"
+version_slug="$(
+  printf '%s\n' "$expected_stock_version" |
+    sed -E 's/^[^0-9]*([0-9]+(\.[0-9]+)+([-._A-Za-z0-9]+)?).*/\1/'
+)"
+provisioned_codex="$clean_cache_root/$version_slug/codex"
+[ -x "$provisioned_codex" ] || fail "remote-acquired stock Codex missing: $provisioned_codex"
+[ "$("$provisioned_codex" --version)" = "$expected_stock_version" ] || \
+  fail "remote-acquired stock Codex version mismatch"
+
+uvx --from "$user_runtime_root" python - \
+  "$bootstrap_output_path" \
+  "$channel_manifest" \
+  "$expected_channel_sha" \
+  "$expected_stock_version" \
+  "$expected_channel_url" \
+  "$clean_cache_root" \
+  "$provisioned_codex" \
+  "$channel_policy" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+(
+    bootstrap_output_path,
+    channel_manifest_path,
+    expected_channel_sha,
+    expected_stock_version,
+    expected_channel_url,
+    clean_cache_root,
+    provisioned_codex,
+    channel_policy,
+) = sys.argv[1:]
+
+bootstrap = json.loads(Path(bootstrap_output_path).read_text(encoding="utf-8"))
+provision = bootstrap.get("provision")
+if not isinstance(provision, dict):
+    raise SystemExit(f"bootstrap output omitted provision object: {bootstrap!r}")
+channel_artifact = provision.get("channelArtifact")
+if not isinstance(channel_artifact, dict):
+    raise SystemExit(f"remote acquisition omitted channel artifact: {provision!r}")
+if provision.get("version") != expected_stock_version:
+    raise SystemExit(f"unexpected remote-acquired version: {provision!r}")
+if provision.get("sourceKind") != "channel":
+    raise SystemExit(f"remote-acquired payload source kind mismatch: {provision!r}")
+if provision.get("sourcePath") != expected_channel_url:
+    raise SystemExit(f"remote-acquired payload source URL mismatch: {provision!r}")
+if channel_artifact.get("url") != expected_channel_url:
+    raise SystemExit(f"remote channel artifact URL mismatch: {channel_artifact!r}")
+if str(channel_artifact.get("sha256", "")).lower() != expected_channel_sha.lower():
+    raise SystemExit(f"remote channel artifact SHA mismatch: {channel_artifact!r}")
+if channel_artifact.get("archiveFormat") != "tar.gz":
+    raise SystemExit(f"remote channel artifact archive format mismatch: {channel_artifact!r}")
+codex_path = Path(str(provision.get("codexPath"))).resolve()
+expected_codex = Path(provisioned_codex).resolve()
+cache_root = Path(clean_cache_root).resolve()
+if codex_path != expected_codex:
+    raise SystemExit(f"remote-acquired Codex path mismatch: {codex_path} != {expected_codex}")
+try:
+    codex_path.relative_to(cache_root)
+except ValueError as exc:
+    raise SystemExit(f"remote-acquired Codex escaped cache root: {codex_path}") from exc
+manifest_path = Path(str(provision.get("manifestPath"))).resolve()
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+if manifest.get("sourcePath") != expected_channel_url:
+    raise SystemExit(f"remote-acquired manifest source mismatch: {manifest!r}")
+if manifest.get("channelArtifact") != channel_artifact:
+    raise SystemExit(f"remote-acquired manifest artifact mismatch: {manifest!r}")
+channel = json.loads(Path(channel_manifest_path).read_text(encoding="utf-8"))
+artifacts = channel.get("artifacts")
+if not isinstance(artifacts, list) or not artifacts:
+    raise SystemExit(f"remote channel manifest has no artifacts: {channel!r}")
+if any(isinstance(artifact, dict) and "path" in artifact for artifact in artifacts):
+    raise SystemExit(f"remote channel manifest included a path artifact: {channel!r}")
+if not any(
+    isinstance(artifact, dict)
+    and artifact.get("url") == expected_channel_url
+    and str(artifact.get("sha256", "")).lower() == expected_channel_sha.lower()
+    for artifact in artifacts
+):
+    raise SystemExit(f"remote channel manifest did not preserve expected URL/SHA: {channel!r}")
+print(json.dumps({
+    "binarySha256": provision.get("sha256"),
+    "channelPolicy": channel_policy,
+    "remoteAcquisitionUrl": expected_channel_url,
+}, sort_keys=True))
+PY
+export OMNIGENT_STOCK_CODEX_PATH="$provisioned_codex"
+
+selected="$(command -v omnigent-stock-codex-compat)"
+[ "$selected" = "$launcher_path" ] || fail "selected wrong launcher: $selected"
+[ "$("$selected" --version)" = "$expected_stock_version" ] || \
+  fail "launcher version delegation mismatch"
+probe_output="$("$selected" --omnigent-stock-codex-compat-launcher-probe)"
+case "$probe_output" in
+  *OMNIGENT_STOCK_CODEX_COMPAT_LAUNCHER_OK*) ;;
+  *) fail "launcher probe sentinel missing" ;;
+esac
+
+uvx --from "$user_runtime_root" python - <<'PY'
+import json
+from omnigent import codex_native
+source = codex_native._resolve_codex_auth_source()
+reason = codex_native._codex_auth_unavailable_reason()
+print(json.dumps({"authPath": str(source.auth_path), "unavailableReason": reason}, sort_keys=True))
+if reason != "needs-auth":
+    raise SystemExit(f"expected needs-auth for clean VM CODEX_HOME, got {reason!r}")
+PY
+
+uvx --from "$user_runtime_root" python "$launcher_installer" \
+  --uninstall \
+  --launcher-path "$launcher_path" \
+  --manifest-path "$manifest_path" \
+  --json
+[ ! -e "$launcher_path" ] || fail "launcher remained after uninstall"
+[ ! -e "$manifest_path" ] || fail "manifest remained after uninstall"
+rm -rf "$clean_codex_home" "$clean_cache_root" "$adapter_root" "$proof_root"
+sudo -n rm -rf "$install_prefix"
+sudo -n pkgutil --forget "$pkg_id"
+if pkgutil --pkg-info "$pkg_id" >/dev/null 2>&1; then
+  fail "package receipt remained after cleanup"
+fi
+
+printf 'stock_codex_compat_pkg_clean_vm_remote_acquisition_status=replacement-ready\n'
+printf 'stock_codex_compat_pkg_clean_vm_remote_acquisition_home=%s\n' "$HOME"
+printf 'stock_codex_compat_pkg_clean_vm_remote_acquisition_runtime_root=%s\n' "$runtime_root"
+printf '%s=%s\n' \
+  'stock_codex_compat_pkg_clean_vm_remote_acquisition_user_runtime_root' \
+  "$user_runtime_root"
+printf '%s=%s\n' \
+  'stock_codex_compat_pkg_clean_vm_remote_acquisition_channel_url' \
+  "$expected_channel_url"
+printf '%s=%s\n' \
+  'stock_codex_compat_pkg_clean_vm_remote_acquisition_channel_sha256' \
+  "$expected_channel_sha"
+printf '%s=%s\n' \
+  'stock_codex_compat_pkg_clean_vm_remote_acquisition_provisioned_codex' \
+  "$provisioned_codex"
+'''
+
+
 def run_stock_codex_compat_pkg_clean_vm_proof(
     stock_codex_path: Path,
     *,
@@ -12419,6 +12736,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
     clean_vm_ssh_user: str | None,
     clean_vm_ssh_port: int,
     clean_vm_start_tart: bool,
+    remote_channel: _OfficialStockCodexRemoteChannel | None = None,
 ) -> StockCodexCompatPkgCleanVmProof:
     """Run signed-pkg lifecycle inside a disposable clean macOS VM over SSH."""
     stock_codex_path = stock_codex_path.expanduser().resolve()
@@ -12430,6 +12748,26 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
         "scp": shutil.which("scp"),
         "tart": shutil.which("tart"),
     }
+
+    def decorate_clean_vm_proof(
+        proof: StockCodexCompatPkgCleanVmProof,
+    ) -> StockCodexCompatPkgCleanVmProof:
+        if remote_channel is None:
+            return proof
+        return replace(
+            proof,
+            proof_variant="official-remote-channel-acquisition",
+            cask_token=remote_channel.cask_token,
+            cask_tap=remote_channel.cask_tap,
+            cask_homepage=remote_channel.cask_homepage,
+            cask_version=remote_channel.cask_version,
+            cask_url=remote_channel.cask_url,
+            cask_sha256=remote_channel.cask_sha256,
+            archive_executable=remote_channel.archive_executable,
+            channel_policy=remote_channel.policy_name,
+            host_stock_codex_uploaded=False,
+        )
+
     missing: list[str] = []
     if not tool_paths["ssh"]:
         missing.append("missing tool: ssh")
@@ -12468,21 +12806,23 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
         target_missing = (str(exc),)
     missing.extend(target_missing)
     if missing:
-        return _blocked_stock_codex_compat_pkg_clean_vm_proof(
-            tool_paths=tool_paths,
-            missing_prerequisites=tuple(missing),
-            stock_codex_path=stock_codex_path,
-            stock_codex_version=stock_codex_version,
-            stock_codex_sha256=stock_codex_sha256,
-            package_path=package_path,
-            package_sha256=package_sha256,
-            tart_name=clean_vm_tart_name,
-            ssh_target=resolved_target or clean_vm_ssh_target,
-            ssh_identity=clean_vm_ssh_identity,
-            ssh_user=clean_vm_ssh_user,
-            ssh_port=clean_vm_ssh_port,
-            tart_ip=tart_ip,
-            tart_started=tart_started,
+        return decorate_clean_vm_proof(
+            _blocked_stock_codex_compat_pkg_clean_vm_proof(
+                tool_paths=tool_paths,
+                missing_prerequisites=tuple(missing),
+                stock_codex_path=stock_codex_path,
+                stock_codex_version=stock_codex_version,
+                stock_codex_sha256=stock_codex_sha256,
+                package_path=package_path,
+                package_sha256=package_sha256,
+                tart_name=clean_vm_tart_name,
+                ssh_target=resolved_target or clean_vm_ssh_target,
+                ssh_identity=clean_vm_ssh_identity,
+                ssh_user=clean_vm_ssh_user,
+                ssh_port=clean_vm_ssh_port,
+                tart_ip=tart_ip,
+                tart_started=tart_started,
+            )
         )
     assert package_path is not None
     assert package_sha256 is not None
@@ -12518,7 +12858,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                 timeout=60,
             )
             tart_stopped = stop.returncode == 0
-        return replace(proof, tart_stopped=tart_stopped)
+        return decorate_clean_vm_proof(replace(proof, tart_stopped=tart_stopped))
 
     try:
         ssh_ready = _wait_for_clean_vm_ssh(
@@ -12592,34 +12932,89 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
         ) as temp_root:
             root = Path(temp_root)
             script_path = root / "clean_vm_proof.sh"
-            script_path.write_text(_clean_vm_remote_script_text(), encoding="utf-8")
-            script_path.chmod(0o755)
-            channel_manifest = root / "channel.json"
-            channel_manifest.write_text(
-                json.dumps(
-                    {
-                        "schemaVersion": 1,
-                        "kind": "omnigent-stock-codex-channel",
-                        "latest": stock_codex_version,
-                        "artifacts": [
-                            {
-                                "version": stock_codex_version,
-                                "path": "codex",
-                                "sha256": stock_codex_sha256,
-                            }
-                        ],
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n",
+            script_path.write_text(
+                _clean_vm_remote_acquisition_script_text()
+                if remote_channel is not None
+                else _clean_vm_remote_script_text(),
                 encoding="utf-8",
             )
-            upload_plan = (
-                (package_path, f"{remote_work_dir}/omnigent-stock-codex-compat.pkg"),
-                (stock_codex_path, f"{remote_work_dir}/codex"),
-                (channel_manifest, f"{remote_work_dir}/channel.json"),
-                (script_path, f"{remote_work_dir}/clean_vm_proof.sh"),
+            script_path.chmod(0o755)
+            channel_manifest = root / "channel.json"
+            if remote_channel is None:
+                channel_payload = {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-channel",
+                    "latest": stock_codex_version,
+                    "artifacts": [
+                        {
+                            "version": stock_codex_version,
+                            "path": "codex",
+                            "sha256": stock_codex_sha256,
+                        }
+                    ],
+                }
+                upload_plan = (
+                    (package_path, f"{remote_work_dir}/omnigent-stock-codex-compat.pkg"),
+                    (stock_codex_path, f"{remote_work_dir}/codex"),
+                    (channel_manifest, f"{remote_work_dir}/channel.json"),
+                    (script_path, f"{remote_work_dir}/clean_vm_proof.sh"),
+                )
+                chmod_targets = (
+                    f"{remote_work_dir}/codex",
+                    f"{remote_work_dir}/clean_vm_proof.sh",
+                )
+                remote_command_args = (
+                    "/bin/bash",
+                    f"{remote_work_dir}/clean_vm_proof.sh",
+                    f"{remote_work_dir}/omnigent-stock-codex-compat.pkg",
+                    f"{remote_work_dir}/channel.json",
+                    f"{remote_work_dir}/codex",
+                    package_sha256,
+                    stock_codex_sha256,
+                    stock_codex_version,
+                )
+                success_sentinel = (
+                    "stock_codex_compat_pkg_clean_vm_status=replacement-ready"
+                )
+            else:
+                channel_payload = {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-channel",
+                    "latest": remote_channel.cask_version,
+                    "artifacts": [
+                        {
+                            "version": remote_channel.selected_version,
+                            "url": remote_channel.cask_url,
+                            "sha256": remote_channel.cask_sha256,
+                            "archiveFormat": "tar.gz",
+                            "archiveExecutable": remote_channel.archive_executable,
+                        }
+                    ],
+                }
+                upload_plan = (
+                    (package_path, f"{remote_work_dir}/omnigent-stock-codex-compat.pkg"),
+                    (channel_manifest, f"{remote_work_dir}/channel.json"),
+                    (script_path, f"{remote_work_dir}/clean_vm_proof.sh"),
+                )
+                chmod_targets = (f"{remote_work_dir}/clean_vm_proof.sh",)
+                remote_command_args = (
+                    "/bin/bash",
+                    f"{remote_work_dir}/clean_vm_proof.sh",
+                    f"{remote_work_dir}/omnigent-stock-codex-compat.pkg",
+                    f"{remote_work_dir}/channel.json",
+                    package_sha256,
+                    remote_channel.cask_sha256,
+                    remote_channel.selected_version,
+                    remote_channel.cask_url,
+                    remote_channel.policy_name,
+                )
+                success_sentinel = (
+                    "stock_codex_compat_pkg_clean_vm_remote_acquisition_status="
+                    "replacement-ready"
+                )
+            channel_manifest.write_text(
+                json.dumps(channel_payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
             )
             for source, destination in upload_plan:
                 upload = _copy_clean_vm_file(
@@ -12660,12 +13055,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
             chmod_remote = _run_clean_vm_ssh_command(
                 " ".join(
                     shlex.quote(part)
-                    for part in (
-                        "chmod",
-                        "+x",
-                        f"{remote_work_dir}/codex",
-                        f"{remote_work_dir}/clean_vm_proof.sh",
-                    )
+                    for part in ("chmod", "+x", *chmod_targets)
                 ),
                 ssh_path=tool_paths["ssh"],
                 ssh_target=resolved_target,
@@ -12700,17 +13090,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     )
                 )
             remote_command = " ".join(
-                shlex.quote(part)
-                for part in (
-                    "/bin/bash",
-                    f"{remote_work_dir}/clean_vm_proof.sh",
-                    f"{remote_work_dir}/omnigent-stock-codex-compat.pkg",
-                    f"{remote_work_dir}/channel.json",
-                    f"{remote_work_dir}/codex",
-                    package_sha256,
-                    stock_codex_sha256,
-                    stock_codex_version,
-                )
+                shlex.quote(part) for part in remote_command_args
             )
             remote = _run_clean_vm_ssh_command(
                 remote_command,
@@ -12723,8 +13103,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
             remote_output = (remote.stdout or "") + (remote.stderr or "")
             if (
                 remote.returncode != 0
-                or "stock_codex_compat_pkg_clean_vm_status=replacement-ready"
-                not in remote_output
+                or success_sentinel not in remote_output
             ):
                 return finalize_clean_vm_proof(
                     _blocked_stock_codex_compat_pkg_clean_vm_proof(
@@ -12790,6 +13169,31 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                 timeout=60,
             )
             tart_stopped = stop.returncode == 0
+
+
+def run_stock_codex_compat_pkg_clean_vm_remote_acquisition_proof(
+    stock_codex_path: Path,
+    *,
+    package_path: Path | None,
+    clean_vm_ssh_target: str | None,
+    clean_vm_tart_name: str | None,
+    clean_vm_ssh_identity: Path | None,
+    clean_vm_ssh_user: str | None,
+    clean_vm_ssh_port: int,
+    clean_vm_start_tart: bool,
+) -> StockCodexCompatPkgCleanVmProof:
+    """Run clean-VM signed-pkg proof with in-VM official release acquisition."""
+    return run_stock_codex_compat_pkg_clean_vm_proof(
+        stock_codex_path,
+        package_path=package_path,
+        clean_vm_ssh_target=clean_vm_ssh_target,
+        clean_vm_tart_name=clean_vm_tart_name,
+        clean_vm_ssh_identity=clean_vm_ssh_identity,
+        clean_vm_ssh_user=clean_vm_ssh_user,
+        clean_vm_ssh_port=clean_vm_ssh_port,
+        clean_vm_start_tart=clean_vm_start_tart,
+        remote_channel=_official_stock_codex_remote_channel(),
+    )
 
 
 def _expand_stock_codex_compat_pkg(package_path: Path, expand_dir: Path) -> Path:
@@ -16302,6 +16706,113 @@ def print_stock_codex_compat_pkg_clean_vm_proof(
         "ASSERTION: a signed and notarized compatibility pkg can install into "
         "a disposable clean VM's real /Library, bootstrap the VM user, classify "
         "clean auth, roll back user state, and remove package payload plus receipt"
+    )
+
+
+def print_stock_codex_compat_pkg_clean_vm_remote_acquisition_proof(
+    proof: StockCodexCompatPkgCleanVmProof,
+) -> None:
+    """Emit operator evidence for the clean VM remote-acquisition pkg proof."""
+    print("stock_codex_compat_pkg_clean_vm_remote_acquisition_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_clean_vm_remote_acquisition_surface="
+        "signed-pkg-clean-vm-real-library-install-official-remote-stock-codex-"
+        "acquisition"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_remote_acquisition_status={proof.status}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_remote_acquisition_missing_prerequisites="
+        f"{json.dumps(list(proof.missing_prerequisites), sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_remote_acquisition_tool_paths="
+        f"{json.dumps(proof.tool_paths, sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_remote_acquisition_host_reference_codex_path="
+        f"{proof.stock_codex_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_remote_acquisition_host_reference_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_remote_acquisition_host_reference_sha256="
+        f"{proof.stock_codex_sha256}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_remote_acquisition_package_path="
+        f"{proof.package_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_remote_acquisition_package_sha256="
+        f"{proof.package_sha256}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_remote_acquisition_cask_token={proof.cask_token}")
+    print(f"stock_codex_compat_pkg_clean_vm_remote_acquisition_cask_tap={proof.cask_tap}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_remote_acquisition_cask_homepage="
+        f"{proof.cask_homepage}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_remote_acquisition_cask_version={proof.cask_version}")
+    print(f"stock_codex_compat_pkg_clean_vm_remote_acquisition_cask_url={proof.cask_url}")
+    print(f"stock_codex_compat_pkg_clean_vm_remote_acquisition_cask_sha256={proof.cask_sha256}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_remote_acquisition_archive_executable="
+        f"{proof.archive_executable}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_remote_acquisition_channel_policy="
+        f"{proof.channel_policy}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_remote_acquisition_host_stock_codex_uploaded="
+        f"{proof.host_stock_codex_uploaded}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_remote_acquisition_tart_name={proof.tart_name}")
+    print(f"stock_codex_compat_pkg_clean_vm_remote_acquisition_ssh_target={proof.ssh_target}")
+    print(f"stock_codex_compat_pkg_clean_vm_remote_acquisition_ssh_identity={proof.ssh_identity}")
+    print(f"stock_codex_compat_pkg_clean_vm_remote_acquisition_ssh_user={proof.ssh_user}")
+    print(f"stock_codex_compat_pkg_clean_vm_remote_acquisition_ssh_port={proof.ssh_port}")
+    print(f"stock_codex_compat_pkg_clean_vm_remote_acquisition_tart_ip={proof.tart_ip}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_remote_acquisition_remote_work_dir="
+        f"{proof.remote_work_dir}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_remote_acquisition_remote_status="
+        f"{proof.remote_status}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_remote_acquisition_tart_started="
+        f"{proof.tart_started}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_remote_acquisition_tart_stopped="
+        f"{proof.tart_stopped}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_remote_acquisition_remote_output="
+        f"{proof.remote_output_preview!r}"
+    )
+    if proof.status == "blocked":
+        print(
+            "ASSERTION: clean VM remote acquisition is blocked by missing "
+            "official-channel metadata, a missing disposable VM SSH/Tart target, "
+            "missing package artifact, unreachable SSH, interactive sudo, "
+            "missing VM uvx, missing operator marker, or preexisting VM state"
+        )
+        return
+    print(
+        "ASSERTION: a signed and notarized compatibility pkg can install into "
+        "a disposable clean VM's real /Library and acquire stock Codex inside "
+        "that VM from the official OpenAI GitHub release archive"
+    )
+    print(
+        "ASSERTION: the remote-acquisition clean VM path does not upload the "
+        "host stock Codex binary, enforces the official channel policy, "
+        "classifies clean auth, rolls back user state, and removes package "
+        "payload plus receipt"
     )
 
 
@@ -20882,6 +21393,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-pkg-clean-user-canary",
             "stock-codex-compat-pkg-external-clean-user",
             "stock-codex-compat-pkg-clean-vm",
+            "stock-codex-compat-pkg-clean-vm-remote-acquisition",
             "stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
             "stock-codex-compat-wrapper-xcodebuild-bridge-test-adapter",
             "stock-codex-compat-wrapper-relay-tool",
@@ -21048,6 +21560,13 @@ def parse_args() -> argparse.Namespace:
             "VM user's compatibility launcher, classifies clean auth, rolls "
             "back user state, then removes package payload and receipt state; "
             "the VM user home must contain the disposable marker. "
+            "'stock-codex-compat-pkg-clean-vm-remote-acquisition' consumes "
+            "--pkg-path and either --clean-vm-ssh-target or "
+            "--clean-vm-tart-name, copies only the signed/notarized pkg plus "
+            "an official URL-backed stock Codex channel manifest into the "
+            "disposable VM, then proves the packaged runtime downloads, "
+            "verifies, extracts, bootstraps, rolls back, and cleans up stock "
+            "Codex inside the VM without a host-copied Codex binary. "
             "'stock-codex-compat-wrapper-xcodebuild-bridge-adapter' proves "
             "that XcodeBuildMCP simulator build/run can execute through the "
             "same wrapper-owned file bridge while stock Codex stays in "
@@ -21189,17 +21708,17 @@ def parse_args() -> argparse.Namespace:
         "--clean-vm-ssh-target",
         default=None,
         help=(
-            "SSH target for stock-codex-compat-pkg-clean-vm, for example "
-            "admin@192.168.64.10. The remote user's home must contain "
-            f"{EXTERNAL_CLEAN_USER_MARKER_NAME}; the VM must allow "
-            "noninteractive sudo for package install and cleanup."
+            "SSH target for the stock-codex-compat-pkg-clean-vm proofs, for "
+            f"example admin@192.168.64.10. The remote user's home must contain "
+            f"{EXTERNAL_CLEAN_USER_MARKER_NAME}; the VM must allow noninteractive "
+            "sudo for package install and cleanup."
         ),
     )
     parser.add_argument(
         "--clean-vm-tart-name",
         default=None,
         help=(
-            "Optional Tart VM name for stock-codex-compat-pkg-clean-vm. "
+            "Optional Tart VM name for the stock-codex-compat-pkg-clean-vm proofs. "
             "When set, the proof resolves the VM IP with tart and builds the "
             "SSH target from --clean-vm-ssh-user."
         ),
@@ -21216,14 +21735,14 @@ def parse_args() -> argparse.Namespace:
         "--clean-vm-ssh-port",
         type=int,
         default=22,
-        help="SSH port for stock-codex-compat-pkg-clean-vm. Defaults to 22.",
+        help="SSH port for the stock-codex-compat-pkg-clean-vm proofs. Defaults to 22.",
     )
     parser.add_argument(
         "--clean-vm-ssh-identity",
         type=Path,
         default=None,
         help=(
-            "Optional SSH identity file for stock-codex-compat-pkg-clean-vm. "
+            "Optional SSH identity file for the stock-codex-compat-pkg-clean-vm proofs. "
             "Use when the disposable VM accepts a key that is not loaded in "
             "the host ssh-agent or configured for the VM IP."
         ),
@@ -21874,6 +22393,44 @@ def main() -> int:
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_stock_codex_compat_pkg_clean_vm_proof(
             run_stock_codex_compat_pkg_clean_vm_proof(
+                codex_path,
+                package_path=args.pkg_path,
+                clean_vm_ssh_target=args.clean_vm_ssh_target,
+                clean_vm_tart_name=args.clean_vm_tart_name,
+                clean_vm_ssh_identity=args.clean_vm_ssh_identity,
+                clean_vm_ssh_user=args.clean_vm_ssh_user,
+                clean_vm_ssh_port=args.clean_vm_ssh_port,
+                clean_vm_start_tart=args.clean_vm_start_tart,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-clean-vm-remote-acquisition":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-remote-acquisition does not use "
+                "--apple-bundle; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-remote-acquisition cannot allow a "
+                "Codex-fork binary."
+            )
+        if args.pkg_output_path is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-remote-acquisition consumes "
+                "--pkg-path; produce persistent packages with "
+                "stock-codex-compat-pkg-signed-notarized."
+            )
+        if args.pkg_path is None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-remote-acquisition requires "
+                "--pkg-path from stock-codex-compat-pkg-signed-notarized."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_pkg_clean_vm_remote_acquisition_proof(
+            run_stock_codex_compat_pkg_clean_vm_remote_acquisition_proof(
                 codex_path,
                 package_path=args.pkg_path,
                 clean_vm_ssh_target=args.clean_vm_ssh_target,
