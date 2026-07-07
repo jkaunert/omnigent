@@ -250,6 +250,7 @@ dev = [
 # `omni` ship, internal and OSS alike.)
 omnigent = "omnigent.cli:main"
 omni = "omnigent.cli:main"
+omnigent-stock-codex-wrapper = "omnigent.stock_codex_compat_wrapper:main"
 
 # uv path-deps for the sibling SDK packages (renamed in Stage 3).
 [tool.uv.sources]

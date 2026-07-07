@@ -3,10 +3,22 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import textwrap
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+from omnigent.adapters.stock_codex_compat import (
+    StockCodexCompatAdapterCommandSpec,
+    build_stock_codex_compat_file_bridge_command_source,
+)
+from omnigent.stock_codex_adapter_bridge import (
+    AdapterBridgeHandler,
+    AdapterBridgeResponse,
+    require_string_argument,
+)
 
 XCODEBUILD_CLI_BUILD_RUN_TOOL_NAME = "xcodebuildmcp_simulator_build_run"
 XCODEBUILD_CLI_TOOL_NAME = XCODEBUILD_CLI_BUILD_RUN_TOOL_NAME
@@ -223,6 +235,120 @@ class XcodeBuildCliAdapterPolicy:
 
 
 DEFAULT_XCODEBUILD_CLI_POLICY = XcodeBuildCliAdapterPolicy()
+
+
+def xcodebuild_bridge_subprocess_env(
+    policy: XcodeBuildCliAdapterPolicy = DEFAULT_XCODEBUILD_CLI_POLICY,
+) -> dict[str, str]:
+    """Return the XcodeBuildMCP CLI subprocess env used by bridge handlers."""
+    env = {**os.environ, **dict(policy.env_overrides)}
+    env.pop(policy.target_axe_path_env_var, None)
+    axe_path = policy.axe_path or os.environ.get(policy.axe_path_env_var, "").strip()
+    if axe_path:
+        env[policy.target_axe_path_env_var] = str(Path(axe_path).expanduser())
+    return env
+
+
+def build_xcodebuildmcp_simulator_build_run_stock_codex_bridge_handler(
+    policy: XcodeBuildCliAdapterPolicy = DEFAULT_XCODEBUILD_CLI_POLICY,
+) -> AdapterBridgeHandler:
+    """Build the wrapper-side file-bridge handler for simulator build/run."""
+
+    def handler(arguments: Mapping[str, object]) -> AdapterBridgeResponse:
+        try:
+            completed = subprocess.run(
+                policy.command_for_build_run(
+                    project_path=require_string_argument(arguments, "project_path"),
+                    scheme=require_string_argument(arguments, "scheme"),
+                    configuration=require_string_argument(arguments, "configuration"),
+                    simulator_name=require_string_argument(arguments, "simulator_name"),
+                    derived_data_path=require_string_argument(arguments, "derived_data_path"),
+                    extra_args=["-quiet"],
+                    use_latest_os=True,
+                ),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=policy.timeout_seconds,
+                env=xcodebuild_bridge_subprocess_env(policy),
+            )
+        except subprocess.TimeoutExpired:
+            return AdapterBridgeResponse.error(
+                "Error: xcodebuildmcp CLI timed out after "
+                f"{policy.timeout_seconds} seconds.",
+                exit_code=75,
+            )
+        return AdapterBridgeResponse.from_completed_process(
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            returncode=completed.returncode,
+        )
+
+    return handler
+
+
+def _xcodebuild_stock_codex_build_run_parameters() -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {
+            "project_path": {
+                "type": "string",
+                "description": "Absolute path to an .xcodeproj.",
+            },
+            "scheme": {
+                "type": "string",
+                "description": "Xcode scheme to build and run.",
+            },
+            "configuration": {
+                "type": "string",
+                "description": "Xcode build configuration.",
+            },
+            "simulator_name": {
+                "type": "string",
+                "description": "Target iOS simulator name.",
+            },
+            "derived_data_path": {
+                "type": "string",
+                "description": "Temporary DerivedData output path.",
+            },
+        },
+        "required": [
+            "project_path",
+            "scheme",
+            "configuration",
+            "simulator_name",
+            "derived_data_path",
+        ],
+        "additionalProperties": False,
+    }
+
+
+def build_xcodebuildmcp_simulator_build_run_stock_codex_bridge_adapter_spec(
+    policy: XcodeBuildCliAdapterPolicy = DEFAULT_XCODEBUILD_CLI_POLICY,
+    *,
+    bridge_timeout_seconds: int = 240,
+) -> StockCodexCompatAdapterCommandSpec:
+    """Build a stock-Codex bridge adapter for simulator build/run."""
+    return StockCodexCompatAdapterCommandSpec(
+        name=policy.tool_name,
+        capability="xcodebuildmcp-simulator-build-run",
+        description=(
+            "Build, install, and launch an iOS simulator app through the "
+            "Omnigent wrapper bridge."
+        ),
+        parameters=_xcodebuild_stock_codex_build_run_parameters(),
+        command_source=build_stock_codex_compat_file_bridge_command_source(
+            policy.tool_name,
+            (
+                "project_path",
+                "scheme",
+                "configuration",
+                "simulator_name",
+                "derived_data_path",
+            ),
+            timeout_seconds=bridge_timeout_seconds,
+        ),
+    )
 
 
 def build_xcodebuildmcp_simulator_build_run_tool_source(
