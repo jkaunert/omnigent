@@ -32,6 +32,8 @@ BUNDLE_MANIFEST_NAME = "bundle-manifest.json"
 POSTINSTALL_NAME = "postinstall"
 INSTALLER_RELATIVE_PATH = "scripts/install_stock_codex_compat_launcher.py"
 PROVISIONER_RELATIVE_PATH = "scripts/provision_stock_codex.py"
+BOOTSTRAP_SHELL_RELATIVE_PATH = "scripts/bootstrap_stock_codex_compat.sh"
+BOOTSTRAP_PYTHON_RELATIVE_PATH = "scripts/bootstrap_stock_codex_compat.py"
 WRAPPER_RELATIVE_PATH = "omnigent/stock_codex_compat_wrapper.py"
 
 
@@ -44,6 +46,8 @@ def required_payload_files_for(install_prefix: Path) -> tuple[str, ...]:
         f"{prefix}/{RUNTIME_ROOT_NAME}/pyproject.toml",
         f"{prefix}/{RUNTIME_ROOT_NAME}/{INSTALLER_RELATIVE_PATH}",
         f"{prefix}/{RUNTIME_ROOT_NAME}/{PROVISIONER_RELATIVE_PATH}",
+        f"{prefix}/{RUNTIME_ROOT_NAME}/{BOOTSTRAP_SHELL_RELATIVE_PATH}",
+        f"{prefix}/{RUNTIME_ROOT_NAME}/{BOOTSTRAP_PYTHON_RELATIVE_PATH}",
         f"{prefix}/{RUNTIME_ROOT_NAME}/{WRAPPER_RELATIVE_PATH}",
     )
 
@@ -247,6 +251,8 @@ def _write_postinstall(script_path: Path, *, install_prefix: Path) -> None:
         'runtime_root="${target_prefix}${install_prefix}/runtime"\n'
         'installer_path="${runtime_root}/scripts/install_stock_codex_compat_launcher.py"\n'
         'provisioner_path="${runtime_root}/scripts/provision_stock_codex.py"\n'
+        'bootstrap_shell_path="${runtime_root}/scripts/bootstrap_stock_codex_compat.sh"\n'
+        'bootstrap_python_path="${runtime_root}/scripts/bootstrap_stock_codex_compat.py"\n'
         'if [ ! -d "$runtime_root" ]; then\n'
         '  echo "Omnigent runtime root missing: $runtime_root" >&2\n'
         "  exit 1\n"
@@ -257,6 +263,14 @@ def _write_postinstall(script_path: Path, *, install_prefix: Path) -> None:
         "fi\n"
         'if [ ! -f "$provisioner_path" ]; then\n'
         '  echo "Omnigent stock Codex provisioner missing: $provisioner_path" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        'if [ ! -f "$bootstrap_shell_path" ]; then\n'
+        '  echo "Omnigent stock Codex bootstrapper missing: $bootstrap_shell_path" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        'if [ ! -f "$bootstrap_python_path" ]; then\n'
+        '  echo "Omnigent stock Codex bootstrapper missing: $bootstrap_python_path" >&2\n'
         "  exit 1\n"
         "fi\n"
         "exit 0\n",
@@ -443,6 +457,12 @@ def _copy_runtime_payload(
         "installer": str(install_prefix / RUNTIME_ROOT_NAME / INSTALLER_RELATIVE_PATH),
         "stockCodexProvisioner": str(
             install_prefix / RUNTIME_ROOT_NAME / PROVISIONER_RELATIVE_PATH
+        ),
+        "userBootstrapper": str(
+            install_prefix / RUNTIME_ROOT_NAME / BOOTSTRAP_SHELL_RELATIVE_PATH
+        ),
+        "userBootstrapperPython": str(
+            install_prefix / RUNTIME_ROOT_NAME / BOOTSTRAP_PYTHON_RELATIVE_PATH
         ),
         "wrapperEntrypoint": "omnigent-stock-codex-wrapper",
         "defaultLauncherCommand": "omnigent-stock-codex-compat",

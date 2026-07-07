@@ -56,6 +56,14 @@ def test_build_stock_codex_compat_bundle_contains_runtime_contract(
         repo_root / "scripts" / "provision_stock_codex.py",
         "#!/usr/bin/env python3\n",
     )
+    _write_file(
+        repo_root / "scripts" / "bootstrap_stock_codex_compat.sh",
+        "#!/bin/bash\n",
+    )
+    _write_file(
+        repo_root / "scripts" / "bootstrap_stock_codex_compat.py",
+        "#!/usr/bin/env python3\n",
+    )
     output_path = tmp_path / "out" / "bundle.tar.gz"
 
     result = _MOD.build_stock_codex_compat_bundle(
@@ -65,7 +73,7 @@ def test_build_stock_codex_compat_bundle_contains_runtime_contract(
 
     assert result.bundle_path == output_path.resolve()
     assert len(result.sha256) == 64
-    assert result.included_file_count == 10
+    assert result.included_file_count == 12
     with tarfile.open(output_path, "r:gz") as archive:
         names = set(archive.getnames())
         manifest_member = (
@@ -84,6 +92,16 @@ def test_build_stock_codex_compat_bundle_contains_runtime_contract(
         assert (
             "omnigent-stock-codex-compat-bundle/runtime/"
             "scripts/provision_stock_codex.py"
+            in names
+        )
+        assert (
+            "omnigent-stock-codex-compat-bundle/runtime/"
+            "scripts/bootstrap_stock_codex_compat.sh"
+            in names
+        )
+        assert (
+            "omnigent-stock-codex-compat-bundle/runtime/"
+            "scripts/bootstrap_stock_codex_compat.py"
             in names
         )
         assert (
@@ -108,6 +126,12 @@ def test_build_stock_codex_compat_bundle_contains_runtime_contract(
         "runtime/scripts/install_stock_codex_compat_launcher.py"
     )
     assert manifest["stockCodexProvisioner"] == "runtime/scripts/provision_stock_codex.py"
+    assert manifest["userBootstrapper"] == (
+        "runtime/scripts/bootstrap_stock_codex_compat.sh"
+    )
+    assert manifest["userBootstrapperPython"] == (
+        "runtime/scripts/bootstrap_stock_codex_compat.py"
+    )
     assert manifest["includedFileCount"] == result.included_file_count
 
 
@@ -124,6 +148,14 @@ def test_build_stock_codex_compat_bundle_cli_outputs_json(
     )
     _write_file(
         repo_root / "scripts" / "provision_stock_codex.py",
+        "#!/usr/bin/env python3\n",
+    )
+    _write_file(
+        repo_root / "scripts" / "bootstrap_stock_codex_compat.sh",
+        "#!/bin/bash\n",
+    )
+    _write_file(
+        repo_root / "scripts" / "bootstrap_stock_codex_compat.py",
         "#!/usr/bin/env python3\n",
     )
     output_path = tmp_path / "bundle.tar.gz"

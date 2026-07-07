@@ -3597,6 +3597,7 @@ def test_stock_codex_compat_pkg_clean_vm_requires_target(
         package_path=package_path,
         clean_vm_ssh_target=None,
         clean_vm_tart_name=None,
+        clean_vm_ssh_identity=None,
         clean_vm_ssh_user=None,
         clean_vm_ssh_port=22,
         clean_vm_start_tart=False,
@@ -3634,6 +3635,7 @@ def test_stock_codex_compat_pkg_clean_vm_blocks_missing_tart_vm(
         package_path=package_path,
         clean_vm_ssh_target=None,
         clean_vm_tart_name="omnigent-clean",
+        clean_vm_ssh_identity=None,
         clean_vm_ssh_user="admin",
         clean_vm_ssh_port=22,
         clean_vm_start_tart=False,
@@ -3650,10 +3652,13 @@ def test_clean_vm_remote_script_requires_marker_and_noninteractive_sudo() -> Non
 
     assert ".omnigent-stock-codex-compat-clean-user-ok" in script
     assert 'export PATH="$HOME/.local/bin:$PATH"' in script
-    assert "ditto" in script
-    assert 'ditto "$runtime_root" "$user_runtime_root"' in script
-    assert 'uvx --from "$user_runtime_root" python "$stock_provisioner"' in script
-    assert '--repo-root "$user_runtime_root"' in script
+    assert (
+        'installed_bootstrapper="$runtime_root/scripts/bootstrap_stock_codex_compat.sh"'
+        in script
+    )
+    assert '"$installed_bootstrapper"' in script
+    assert '--user-runtime-root "$user_runtime_root"' in script
+    assert '--cache-root "$clean_cache_root"' in script
     assert "sed -E 's/^[^0-9]*([0-9]+(\\.[0-9]+)+" in script
     assert 'export OMNIGENT_STOCK_CODEX_PATH="$provisioned_codex"' in script
     assert 'probe_output="$("$selected" --omnigent-stock-codex-compat-launcher-probe)"' in script
@@ -3663,7 +3668,6 @@ def test_clean_vm_remote_script_requires_marker_and_noninteractive_sudo() -> Non
     assert "sudo -n installer -pkg" in script
     assert "sudo -n pkgutil --forget" in script
     assert "stock_codex_compat_pkg_clean_vm_status=replacement-ready" in script
-    assert "--install-adapter-package" in script
     assert "--uninstall" in script
     assert "--expected-sha256" in script
 
@@ -3673,12 +3677,15 @@ def test_clean_vm_ssh_command_avoids_persistent_known_hosts() -> None:
         ssh_path="/usr/bin/ssh",
         ssh_target="admin@192.0.2.10",
         ssh_port=2222,
+        ssh_identity=Path("/tmp/test-key"),
     )
 
     assert command[:3] == ["/usr/bin/ssh", "-p", "2222"]
     assert "BatchMode=yes" in command
     assert "StrictHostKeyChecking=no" in command
     assert "UserKnownHostsFile=/dev/null" in command
+    assert "ConnectTimeout=10" in command
+    assert command[command.index("-i") + 1] == "/tmp/test-key"
     assert command[-1] == "admin@192.0.2.10"
 
 

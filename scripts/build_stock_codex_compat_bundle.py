@@ -20,6 +20,8 @@ BUNDLE_MANIFEST_NAME = "bundle-manifest.json"
 RUNTIME_ROOT_NAME = "runtime"
 INSTALLER_RELATIVE_PATH = "scripts/install_stock_codex_compat_launcher.py"
 PROVISIONER_RELATIVE_PATH = "scripts/provision_stock_codex.py"
+BOOTSTRAP_SHELL_RELATIVE_PATH = "scripts/bootstrap_stock_codex_compat.sh"
+BOOTSTRAP_PYTHON_RELATIVE_PATH = "scripts/bootstrap_stock_codex_compat.py"
 WRAPPER_ENTRYPOINT = "omnigent-stock-codex-wrapper"
 DEFAULT_LAUNCHER_COMMAND = "omnigent-stock-codex-compat"
 
@@ -115,6 +117,8 @@ def iter_runtime_sources(repo_root: Path) -> list[tuple[Path, Path]]:
         repo_root / "omnigent",
         repo_root / INSTALLER_RELATIVE_PATH,
         repo_root / PROVISIONER_RELATIVE_PATH,
+        repo_root / BOOTSTRAP_SHELL_RELATIVE_PATH,
+        repo_root / BOOTSTRAP_PYTHON_RELATIVE_PATH,
     ]
     missing = [str(path) for path in required_paths if not path.exists()]
     if missing:
@@ -150,6 +154,10 @@ def iter_runtime_sources(repo_root: Path) -> list[tuple[Path, Path]]:
     add_path(installer_path, Path(INSTALLER_RELATIVE_PATH))
     provisioner_path = repo_root / PROVISIONER_RELATIVE_PATH
     add_path(provisioner_path, Path(PROVISIONER_RELATIVE_PATH))
+    bootstrap_shell_path = repo_root / BOOTSTRAP_SHELL_RELATIVE_PATH
+    add_path(bootstrap_shell_path, Path(BOOTSTRAP_SHELL_RELATIVE_PATH))
+    bootstrap_python_path = repo_root / BOOTSTRAP_PYTHON_RELATIVE_PATH
+    add_path(bootstrap_python_path, Path(BOOTSTRAP_PYTHON_RELATIVE_PATH))
     return sorted(entries, key=lambda item: item[1].as_posix())
 
 
@@ -206,6 +214,8 @@ def build_stock_codex_compat_bundle(
         "runtimeRoot": RUNTIME_ROOT_NAME,
         "installer": f"{RUNTIME_ROOT_NAME}/{INSTALLER_RELATIVE_PATH}",
         "stockCodexProvisioner": f"{RUNTIME_ROOT_NAME}/{PROVISIONER_RELATIVE_PATH}",
+        "userBootstrapper": f"{RUNTIME_ROOT_NAME}/{BOOTSTRAP_SHELL_RELATIVE_PATH}",
+        "userBootstrapperPython": f"{RUNTIME_ROOT_NAME}/{BOOTSTRAP_PYTHON_RELATIVE_PATH}",
         "wrapperEntrypoint": WRAPPER_ENTRYPOINT,
         "defaultLauncherCommand": DEFAULT_LAUNCHER_COMMAND,
         "includedFileCount": len(runtime_sources),

@@ -60,6 +60,14 @@ def _write_minimal_repo(repo_root: Path) -> None:
         repo_root / "scripts" / "provision_stock_codex.py",
         "#!/usr/bin/env python3\n",
     )
+    _write_file(
+        repo_root / "scripts" / "bootstrap_stock_codex_compat.sh",
+        "#!/bin/bash\n",
+    )
+    _write_file(
+        repo_root / "scripts" / "bootstrap_stock_codex_compat.py",
+        "#!/usr/bin/env python3\n",
+    )
 
 
 def test_build_stock_codex_compat_pkg_contains_unsigned_runtime_contract(
@@ -113,6 +121,8 @@ def test_postinstall_validates_target_volume_payload(tmp_path: Path) -> None:
     )
     _write_file(runtime_root / "scripts" / "install_stock_codex_compat_launcher.py", "")
     _write_file(runtime_root / "scripts" / "provision_stock_codex.py", "")
+    _write_file(runtime_root / "scripts" / "bootstrap_stock_codex_compat.sh", "")
+    _write_file(runtime_root / "scripts" / "bootstrap_stock_codex_compat.py", "")
 
     _MOD._write_postinstall(
         script_path,
@@ -130,6 +140,14 @@ def test_postinstall_validates_target_volume_payload(tmp_path: Path) -> None:
     script_text = script_path.read_text(encoding="utf-8")
     assert 'target_volume="${3:-/}"' in script_text
     assert 'runtime_root="${target_prefix}${install_prefix}/runtime"' in script_text
+    assert (
+        'bootstrap_shell_path="${runtime_root}/scripts/bootstrap_stock_codex_compat.sh"'
+        in script_text
+    )
+    assert (
+        'bootstrap_python_path="${runtime_root}/scripts/bootstrap_stock_codex_compat.py"'
+        in script_text
+    )
 
 
 def test_build_stock_codex_compat_pkg_cli_outputs_compact_json(
