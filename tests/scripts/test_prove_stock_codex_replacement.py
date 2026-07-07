@@ -2579,6 +2579,13 @@ def test_stock_codex_compat_pkg_signed_notarized_runs_distribution_checks(
             return subprocess.CompletedProcess(
                 command,
                 0,
+                stdout='{"id":"notary-submission-1","status":"In Progress"}',
+                stderr="",
+            )
+        if command[1:3] == ["notarytool", "wait"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
                 stdout='{"id":"notary-submission-1","status":"Accepted"}',
                 stderr="",
             )
@@ -2607,7 +2614,309 @@ def test_stock_codex_compat_pkg_signed_notarized_runs_distribution_checks(
         "Developer ID Installer: Example (ABCDE12345)"
     )
     assert distribution_commands[0][1:3] == ["notarytool", "submit"]
-    assert distribution_commands[0][-3:] == ["--wait", "--output-format", "json"]
-    assert distribution_commands[1][1:3] == ["stapler", "staple"]
-    assert distribution_commands[2][1:3] == ["stapler", "validate"]
-    assert distribution_commands[3][:5] == ["/usr/sbin/spctl", "-a", "-vv", "-t", "install"]
+    assert "--wait" not in distribution_commands[0]
+    assert distribution_commands[0][-2:] == ["--output-format", "json"]
+    assert distribution_commands[1][1:3] == ["notarytool", "wait"]
+    assert "notary-submission-1" in distribution_commands[1]
+    assert distribution_commands[2][1:3] == ["stapler", "staple"]
+    assert distribution_commands[3][1:3] == ["stapler", "validate"]
+    assert distribution_commands[4][:5] == ["/usr/sbin/spctl", "-a", "-vv", "-t", "install"]
+
+
+def test_stock_codex_compat_pkg_installer_lifecycle_blocks_without_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = _write_codex_binary(tmp_path / "stock" / "codex")
+
+    def fake_prerequisites(**kwargs: object) -> Any:
+        assert kwargs["sign_identity"] == "Developer ID Installer: Example (ABCDE12345)"
+        return _MOD.StockCodexCompatPkgSigningPrerequisites(
+            status="ready",
+            missing_prerequisites=(),
+            tool_paths={
+                "pkgbuild": "/usr/bin/pkgbuild",
+                "pkgutil": "/usr/sbin/pkgutil",
+                "xcrun": "/usr/bin/xcrun",
+                "spctl": "/usr/sbin/spctl",
+                "notarytool": "/usr/bin/notarytool",
+                "stapler": "/usr/bin/stapler",
+            },
+            sign_identity="Developer ID Installer: Example (ABCDE12345)",
+            sign_identity_source="explicit",
+            signing_keychain=None,
+            developer_id_installer_identities=(
+                "Developer ID Installer: Example (ABCDE12345)",
+            ),
+            developer_id_application_identities=(),
+            notarytool_profile="omnigent-notary",
+        )
+
+    def fake_which(name: str) -> str | None:
+        return {
+            "installer": "/usr/sbin/installer",
+            "hdiutil": "/usr/bin/hdiutil",
+            "uvx": str(_write_uvx_binary(tmp_path / "tools" / "uvx")),
+        }.get(name)
+
+    def fail_build(**kwargs: object) -> Any:
+        raise AssertionError(f"build should not run without root: {kwargs!r}")
+
+    monkeypatch.setattr(
+        _MOD,
+        "_stock_codex_compat_pkg_signing_prerequisites",
+        fake_prerequisites,
+    )
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+    monkeypatch.setattr(_MOD, "_effective_user_is_root", lambda: False)
+    monkeypatch.setattr(_MOD, "_build_signed_notarized_stock_codex_compat_pkg", fail_build)
+
+    proof = _MOD.run_stock_codex_compat_pkg_installer_lifecycle_proof(
+        stock_codex,
+        sign_identity="Developer ID Installer: Example (ABCDE12345)",
+        signing_keychain=None,
+        notarytool_profile="omnigent-notary",
+    )
+
+    assert proof.status == "blocked"
+    assert proof.package_path is None
+    assert (
+        "installer lifecycle requires root privileges for /usr/sbin/installer; "
+        "run from an admin-authenticated root shell"
+    ) in proof.missing_prerequisites
+
+
+def test_stock_codex_compat_pkg_installer_lifecycle_uses_mounted_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = _write_codex_binary(tmp_path / "stock" / "codex")
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+    install_prefix = Path("/Library/Application Support/Omnigent/stock-codex-compat")
+    runtime_root = install_prefix / "runtime"
+    required_payload_files = {
+        "Library/Application Support/Omnigent/stock-codex-compat/pkg-manifest.json": True,
+        "Library/Application Support/Omnigent/stock-codex-compat/bundle-manifest.json": True,
+        (
+            "Library/Application Support/Omnigent/stock-codex-compat/runtime/"
+            "pyproject.toml"
+        ): True,
+        (
+            "Library/Application Support/Omnigent/stock-codex-compat/runtime/"
+            "scripts/install_stock_codex_compat_launcher.py"
+        ): True,
+        (
+            "Library/Application Support/Omnigent/stock-codex-compat/runtime/"
+            "scripts/provision_stock_codex.py"
+        ): True,
+        (
+            "Library/Application Support/Omnigent/stock-codex-compat/runtime/"
+            "omnigent/stock_codex_compat_wrapper.py"
+        ): True,
+    }
+    structure = _MOD.StockCodexCompatPkgStructureProof(
+        package_path=package_path,
+        package_sha256=_MOD.sha256_file(package_path),
+        source_bundle_sha256="a" * 64,
+        package_identifier="ai.omnigent.stock-codex-compat",
+        package_version="1.2.3",
+        install_location="/",
+        install_prefix=install_prefix,
+        runtime_root=runtime_root,
+        payload_file_count=len(required_payload_files),
+        required_payload_files=required_payload_files,
+        script_names=("postinstall",),
+        archive_entries=("Bom", "PackageInfo", "Payload", "Scripts"),
+        signature_status="signed by a certificate trusted by macOS",
+        signed=True,
+        pkg_manifest_path=tmp_path / "expanded" / "pkg-manifest.json",
+        bundle_manifest_path=tmp_path / "expanded" / "bundle-manifest.json",
+        pkg_contract={"runtime": "machine-level-runtime-only"},
+        bundle_source_root="<omitted-from-pkg>",
+    )
+    receipt_present = True
+    mounted_target = tmp_path / "mounted-target"
+    lifecycle_commands: list[list[str]] = []
+
+    def fake_prerequisites(**kwargs: object) -> Any:
+        assert kwargs["sign_identity"] == "Developer ID Installer: Example (ABCDE12345)"
+        return _MOD.StockCodexCompatPkgSigningPrerequisites(
+            status="ready",
+            missing_prerequisites=(),
+            tool_paths={
+                "pkgbuild": "/usr/bin/pkgbuild",
+                "pkgutil": "/usr/sbin/pkgutil",
+                "xcrun": "/usr/bin/xcrun",
+                "spctl": "/usr/sbin/spctl",
+                "notarytool": "/usr/bin/notarytool",
+                "stapler": "/usr/bin/stapler",
+            },
+            sign_identity="Developer ID Installer: Example (ABCDE12345)",
+            sign_identity_source="explicit",
+            signing_keychain=None,
+            developer_id_installer_identities=(
+                "Developer ID Installer: Example (ABCDE12345)",
+            ),
+            developer_id_application_identities=(),
+            notarytool_profile="omnigent-notary",
+        )
+
+    def fake_which(name: str) -> str | None:
+        return {
+            "installer": "/usr/sbin/installer",
+            "hdiutil": "/usr/bin/hdiutil",
+            "uvx": str(_write_uvx_binary(tmp_path / "tools" / "uvx")),
+        }.get(name)
+
+    def fake_signed_pkg(**kwargs: object) -> Any:
+        assert kwargs["root"]
+        return _MOD._SignedNotarizedStockCodexCompatPkg(
+            structure=structure,
+            notary_submission_id="notary-1",
+            notary_status="Accepted",
+            notary_output_preview='{"status":"Accepted"}',
+            staple_output_preview="stapled",
+            stapler_validate_output_preview="validated",
+            gatekeeper_output_preview="accepted",
+        )
+
+    def fake_create_volume(**kwargs: object) -> tuple[Path, Path, str]:
+        assert kwargs["hdiutil_path"] == "/usr/bin/hdiutil"
+        mounted_target.mkdir()
+        return tmp_path / "target.dmg", mounted_target, "/dev/disk999"
+
+    def write_installed_payload() -> None:
+        installed_prefix = mounted_target / install_prefix.relative_to("/")
+        installed_runtime = mounted_target / runtime_root.relative_to("/")
+        (installed_runtime / "scripts").mkdir(parents=True)
+        (installed_runtime / "omnigent").mkdir()
+        (installed_runtime / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        (installed_runtime / "scripts" / "install_stock_codex_compat_launcher.py").write_text(
+            "#!/usr/bin/env python3\n",
+            encoding="utf-8",
+        )
+        (installed_runtime / "scripts" / "provision_stock_codex.py").write_text(
+            "#!/usr/bin/env python3\n",
+            encoding="utf-8",
+        )
+        (installed_runtime / "omnigent" / "stock_codex_compat_wrapper.py").write_text(
+            "",
+            encoding="utf-8",
+        )
+        (installed_prefix / "pkg-manifest.json").write_text(
+            json.dumps(
+                {
+                    "contract": {"runtime": "machine-level-runtime-only"},
+                    "packageIdentifier": "ai.omnigent.stock-codex-compat",
+                    "packageVersion": "1.2.3",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (installed_prefix / "bundle-manifest.json").write_text(
+            json.dumps({"sourceRoot": "<omitted-from-pkg>"}) + "\n",
+            encoding="utf-8",
+        )
+
+    def fake_lifecycle_command(
+        command: list[str],
+        *,
+        timeout: float,
+        failure_label: str,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal receipt_present
+        assert timeout > 0
+        assert failure_label
+        lifecycle_commands.append(command)
+        if command[0] == "/usr/sbin/installer":
+            assert command[command.index("-target") + 1] == str(mounted_target)
+            write_installed_payload()
+            return subprocess.CompletedProcess(command, 0, stdout="installer ok", stderr="")
+        if command[:3] == ["/usr/sbin/pkgutil", "--volume", str(mounted_target)]:
+            if command[3] == "--pkg-info":
+                if receipt_present:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout=(
+                            "package-id: ai.omnigent.stock-codex-compat\n"
+                            "version: 1.2.3\n"
+                        ),
+                        stderr="",
+                    )
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="not found")
+            if command[3] == "--files":
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout="\n".join(required_payload_files) + "\n",
+                    stderr="",
+                )
+            if command[3] == "--forget":
+                receipt_present = False
+                return subprocess.CompletedProcess(command, 0, stdout="Forgot package", stderr="")
+        raise AssertionError(f"unexpected lifecycle command: {command!r}, check={check}")
+
+    def fake_installer_cli_json(
+        args: list[str],
+        *,
+        env: dict[str, str],
+        repo_root: Path,
+        script_path: Path,
+    ) -> dict[str, Any]:
+        assert args[0] == "--doctor"
+        assert Path(args[args.index("--repo-root") + 1]) == repo_root
+        assert script_path == repo_root / "scripts" / "install_stock_codex_compat_launcher.py"
+        assert env["HOME"]
+        assert env.get("CODEX_HOME") is None
+        return {"installAllowed": True, "mutatesFilesystem": False}
+
+    monkeypatch.setattr(
+        _MOD,
+        "_stock_codex_compat_pkg_signing_prerequisites",
+        fake_prerequisites,
+    )
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+    monkeypatch.setattr(_MOD, "_effective_user_is_root", lambda: True)
+    monkeypatch.setattr(_MOD, "_build_signed_notarized_stock_codex_compat_pkg", fake_signed_pkg)
+    monkeypatch.setattr(
+        _MOD,
+        "_create_stock_codex_compat_pkg_target_volume",
+        fake_create_volume,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_detach_stock_codex_compat_pkg_target_volume",
+        lambda **kwargs: kwargs["target_device"] == "/dev/disk999",
+    )
+    monkeypatch.setattr(_MOD, "_run_pkg_lifecycle_command", fake_lifecycle_command)
+    monkeypatch.setattr(
+        _MOD,
+        "_run_stock_codex_compat_installer_cli_json",
+        fake_installer_cli_json,
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_installer_lifecycle_proof(
+        stock_codex,
+        sign_identity="Developer ID Installer: Example (ABCDE12345)",
+        signing_keychain=None,
+        notarytool_profile="omnigent-notary",
+    )
+
+    assert proof.status == "replacement-ready"
+    assert proof.target_mountpoint == mounted_target
+    assert proof.installed_runtime_root == mounted_target / runtime_root.relative_to("/")
+    assert proof.receipt_package_id == "ai.omnigent.stock-codex-compat"
+    assert proof.receipt_version == "1.2.3"
+    assert proof.receipt_required_payload_files_present == required_payload_files
+    assert proof.doctor_install_allowed is True
+    assert proof.doctor_mutates_filesystem is False
+    assert proof.cleanup_payload_removed is True
+    assert proof.cleanup_receipt_forgotten is True
+    assert proof.cleanup_receipt_absent is True
+    assert proof.target_detached is True
+    assert lifecycle_commands[0][0] == "/usr/sbin/installer"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -100,6 +101,35 @@ def test_build_stock_codex_compat_pkg_contains_unsigned_runtime_contract(
     assert result.inspection.bundle_manifest["sourceRoot"] == "<omitted-from-pkg>"
     assert str(repo_root) not in json.dumps(result.inspection.pkg_manifest)
     assert str(repo_root) not in json.dumps(result.inspection.bundle_manifest)
+
+
+def test_postinstall_validates_target_volume_payload(tmp_path: Path) -> None:
+    script_path = tmp_path / "postinstall"
+    target_volume = tmp_path / "target-volume"
+    runtime_root = (
+        target_volume
+        / _MOD.DEFAULT_INSTALL_PREFIX.relative_to("/")
+        / _MOD.RUNTIME_ROOT_NAME
+    )
+    _write_file(runtime_root / "scripts" / "install_stock_codex_compat_launcher.py", "")
+    _write_file(runtime_root / "scripts" / "provision_stock_codex.py", "")
+
+    _MOD._write_postinstall(
+        script_path,
+        install_prefix=_MOD.DEFAULT_INSTALL_PREFIX,
+    )
+    completed = subprocess.run(
+        [str(script_path), "pkg", "/", str(target_volume)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0
+    script_text = script_path.read_text(encoding="utf-8")
+    assert 'target_volume="${3:-/}"' in script_text
+    assert 'runtime_root="${target_prefix}${install_prefix}/runtime"' in script_text
 
 
 def test_build_stock_codex_compat_pkg_cli_outputs_compact_json(

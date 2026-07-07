@@ -235,15 +235,18 @@ def _strip_xattrs(path: Path) -> None:
 
 
 def _write_postinstall(script_path: Path, *, install_prefix: Path) -> None:
-    runtime_root = install_prefix / RUNTIME_ROOT_NAME
-    installer_path = runtime_root / INSTALLER_RELATIVE_PATH
-    provisioner_path = runtime_root / PROVISIONER_RELATIVE_PATH
     script_path.write_text(
         "#!/bin/sh\n"
         "set -eu\n"
-        f"runtime_root={json.dumps(str(runtime_root))}\n"
-        f"installer_path={json.dumps(str(installer_path))}\n"
-        f"provisioner_path={json.dumps(str(provisioner_path))}\n"
+        'target_volume="${3:-/}"\n'
+        'case "$target_volume" in\n'
+        '  ""|"/") target_prefix="" ;;\n'
+        '  *) target_prefix="$target_volume" ;;\n'
+        "esac\n"
+        f"install_prefix={json.dumps(str(install_prefix))}\n"
+        'runtime_root="${target_prefix}${install_prefix}/runtime"\n'
+        'installer_path="${runtime_root}/scripts/install_stock_codex_compat_launcher.py"\n'
+        'provisioner_path="${runtime_root}/scripts/provision_stock_codex.py"\n'
         'if [ ! -d "$runtime_root" ]; then\n'
         '  echo "Omnigent runtime root missing: $runtime_root" >&2\n'
         "  exit 1\n"

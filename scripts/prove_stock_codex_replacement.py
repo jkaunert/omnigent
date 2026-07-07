@@ -1415,6 +1415,64 @@ class StockCodexCompatPkgSignedNotarizedProof:
     gatekeeper_output_preview: str | None
 
 
+@dataclass(frozen=True)
+class _SignedNotarizedStockCodexCompatPkg:
+    """Signed/notarized pkg artifact plus distribution-check outputs."""
+
+    structure: StockCodexCompatPkgStructureProof
+    notary_submission_id: str
+    notary_status: str
+    notary_output_preview: str
+    staple_output_preview: str
+    stapler_validate_output_preview: str
+    gatekeeper_output_preview: str
+
+
+@dataclass(frozen=True)
+class StockCodexCompatPkgInstallerLifecycleProof:
+    """Proof result for package-manager install and cleanup lifecycle."""
+
+    status: str
+    missing_prerequisites: tuple[str, ...]
+    tool_paths: dict[str, str | None]
+    sign_identity: str | None
+    sign_identity_source: str
+    signing_keychain: Path | None
+    notarytool_profile: str | None
+    stock_codex_path: Path | None
+    stock_codex_version: str | None
+    package_path: Path | None
+    package_sha256: str | None
+    source_bundle_sha256: str | None
+    package_identifier: str | None
+    package_version: str | None
+    target_image_path: Path | None
+    target_mountpoint: Path | None
+    target_device: str | None
+    installed_prefix: Path | None
+    installed_runtime_root: Path | None
+    installer_script_path: Path | None
+    pkg_manifest_path: Path | None
+    bundle_manifest_path: Path | None
+    pkg_contract: dict[str, Any] | None
+    bundle_source_root: str | None
+    receipt_package_id: str | None
+    receipt_version: str | None
+    receipt_required_payload_files_present: dict[str, bool] | None
+    receipt_file_count: int | None
+    installer_output_preview: str | None
+    receipt_info_preview: str | None
+    doctor_install_allowed: bool | None
+    doctor_mutates_filesystem: bool | None
+    cleanup_payload_removed: bool | None
+    cleanup_receipt_forgotten: bool | None
+    cleanup_receipt_absent: bool | None
+    target_detached: bool | None
+    notary_submission_id: str | None
+    notary_status: str | None
+    gatekeeper_output_preview: str | None
+
+
 class LiveProofTimeoutError(Exception):
     """A single live proof step exceeded its configured wall-clock budget."""
 
@@ -9235,6 +9293,154 @@ def _run_pkg_distribution_command(
     return completed
 
 
+def _build_signed_notarized_stock_codex_compat_pkg(
+    *,
+    root: Path,
+    source_repo_root: Path,
+    prerequisites: StockCodexCompatPkgSigningPrerequisites,
+) -> _SignedNotarizedStockCodexCompatPkg:
+    """Build, notarize, staple, and Gatekeeper-check one pkg under ``root``."""
+    assert prerequisites.sign_identity is not None
+    assert prerequisites.notarytool_profile is not None
+    assert prerequisites.tool_paths["xcrun"] is not None
+    assert prerequisites.tool_paths["spctl"] is not None
+    artifact_dir = root / "artifacts"
+    artifact_dir.mkdir(exist_ok=True)
+    package_path = artifact_dir / "omnigent-stock-codex-compat.pkg"
+    build_args = [
+        "--repo-root",
+        str(source_repo_root),
+        "--output",
+        str(package_path),
+        "--force",
+        "--sign-identity",
+        prerequisites.sign_identity,
+    ]
+    if prerequisites.signing_keychain is not None:
+        build_args.extend(["--signing-keychain", str(prerequisites.signing_keychain)])
+    payload = _run_stock_codex_compat_pkg_builder_cli_json(
+        build_args,
+        repo_root=source_repo_root,
+    )
+    structure = _validate_stock_codex_compat_pkg_builder_payload(
+        payload,
+        source_repo_root=source_repo_root,
+        expect_signed=True,
+    )
+    notary_submit_completed = _run_pkg_distribution_command(
+        [
+            str(prerequisites.tool_paths["xcrun"]),
+            "notarytool",
+            "submit",
+            str(structure.package_path),
+            "--keychain-profile",
+            prerequisites.notarytool_profile,
+            "--output-format",
+            "json",
+        ],
+        timeout=1800,
+    )
+    notary_submission_id, submit_status = _notary_submit_result(notary_submit_completed)
+    if not notary_submission_id:
+        raise SystemExit(
+            "Compatibility pkg notarization submit did not return a submission id.\n"
+            f"status={submit_status!r}\n"
+            f"stdout={notary_submit_completed.stdout}\n"
+            f"stderr={notary_submit_completed.stderr}"
+        )
+    notary_wait_completed = _run_pkg_distribution_command(
+        [
+            str(prerequisites.tool_paths["xcrun"]),
+            "notarytool",
+            "wait",
+            notary_submission_id,
+            "--keychain-profile",
+            prerequisites.notarytool_profile,
+            "--output-format",
+            "json",
+        ],
+        timeout=1800,
+    )
+    wait_submission_id, notary_status = _notary_submit_result(notary_wait_completed)
+    if wait_submission_id and wait_submission_id != notary_submission_id:
+        raise SystemExit(
+            "Compatibility pkg notarization wait returned a different submission id.\n"
+            f"submit_id={notary_submission_id!r}\n"
+            f"wait_id={wait_submission_id!r}\n"
+            f"stdout={notary_wait_completed.stdout}\n"
+            f"stderr={notary_wait_completed.stderr}"
+        )
+    if notary_status.lower() != "accepted":
+        raise SystemExit(
+            "Compatibility pkg notarization was not accepted.\n"
+            f"status={notary_status!r}\n"
+            f"submit_stdout={notary_submit_completed.stdout}\n"
+            f"submit_stderr={notary_submit_completed.stderr}\n"
+            f"wait_stdout={notary_wait_completed.stdout}\n"
+            f"wait_stderr={notary_wait_completed.stderr}"
+        )
+    staple_completed = _run_pkg_distribution_command(
+        [
+            str(prerequisites.tool_paths["xcrun"]),
+            "stapler",
+            "staple",
+            str(structure.package_path),
+        ],
+        timeout=300,
+    )
+    stapler_validate_completed = _run_pkg_distribution_command(
+        [
+            str(prerequisites.tool_paths["xcrun"]),
+            "stapler",
+            "validate",
+            str(structure.package_path),
+        ],
+        timeout=300,
+    )
+    gatekeeper_completed = _run_pkg_distribution_command(
+        [
+            str(prerequisites.tool_paths["spctl"]),
+            "-a",
+            "-vv",
+            "-t",
+            "install",
+            str(structure.package_path),
+        ],
+        timeout=120,
+    )
+    return _SignedNotarizedStockCodexCompatPkg(
+        structure=structure,
+        notary_submission_id=notary_submission_id,
+        notary_status=notary_status,
+        notary_output_preview=_preview_text(
+            "\n".join(
+                segment
+                for segment in (
+                    notary_submit_completed.stdout,
+                    notary_submit_completed.stderr,
+                    notary_wait_completed.stdout,
+                    notary_wait_completed.stderr,
+                )
+                if segment
+            ),
+            limit=1000,
+        ),
+        staple_output_preview=_preview_text(
+            (staple_completed.stdout or "") + (staple_completed.stderr or ""),
+            limit=1000,
+        ),
+        stapler_validate_output_preview=_preview_text(
+            (stapler_validate_completed.stdout or "")
+            + (stapler_validate_completed.stderr or ""),
+            limit=1000,
+        ),
+        gatekeeper_output_preview=_preview_text(
+            (gatekeeper_completed.stdout or "") + (gatekeeper_completed.stderr or ""),
+            limit=1000,
+        ),
+    )
+
+
 def _notary_submit_result(completed: subprocess.CompletedProcess[str]) -> tuple[str, str]:
     combined_output = ((completed.stdout or "") + "\n" + (completed.stderr or "")).strip()
     submission_id = ""
@@ -9298,88 +9504,16 @@ def run_stock_codex_compat_pkg_signed_notarized_proof(
             gatekeeper_output_preview=None,
         )
 
-    assert prerequisites.sign_identity is not None
-    assert prerequisites.notarytool_profile is not None
-    assert prerequisites.tool_paths["xcrun"] is not None
-    assert prerequisites.tool_paths["spctl"] is not None
     with tempfile.TemporaryDirectory(
         prefix="omnigent-stock-codex-compat-pkg-signed-"
     ) as temp_root:
         root = Path(temp_root).resolve()
-        artifact_dir = root / "artifacts"
-        artifact_dir.mkdir()
-        package_path = artifact_dir / "omnigent-stock-codex-compat.pkg"
-        build_args = [
-            "--repo-root",
-            str(source_repo_root),
-            "--output",
-            str(package_path),
-            "--force",
-            "--sign-identity",
-            prerequisites.sign_identity,
-        ]
-        if prerequisites.signing_keychain is not None:
-            build_args.extend(["--signing-keychain", str(prerequisites.signing_keychain)])
-        payload = _run_stock_codex_compat_pkg_builder_cli_json(
-            build_args,
-            repo_root=source_repo_root,
-        )
-        structure = _validate_stock_codex_compat_pkg_builder_payload(
-            payload,
+        signed_pkg = _build_signed_notarized_stock_codex_compat_pkg(
+            root=root,
             source_repo_root=source_repo_root,
-            expect_signed=True,
+            prerequisites=prerequisites,
         )
-        notary_completed = _run_pkg_distribution_command(
-            [
-                str(prerequisites.tool_paths["xcrun"]),
-                "notarytool",
-                "submit",
-                str(structure.package_path),
-                "--keychain-profile",
-                prerequisites.notarytool_profile,
-                "--wait",
-                "--output-format",
-                "json",
-            ],
-            timeout=1800,
-        )
-        notary_submission_id, notary_status = _notary_submit_result(notary_completed)
-        if notary_status.lower() != "accepted":
-            raise SystemExit(
-                "Compatibility pkg notarization was not accepted.\n"
-                f"status={notary_status!r}\n"
-                f"stdout={notary_completed.stdout}\n"
-                f"stderr={notary_completed.stderr}"
-            )
-        staple_completed = _run_pkg_distribution_command(
-            [
-                str(prerequisites.tool_paths["xcrun"]),
-                "stapler",
-                "staple",
-                str(structure.package_path),
-            ],
-            timeout=300,
-        )
-        stapler_validate_completed = _run_pkg_distribution_command(
-            [
-                str(prerequisites.tool_paths["xcrun"]),
-                "stapler",
-                "validate",
-                str(structure.package_path),
-            ],
-            timeout=300,
-        )
-        gatekeeper_completed = _run_pkg_distribution_command(
-            [
-                str(prerequisites.tool_paths["spctl"]),
-                "-a",
-                "-vv",
-                "-t",
-                "install",
-                str(structure.package_path),
-            ],
-            timeout=120,
-        )
+        structure = signed_pkg.structure
         return StockCodexCompatPkgSignedNotarizedProof(
             status="replacement-ready",
             missing_prerequisites=(),
@@ -9401,25 +9535,499 @@ def run_stock_codex_compat_pkg_signed_notarized_proof(
             package_version=structure.package_version,
             signature_status=structure.signature_status,
             signed=structure.signed,
-            notary_submission_id=notary_submission_id,
-            notary_status=notary_status,
-            notary_output_preview=_preview_text(
-                (notary_completed.stdout or "") + (notary_completed.stderr or ""),
-                limit=1000,
+            notary_submission_id=signed_pkg.notary_submission_id,
+            notary_status=signed_pkg.notary_status,
+            notary_output_preview=signed_pkg.notary_output_preview,
+            staple_output_preview=signed_pkg.staple_output_preview,
+            stapler_validate_output_preview=signed_pkg.stapler_validate_output_preview,
+            gatekeeper_output_preview=signed_pkg.gatekeeper_output_preview,
+        )
+
+
+def _run_pkg_lifecycle_command(
+    command: list[str],
+    *,
+    timeout: float,
+    failure_label: str,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if check and completed.returncode != 0:
+        raise SystemExit(
+            f"{failure_label} failed.\n"
+            f"command={command!r}\n"
+            f"exit={completed.returncode}\n"
+            f"stdout={completed.stdout}\n"
+            f"stderr={completed.stderr}"
+        )
+    return completed
+
+
+def _create_stock_codex_compat_pkg_target_volume(
+    *,
+    root: Path,
+    hdiutil_path: str,
+) -> tuple[Path, Path, str]:
+    """Create and mount a temporary target volume for installer lifecycle proof."""
+    image_path = root / "target-volume.dmg"
+    mountpoint = root / "target-volume"
+    mountpoint.mkdir()
+    _run_pkg_lifecycle_command(
+        [
+            hdiutil_path,
+            "create",
+            "-quiet",
+            "-size",
+            "1g",
+            "-fs",
+            "HFS+",
+            "-volname",
+            "OmnigentPkgLifecycle",
+            "-ov",
+            str(image_path),
+        ],
+        timeout=180,
+        failure_label="Compatibility pkg lifecycle target image creation",
+    )
+    attach = _run_pkg_lifecycle_command(
+        [
+            hdiutil_path,
+            "attach",
+            "-plist",
+            "-nobrowse",
+            "-mountpoint",
+            str(mountpoint),
+            str(image_path),
+        ],
+        timeout=180,
+        failure_label="Compatibility pkg lifecycle target image attach",
+    )
+    try:
+        payload = plistlib.loads(attach.stdout.encode("utf-8"))
+    except Exception as exc:
+        raise SystemExit(
+            "Compatibility pkg lifecycle target image attach did not emit plist.\n"
+            f"stdout={attach.stdout}\nstderr={attach.stderr}"
+        ) from exc
+    entities = payload.get("system-entities")
+    if not isinstance(entities, list):
+        raise SystemExit(f"hdiutil attach plist omitted system-entities: {payload!r}")
+    target_device = ""
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        if entity.get("mount-point") == str(mountpoint):
+            device = entity.get("dev-entry")
+            if isinstance(device, str) and device:
+                target_device = device
+                break
+    if not target_device:
+        raise SystemExit(
+            "Could not identify mounted lifecycle target device.\n"
+            f"mountpoint={mountpoint}\nattach_stdout={attach.stdout}"
+        )
+    return image_path, mountpoint, target_device
+
+
+def _detach_stock_codex_compat_pkg_target_volume(
+    *,
+    hdiutil_path: str,
+    target_device: str,
+) -> bool:
+    detach = subprocess.run(
+        [hdiutil_path, "detach", target_device],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if detach.returncode == 0:
+        return True
+    forced = subprocess.run(
+        [hdiutil_path, "detach", "-force", target_device],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if forced.returncode != 0:
+        raise SystemExit(
+            "Compatibility pkg lifecycle target image detach failed.\n"
+            f"device={target_device}\n"
+            f"detach_stdout={detach.stdout}\n"
+            f"detach_stderr={detach.stderr}\n"
+            f"force_stdout={forced.stdout}\n"
+            f"force_stderr={forced.stderr}"
+        )
+    return True
+
+
+def _pkgutil_info_value(info_output: str, key: str) -> str | None:
+    prefix = f"{key}:"
+    for line in info_output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix):
+            return stripped.split(":", 1)[1].strip()
+    return None
+
+
+def _effective_user_is_root() -> bool:
+    geteuid = getattr(os, "geteuid", None)
+    return callable(geteuid) and geteuid() == 0
+
+
+def _blocked_stock_codex_compat_pkg_installer_lifecycle_proof(
+    *,
+    prerequisites: StockCodexCompatPkgSigningPrerequisites,
+    tool_paths: dict[str, str | None],
+    missing_prerequisites: tuple[str, ...],
+    stock_codex_path: Path | None,
+    stock_codex_version: str | None,
+) -> StockCodexCompatPkgInstallerLifecycleProof:
+    return StockCodexCompatPkgInstallerLifecycleProof(
+        status="blocked",
+        missing_prerequisites=missing_prerequisites,
+        tool_paths=tool_paths,
+        sign_identity=prerequisites.sign_identity,
+        sign_identity_source=prerequisites.sign_identity_source,
+        signing_keychain=prerequisites.signing_keychain,
+        notarytool_profile=prerequisites.notarytool_profile,
+        stock_codex_path=stock_codex_path,
+        stock_codex_version=stock_codex_version,
+        package_path=None,
+        package_sha256=None,
+        source_bundle_sha256=None,
+        package_identifier=None,
+        package_version=None,
+        target_image_path=None,
+        target_mountpoint=None,
+        target_device=None,
+        installed_prefix=None,
+        installed_runtime_root=None,
+        installer_script_path=None,
+        pkg_manifest_path=None,
+        bundle_manifest_path=None,
+        pkg_contract=None,
+        bundle_source_root=None,
+        receipt_package_id=None,
+        receipt_version=None,
+        receipt_required_payload_files_present=None,
+        receipt_file_count=None,
+        installer_output_preview=None,
+        receipt_info_preview=None,
+        doctor_install_allowed=None,
+        doctor_mutates_filesystem=None,
+        cleanup_payload_removed=None,
+        cleanup_receipt_forgotten=None,
+        cleanup_receipt_absent=None,
+        target_detached=None,
+        notary_submission_id=None,
+        notary_status=None,
+        gatekeeper_output_preview=None,
+    )
+
+
+def run_stock_codex_compat_pkg_installer_lifecycle_proof(
+    stock_codex_path: Path,
+    *,
+    sign_identity: str | None,
+    signing_keychain: Path | None,
+    notarytool_profile: str | None,
+) -> StockCodexCompatPkgInstallerLifecycleProof:
+    """Install a signed/notarized pkg onto a temporary target volume and clean it up."""
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    assert_stock_codex_path(stock_codex_path, allow_fork_codex=False)
+    stock_codex_version = codex_version(stock_codex_path)
+    source_repo_root = Path(__file__).resolve().parents[1]
+    prerequisites = _stock_codex_compat_pkg_signing_prerequisites(
+        sign_identity=sign_identity,
+        signing_keychain=signing_keychain,
+        notarytool_profile=notarytool_profile,
+    )
+    tool_paths = dict(prerequisites.tool_paths)
+    tool_paths["installer"] = shutil.which("installer")
+    tool_paths["hdiutil"] = shutil.which("hdiutil")
+    tool_paths["uvx"] = shutil.which("uvx")
+    missing = list(prerequisites.missing_prerequisites)
+    for tool_name in ("installer", "hdiutil", "uvx"):
+        if not tool_paths[tool_name]:
+            missing.append(f"missing tool: {tool_name}")
+    if not _effective_user_is_root():
+        missing.append(
+            "installer lifecycle requires root privileges for /usr/sbin/installer; "
+            "run from an admin-authenticated root shell"
+        )
+    if missing:
+        return _blocked_stock_codex_compat_pkg_installer_lifecycle_proof(
+            prerequisites=prerequisites,
+            tool_paths=tool_paths,
+            missing_prerequisites=tuple(missing),
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+        )
+
+    assert tool_paths["installer"] is not None
+    assert tool_paths["hdiutil"] is not None
+    assert tool_paths["pkgutil"] is not None
+    assert tool_paths["uvx"] is not None
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-pkg-install-lifecycle-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        signed_pkg = _build_signed_notarized_stock_codex_compat_pkg(
+            root=root,
+            source_repo_root=source_repo_root,
+            prerequisites=prerequisites,
+        )
+        structure = signed_pkg.structure
+        target_image_path, target_mountpoint, target_device = (
+            _create_stock_codex_compat_pkg_target_volume(
+                root=root,
+                hdiutil_path=tool_paths["hdiutil"],
+            )
+        )
+        target_detached = False
+        try:
+            installer_completed = _run_pkg_lifecycle_command(
+                [
+                    tool_paths["installer"],
+                    "-pkg",
+                    str(structure.package_path),
+                    "-target",
+                    str(target_mountpoint),
+                    "-dumplog",
+                    "-verboseR",
+                ],
+                timeout=600,
+                failure_label="Compatibility pkg lifecycle installer command",
+            )
+            installed_prefix = (
+                target_mountpoint / structure.install_prefix.relative_to("/")
+            ).resolve()
+            installed_runtime_root = _validate_expanded_stock_codex_compat_runtime(
+                payload_root=target_mountpoint,
+                packaged_runtime_root=structure.runtime_root,
+                source_repo_root=source_repo_root,
+            )
+            installer_script_path = (
+                installed_runtime_root / "scripts" / "install_stock_codex_compat_launcher.py"
+            )
+            pkg_manifest_path = installed_prefix / "pkg-manifest.json"
+            bundle_manifest_path = installed_prefix / "bundle-manifest.json"
+            pkg_manifest = json.loads(pkg_manifest_path.read_text(encoding="utf-8"))
+            bundle_manifest = json.loads(bundle_manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(pkg_manifest, dict) or not isinstance(bundle_manifest, dict):
+                raise SystemExit("Lifecycle-installed pkg manifests were not JSON objects.")
+            pkg_contract = pkg_manifest.get("contract")
+            if not isinstance(pkg_contract, dict):
+                raise SystemExit(
+                    f"Lifecycle-installed pkg manifest omitted contract: {pkg_manifest!r}"
+                )
+            if pkg_contract.get("runtime") != "machine-level-runtime-only":
+                raise SystemExit(
+                    "Lifecycle-installed pkg contract changed runtime ownership: "
+                    f"{pkg_contract!r}"
+                )
+            bundle_source_root = bundle_manifest.get("sourceRoot")
+            if bundle_source_root != "<omitted-from-pkg>":
+                raise SystemExit(
+                    "Lifecycle-installed bundle manifest embedded source root: "
+                    f"{bundle_manifest!r}"
+                )
+
+            receipt_info = _run_pkg_lifecycle_command(
+                [
+                    tool_paths["pkgutil"],
+                    "--volume",
+                    str(target_mountpoint),
+                    "--pkg-info",
+                    structure.package_identifier,
+                ],
+                timeout=120,
+                failure_label="Compatibility pkg lifecycle receipt info",
+            )
+            receipt_files_completed = _run_pkg_lifecycle_command(
+                [
+                    tool_paths["pkgutil"],
+                    "--volume",
+                    str(target_mountpoint),
+                    "--files",
+                    structure.package_identifier,
+                ],
+                timeout=120,
+                failure_label="Compatibility pkg lifecycle receipt files",
+            )
+            receipt_files = tuple(
+                line.strip()
+                for line in receipt_files_completed.stdout.splitlines()
+                if line.strip()
+            )
+            receipt_file_set = set(receipt_files)
+            required_receipt_files = {
+                path: path in receipt_file_set for path in structure.required_payload_files
+            }
+            if not all(required_receipt_files.values()):
+                missing_receipt_files = [
+                    path for path, present in required_receipt_files.items() if not present
+                ]
+                raise SystemExit(
+                    "Lifecycle installer receipt omitted required payload files.\n"
+                    f"missing={missing_receipt_files}"
+                )
+            receipt_package_id = _pkgutil_info_value(
+                receipt_info.stdout,
+                "package-id",
+            )
+            receipt_version = _pkgutil_info_value(receipt_info.stdout, "version")
+            if receipt_package_id != structure.package_identifier:
+                raise SystemExit(
+                    "Lifecycle installer receipt has wrong package id.\n"
+                    f"expected={structure.package_identifier}\nactual={receipt_package_id}"
+                )
+            if receipt_version != structure.package_version:
+                raise SystemExit(
+                    "Lifecycle installer receipt has wrong package version.\n"
+                    f"expected={structure.package_version}\nactual={receipt_version}"
+                )
+
+            clean_home = root / "home"
+            clean_tmp = root / "tmp"
+            clean_bin_dir = clean_home / ".local" / "bin"
+            clean_bin_dir.mkdir(parents=True)
+            clean_tmp.mkdir()
+            env = os.environ.copy()
+            python_path = str(installed_runtime_root)
+            if env.get("PYTHONPATH"):
+                python_path = f"{python_path}{os.pathsep}{env['PYTHONPATH']}"
+            env.update(
+                {
+                    "HOME": str(clean_home),
+                    "TMPDIR": str(clean_tmp),
+                    "PATH": (
+                        f"{clean_bin_dir}{os.pathsep}"
+                        f"{Path(tool_paths['uvx']).parent}{os.pathsep}"
+                        f"{env.get('PATH', '')}"
+                    ),
+                    "PYTHONPATH": python_path,
+                }
+            )
+            env.pop("CODEX_HOME", None)
+            env.pop(OMNIGENT_STOCK_CODEX_PATH_ENV, None)
+            doctor_payload = _run_stock_codex_compat_installer_cli_json(
+                [
+                    "--doctor",
+                    "--pinned-codex-path",
+                    str(stock_codex_path),
+                    "--repo-root",
+                    str(installed_runtime_root),
+                    "--uvx-path",
+                    str(tool_paths["uvx"]),
+                ],
+                env=env,
+                repo_root=installed_runtime_root,
+                script_path=installer_script_path,
+            )
+            if doctor_payload.get("installAllowed") is not True:
+                raise SystemExit(
+                    "Lifecycle-installed runtime doctor did not allow install: "
+                    f"{doctor_payload!r}"
+                )
+            if doctor_payload.get("mutatesFilesystem") is not False:
+                raise SystemExit(
+                    "Lifecycle-installed runtime doctor unexpectedly mutates: "
+                    f"{doctor_payload!r}"
+                )
+
+            if installed_prefix.exists():
+                shutil.rmtree(installed_prefix)
+            cleanup_payload_removed = not installed_prefix.exists()
+            forget = _run_pkg_lifecycle_command(
+                [
+                    tool_paths["pkgutil"],
+                    "--volume",
+                    str(target_mountpoint),
+                    "--forget",
+                    structure.package_identifier,
+                ],
+                timeout=120,
+                failure_label="Compatibility pkg lifecycle receipt forget",
+            )
+            receipt_after_cleanup = _run_pkg_lifecycle_command(
+                [
+                    tool_paths["pkgutil"],
+                    "--volume",
+                    str(target_mountpoint),
+                    "--pkg-info",
+                    structure.package_identifier,
+                ],
+                timeout=120,
+                failure_label="Compatibility pkg lifecycle receipt absence check",
+                check=False,
+            )
+            cleanup_receipt_absent = receipt_after_cleanup.returncode != 0
+            if not cleanup_payload_removed or not cleanup_receipt_absent:
+                raise SystemExit(
+                    "Lifecycle cleanup left package state behind.\n"
+                    f"payload_removed={cleanup_payload_removed}\n"
+                    f"receipt_absent={cleanup_receipt_absent}\n"
+                    f"receipt_after_stdout={receipt_after_cleanup.stdout}\n"
+                    f"receipt_after_stderr={receipt_after_cleanup.stderr}"
+                )
+        finally:
+            target_detached = _detach_stock_codex_compat_pkg_target_volume(
+                hdiutil_path=tool_paths["hdiutil"],
+                target_device=target_device,
+            )
+
+        return StockCodexCompatPkgInstallerLifecycleProof(
+            status="replacement-ready",
+            missing_prerequisites=(),
+            tool_paths=tool_paths,
+            sign_identity=prerequisites.sign_identity,
+            sign_identity_source=prerequisites.sign_identity_source,
+            signing_keychain=prerequisites.signing_keychain,
+            notarytool_profile=prerequisites.notarytool_profile,
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            package_path=structure.package_path,
+            package_sha256=structure.package_sha256,
+            source_bundle_sha256=structure.source_bundle_sha256,
+            package_identifier=structure.package_identifier,
+            package_version=structure.package_version,
+            target_image_path=target_image_path,
+            target_mountpoint=target_mountpoint,
+            target_device=target_device,
+            installed_prefix=installed_prefix,
+            installed_runtime_root=installed_runtime_root,
+            installer_script_path=installer_script_path,
+            pkg_manifest_path=pkg_manifest_path,
+            bundle_manifest_path=bundle_manifest_path,
+            pkg_contract={str(key): value for key, value in pkg_contract.items()},
+            bundle_source_root=str(bundle_source_root),
+            receipt_package_id=receipt_package_id,
+            receipt_version=receipt_version,
+            receipt_required_payload_files_present=required_receipt_files,
+            receipt_file_count=len(receipt_files),
+            installer_output_preview=_preview_text(
+                (installer_completed.stdout or "") + (installer_completed.stderr or ""),
+                limit=2000,
             ),
-            staple_output_preview=_preview_text(
-                (staple_completed.stdout or "") + (staple_completed.stderr or ""),
-                limit=1000,
-            ),
-            stapler_validate_output_preview=_preview_text(
-                (stapler_validate_completed.stdout or "")
-                + (stapler_validate_completed.stderr or ""),
-                limit=1000,
-            ),
-            gatekeeper_output_preview=_preview_text(
-                (gatekeeper_completed.stdout or "") + (gatekeeper_completed.stderr or ""),
-                limit=1000,
-            ),
+            receipt_info_preview=_preview_text(receipt_info.stdout, limit=1000),
+            doctor_install_allowed=bool(doctor_payload["installAllowed"]),
+            doctor_mutates_filesystem=bool(doctor_payload["mutatesFilesystem"]),
+            cleanup_payload_removed=cleanup_payload_removed,
+            cleanup_receipt_forgotten=forget.returncode == 0,
+            cleanup_receipt_absent=cleanup_receipt_absent,
+            target_detached=target_detached,
+            notary_submission_id=signed_pkg.notary_submission_id,
+            notary_status=signed_pkg.notary_status,
+            gatekeeper_output_preview=signed_pkg.gatekeeper_output_preview,
         )
 
 
@@ -12233,6 +12841,181 @@ def print_stock_codex_compat_pkg_signed_notarized_proof(
         "ASSERTION: stock-codex-compat can be built as a Developer ID signed "
         "pkg, notarized, stapled, validated by stapler, and accepted by "
         "Gatekeeper for installation"
+    )
+
+
+def print_stock_codex_compat_pkg_installer_lifecycle_proof(
+    proof: StockCodexCompatPkgInstallerLifecycleProof,
+) -> None:
+    """Emit operator evidence for signed pkg installer lifecycle proof."""
+    print("stock_codex_compat_pkg_installer_lifecycle_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_surface="
+        "signed-notarized-pkg-mounted-volume-installer-lifecycle"
+    )
+    print(f"stock_codex_compat_pkg_installer_lifecycle_status={proof.status}")
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_missing_prerequisites="
+        f"{json.dumps(list(proof.missing_prerequisites), sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_tool_paths="
+        f"{json.dumps(proof.tool_paths, sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_sign_identity="
+        f"{proof.sign_identity}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_sign_identity_source="
+        f"{proof.sign_identity_source}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_signing_keychain="
+        f"{proof.signing_keychain}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_notarytool_profile="
+        f"{proof.notarytool_profile}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_stock_codex_path="
+        f"{proof.stock_codex_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(f"stock_codex_compat_pkg_installer_lifecycle_package_path={proof.package_path}")
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_package_sha256="
+        f"{proof.package_sha256}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_source_bundle_sha256="
+        f"{proof.source_bundle_sha256}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_identifier="
+        f"{proof.package_identifier}"
+    )
+    print(f"stock_codex_compat_pkg_installer_lifecycle_version={proof.package_version}")
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_target_image="
+        f"{proof.target_image_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_target_mountpoint="
+        f"{proof.target_mountpoint}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_target_device="
+        f"{proof.target_device}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_installed_prefix="
+        f"{proof.installed_prefix}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_installed_runtime_root="
+        f"{proof.installed_runtime_root}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_installer_script="
+        f"{proof.installer_script_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_pkg_manifest="
+        f"{proof.pkg_manifest_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_bundle_manifest="
+        f"{proof.bundle_manifest_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_contract="
+        f"{json.dumps(proof.pkg_contract or {}, sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_bundle_source_root="
+        f"{proof.bundle_source_root}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_receipt_package_id="
+        f"{proof.receipt_package_id}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_receipt_version="
+        f"{proof.receipt_version}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_receipt_file_count="
+        f"{proof.receipt_file_count}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_receipt_required_payload_files="
+        f"{json.dumps(proof.receipt_required_payload_files_present or {}, sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_doctor_install_allowed="
+        f"{proof.doctor_install_allowed}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_doctor_mutates_filesystem="
+        f"{proof.doctor_mutates_filesystem}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_cleanup_payload_removed="
+        f"{proof.cleanup_payload_removed}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_cleanup_receipt_forgotten="
+        f"{proof.cleanup_receipt_forgotten}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_cleanup_receipt_absent="
+        f"{proof.cleanup_receipt_absent}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_target_detached="
+        f"{proof.target_detached}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_notary_submission_id="
+        f"{proof.notary_submission_id}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_notary_status="
+        f"{proof.notary_status}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_gatekeeper_output="
+        f"{proof.gatekeeper_output_preview!r}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_installer_output="
+        f"{proof.installer_output_preview!r}"
+    )
+    print(
+        "stock_codex_compat_pkg_installer_lifecycle_receipt_info="
+        f"{proof.receipt_info_preview!r}"
+    )
+    if proof.status == "blocked":
+        print(
+            "ASSERTION: signed pkg installer lifecycle validation is blocked by "
+            "local signing, notary, admin installer, image, or uvx prerequisites"
+        )
+        return
+    print("stock_codex_compat_pkg_installer_lifecycle_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: a Developer ID signed, notarized, stapled, and Gatekeeper-"
+        "accepted pkg can be installed by macOS installer onto a mounted target "
+        "volume with receipt metadata for the required runtime payload files"
+    )
+    print(
+        "ASSERTION: the installer-installed runtime can run its clean-home "
+        "doctor, then the proof removes the payload, forgets the target-volume "
+        "receipt, and detaches the temporary image"
     )
 
 
@@ -16809,6 +17592,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-pkg-update-promotion",
             "stock-codex-compat-pkg-clean-auth-onboarding",
             "stock-codex-compat-pkg-signed-notarized",
+            "stock-codex-compat-pkg-installer-lifecycle",
             "stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
             "stock-codex-compat-wrapper-xcodebuild-bridge-test-adapter",
             "stock-codex-compat-wrapper-relay-tool",
@@ -16943,6 +17727,12 @@ def parse_args() -> argparse.Namespace:
             "staples it, validates the staple, and checks Gatekeeper; when "
             "credentials are absent it reports a blocked prerequisite state "
             "instead of a harness failure. "
+            "'stock-codex-compat-pkg-installer-lifecycle' builds the same "
+            "signed/notarized pkg, installs it with macOS installer onto a "
+            "temporary mounted target volume, validates receipt metadata and "
+            "the installed runtime doctor, then removes payload and receipt "
+            "state before detaching the image; macOS installer requires "
+            "root/admin privileges for the live install step. "
             "'stock-codex-compat-wrapper-xcodebuild-bridge-adapter' proves "
             "that XcodeBuildMCP simulator build/run can execute through the "
             "same wrapper-owned file bridge while stock Codex stays in "
@@ -17540,6 +18330,29 @@ def main() -> int:
             )
         print_stock_codex_compat_pkg_signed_notarized_proof(
             run_stock_codex_compat_pkg_signed_notarized_proof(
+                sign_identity=args.pkg_sign_identity,
+                signing_keychain=args.pkg_sign_keychain,
+                notarytool_profile=args.notarytool_profile,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-installer-lifecycle":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-installer-lifecycle does not use "
+                "--apple-bundle; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-installer-lifecycle cannot allow a "
+                "Codex-fork binary."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_pkg_installer_lifecycle_proof(
+            run_stock_codex_compat_pkg_installer_lifecycle_proof(
+                codex_path,
                 sign_identity=args.pkg_sign_identity,
                 signing_keychain=args.pkg_sign_keychain,
                 notarytool_profile=args.notarytool_profile,
