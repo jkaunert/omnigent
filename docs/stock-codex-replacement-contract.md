@@ -460,6 +460,36 @@ recorded `auth_uploaded=True`, `host_stock_codex_uploaded=False`,
 does not automate browser/device login, prove Keychain-backed managed
 credentials, or validate long-term refresh-token/account semantics.
 
+2026-07-08 repeatable clean-VM package proof note:
+commit `1b49aeaf` makes the package-consuming Tart-started clean-VM gates
+one-command repeatable. After the harness starts the disposable VM and verifies
+SSH, it now runs a marker-gated preflight cleanup before copying proof inputs.
+The cleanup requires `.omnigent-stock-codex-compat-clean-user-ok` and
+noninteractive `sudo -n`, unloads the proof-owned update LaunchAgent if present,
+removes only known proof-owned launcher, manifest, adapter, stock-Codex cache,
+proof `CODEX_HOME`, update-log, package-payload, and receipt state, and then
+fails closed if any of those paths or the package receipt remain. Direct
+`--clean-vm-ssh-target` runs do not auto-clean, so operator-supplied machines
+keep the stricter stale-state blocker.
+
+The repeatability proof reran
+`stock-codex-compat-pkg-clean-vm-auth-onboarding` multiple times with
+`--clean-vm-start-tart` against `omnigent-clean-bootstrap-proof` after prior
+successful proof residue existed in the VM. The final captured run used package
+SHA-256
+`cfff83af6fd1dfc59ea1ed4928befe53929462eabd096e5c54d6171379be7ccc`,
+selected official OpenAI GitHub release `codex-cli 0.143.0` from
+`https://github.com/openai/codex/releases/download/rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz`,
+recorded archive SHA-256
+`7df2384f037519dff7dbf4252e60913a5c1c7fdb66c1467c9125b2b2d3594a86`,
+reported `status=replacement-ready`, `host_stock_codex_uploaded=False`,
+`auth_uploaded=False`, `command_executed=False`, `tart_started=True`, and
+`tart_stopped=True`. This changes the clean-VM evidence from a manually
+recoverable stale-state proof to a repeatable proof-owned cleanup contract; it
+does not broaden the claim to arbitrary non-disposable VMs, browser/device auth
+automation, Keychain-managed credentials, pre-release adoption, or long-term
+account refresh semantics.
+
 2026-07-08 raw Tart clean-VM bootstrap note:
 `stock-codex-compat-pkg-clean-vm-bootstrap` closes the raw-image setup gap for
 the Tart-backed clean-machine proofs. The gate refuses to overwrite an existing
@@ -491,8 +521,9 @@ remote stock-Codex acquisition from the pkg-installed runtime, stable update
 pointer promotion and rollback from the pkg-installed runtime, clean auth
 onboarding from the pkg-installed runtime, clean-VM guided auth onboarding from
 the installed compatibility launcher, clean-VM proof-scoped post-login auth
-persistence from the same guided `CODEX_HOME`, and signed/notarized `.pkg`
-distribution.
+persistence from the same guided `CODEX_HOME`, signed/notarized `.pkg`
+distribution, and marker-gated repeatable cleanup for Tart-started
+package-consuming clean-VM proofs.
 Persistent app-bundle installation, LaunchServices/Dock/Finder default
 behavior, launchd enablement policy, pre-release stock-Codex channel adoption,
 automated browser/device login UX, Keychain-managed credential UX, and broader

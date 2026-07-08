@@ -117,4 +117,8 @@ remote proof script into the VM, then installs into the VM's real `/Library` and
 downloads/verifies the official OpenAI GitHub archive there. The live extension
 `stock-codex-compat-pkg-clean-vm-live` adds only proof-scoped copied stock auth,
 does not upload the host stock Codex binary, and runs a real model turn through
-the installed compatibility launcher after in-VM acquisition.
+the installed compatibility launcher after in-VM acquisition. When the harness
+starts Tart itself, the package-consuming clean-VM gates first run a
+marker-gated cleanup of known proof-owned launcher, cache, auth, update-agent,
+payload, and receipt state so repeat runs cannot pass or fail because of stale
+proof residue. Direct SSH-target runs keep stale state as a hard blocker.
