@@ -1726,6 +1726,14 @@ class StockCodexCompatPkgCleanVmProof:
     update_agent_scheduled_action: str | None = None
     update_agent_selected_codex_path: Path | None = None
     update_agent_host_cache_referenced: bool | None = None
+    auth_onboarding_requested: bool | None = None
+    auth_onboarding_launcher_path: Path | None = None
+    auth_onboarding_codex_home: Path | None = None
+    auth_onboarding_auth_path: Path | None = None
+    auth_onboarding_unavailable_reason: str | None = None
+    auth_onboarding_command: str | None = None
+    auth_onboarding_command_executed: bool | None = None
+    auth_onboarding_auth_uploaded: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -7617,6 +7625,74 @@ def _parse_clean_vm_update_agent_output_evidence(
     return None
 
 
+def _parse_clean_vm_auth_onboarding_output_evidence(
+    remote_output: str,
+) -> tuple[Path, Path, Path, str, str, bool, bool] | None:
+    """Extract guided auth-onboarding evidence emitted by the clean-VM script."""
+    for line in remote_output.splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("kind") != "omnigent-clean-vm-auth-onboarding-evidence":
+            continue
+        command_surface = payload.get("commandSurface")
+        launcher_path = payload.get("launcherPath")
+        codex_home = payload.get("codexHome")
+        auth_path = payload.get("authPath")
+        unavailable_reason = payload.get("unavailableReason")
+        onboarding_command = payload.get("onboardingCommand")
+        command_executed = payload.get("commandExecuted")
+        auth_uploaded = payload.get("authUploaded")
+        if not (
+            command_surface == "installed-compat-launcher"
+            and isinstance(launcher_path, str)
+            and launcher_path
+            and isinstance(codex_home, str)
+            and codex_home
+            and isinstance(auth_path, str)
+            and auth_path
+            and unavailable_reason == "needs-auth"
+            and isinstance(onboarding_command, str)
+            and onboarding_command
+            and command_executed is False
+            and auth_uploaded is False
+        ):
+            continue
+        parsed_launcher_path = Path(launcher_path)
+        parsed_codex_home = Path(codex_home)
+        parsed_auth_path = Path(auth_path)
+        if parsed_launcher_path.name != "omnigent-stock-codex-compat":
+            continue
+        if (
+            parsed_launcher_path.parent.name != "bin"
+            or parsed_launcher_path.parent.parent.name != ".local"
+        ):
+            continue
+        if parsed_auth_path != parsed_codex_home / "auth.json":
+            continue
+        expected_command = (
+            f"CODEX_HOME={shlex.quote(str(parsed_codex_home))} "
+            f"{shlex.quote(str(parsed_launcher_path))} login"
+        )
+        if onboarding_command != expected_command:
+            continue
+        return (
+            parsed_launcher_path,
+            parsed_codex_home,
+            parsed_auth_path,
+            unavailable_reason,
+            onboarding_command,
+            command_executed,
+            auth_uploaded,
+        )
+    return None
+
+
 def print_stock_codex_compat_live_proof(proof: StockCodexCompatLiveProof) -> None:
     """Emit operator evidence for a successful stock Codex live compatibility proof."""
     print("stock_codex_compat_live_rehearsal=selected")
@@ -12840,7 +12916,7 @@ expected_stock_version="$5"
 expected_channel_url="$6"
 channel_policy="$7"
 live_auth_json="${8:-}"
-update_agent_mode="${9:-}"
+proof_mode="${9:-}"
 pkg_id="ai.omnigent.stock-codex-compat"
 install_prefix="/Library/Application Support/Omnigent/stock-codex-compat"
 runtime_root="$install_prefix/runtime"
@@ -12849,6 +12925,7 @@ proof_root="$HOME/.omnigent-stock-codex-compat-clean-vm-remote-acquisition-proof
 clean_tmp="$proof_root/tmp"
 clean_codex_home="$HOME/.codex-omnigent-clean-user-canary"
 live_codex_home="$proof_root/live-codex-home"
+auth_onboarding_codex_home="$proof_root/auth-onboarding-codex-home"
 clean_cache_root="$HOME/.local/omnigent/codex-stock"
 launcher_path="$HOME/.local/bin/omnigent-stock-codex-compat"
 manifest_path="$HOME/.local/omnigent/launchers/stock-codex-compat.json"
@@ -12903,6 +12980,9 @@ sudo -n true >/dev/null 2>&1 || fail "sudo requires interactive authentication"
 [ -f "$channel_manifest" ] || fail "missing uploaded channel manifest: $channel_manifest"
 if [ -n "$live_auth_json" ]; then
   [ -f "$live_auth_json" ] || fail "missing uploaded live auth json: $live_auth_json"
+fi
+if [ "$proof_mode" = "auth-onboarding" ] && [ -n "$live_auth_json" ]; then
+  fail "auth onboarding proof must not receive uploaded auth json"
 fi
 grep -q '"url"' "$channel_manifest" || fail "remote acquisition channel manifest lacks url"
 if grep -q '"path"' "$channel_manifest"; then
@@ -13070,7 +13150,57 @@ case "$probe_output" in
   *) fail "launcher probe sentinel missing" ;;
 esac
 
-if [ "$update_agent_mode" = "update-agent" ]; then
+if [ "$proof_mode" = "auth-onboarding" ]; then
+  mkdir -p "$auth_onboarding_codex_home"
+  CODEX_HOME="$auth_onboarding_codex_home" \
+    OMNIGENT_STOCK_CODEX_PATH="$provisioned_codex" \
+    uvx --from "$user_runtime_root" python - \
+      "$auth_onboarding_codex_home" \
+      "$launcher_path" <<'PY'
+import json
+import shlex
+import sys
+from pathlib import Path
+
+from omnigent import codex_native
+
+codex_home = Path(sys.argv[1])
+launcher_path = Path(sys.argv[2])
+source = codex_native._resolve_codex_auth_source()
+reason = codex_native._codex_auth_unavailable_reason()
+onboarding_command = (
+    f"CODEX_HOME={shlex.quote(str(codex_home))} "
+    f"{shlex.quote(str(launcher_path))} login"
+)
+print(json.dumps({
+    "authPath": str(source.auth_path),
+    "authUploaded": False,
+    "codexHome": str(codex_home),
+    "commandExecuted": False,
+    "commandSurface": "installed-compat-launcher",
+    "kind": "omnigent-clean-vm-auth-onboarding-evidence",
+    "launcherPath": str(launcher_path),
+    "onboardingCommand": onboarding_command,
+    "unavailableReason": reason,
+}, sort_keys=True))
+if source.auth_path != codex_home / "auth.json":
+    raise SystemExit(
+        f"auth onboarding resolved wrong path: {source.auth_path} != "
+        f"{codex_home / 'auth.json'}"
+    )
+if reason != "needs-auth":
+    raise SystemExit(f"expected needs-auth for auth onboarding, got {reason!r}")
+PY
+  printf 'stock_codex_compat_pkg_clean_vm_auth_onboarding_status=replacement-ready\n'
+  printf '%s=%s\n' \
+    'stock_codex_compat_pkg_clean_vm_auth_onboarding_launcher_path' \
+    "$launcher_path"
+  printf '%s=%s\n' \
+    'stock_codex_compat_pkg_clean_vm_auth_onboarding_codex_home' \
+    "$auth_onboarding_codex_home"
+fi
+
+if [ "$proof_mode" = "update-agent" ]; then
   updater_script="$user_runtime_root/scripts/update_stock_codex_compat.py"
   rollback_metadata_path="$manifest_path.rollback.json"
   update_output_path="$proof_root/update-agent-direct-output.json"
@@ -13891,6 +14021,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
     live_auth_path: Path | None = None,
     live_auth_source: str | None = None,
     update_agent: bool = False,
+    auth_onboarding: bool = False,
 ) -> StockCodexCompatPkgCleanVmProof:
     """Run signed-pkg lifecycle inside a disposable clean macOS VM over SSH."""
     stock_codex_path = stock_codex_path.expanduser().resolve()
@@ -13915,6 +14046,8 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                 if live_auth_path is not None
                 else "official-remote-channel-update-agent"
                 if update_agent
+                else "official-remote-channel-auth-onboarding"
+                if auth_onboarding
                 else "official-remote-channel-acquisition"
             ),
             cask_token=remote_channel.cask_token,
@@ -13931,6 +14064,13 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
             live_auth_uploaded=live_auth_path is not None,
             live_model_turn_requested=live_auth_path is not None,
             update_agent_requested=update_agent,
+            auth_onboarding_requested=auth_onboarding,
+        )
+
+    if sum((live_auth_path is not None, update_agent, auth_onboarding)) > 1:
+        raise SystemExit(
+            "stock-codex-compat-pkg-clean-vm proof modes are mutually exclusive: "
+            "choose only one of live model, update-agent, or auth-onboarding."
         )
 
     missing: list[str] = []
@@ -14188,10 +14328,19 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     if live_auth_path is None:
                         remote_command_parts.append("")
                     remote_command_parts.append("update-agent")
+                if auth_onboarding:
+                    if live_auth_path is None:
+                        remote_command_parts.append("")
+                    remote_command_parts.append("auth-onboarding")
                 remote_command_args = tuple(remote_command_parts)
                 if update_agent:
                     success_sentinel = (
                         "stock_codex_compat_pkg_clean_vm_update_agent_status="
+                        "replacement-ready"
+                    )
+                elif auth_onboarding:
+                    success_sentinel = (
+                        "stock_codex_compat_pkg_clean_vm_auth_onboarding_status="
                         "replacement-ready"
                     )
                 elif live_auth_path is None:
@@ -14318,16 +14467,18 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     )
                 )
             update_agent_output_evidence = None
+            auth_onboarding_output_evidence = None
             host_cache_referenced = False
             host_cache_root = Path.home() / ".local" / "omnigent" / "codex-stock"
-            if update_agent:
+            if update_agent or auth_onboarding:
                 host_cache_referenced = str(host_cache_root) in remote_output
                 if host_cache_referenced:
+                    mode_name = "update agent" if update_agent else "auth onboarding"
                     return finalize_clean_vm_proof(
                         _blocked_stock_codex_compat_pkg_clean_vm_proof(
                             tool_paths=tool_paths,
                             missing_prerequisites=(
-                                "clean VM update agent referenced host stock Codex cache",
+                                f"clean VM {mode_name} referenced host stock Codex cache",
                             ),
                             stock_codex_path=stock_codex_path,
                             stock_codex_version=stock_codex_version,
@@ -14349,6 +14500,39 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                             tart_started=tart_started,
                         )
                     )
+            if auth_onboarding:
+                auth_onboarding_output_evidence = (
+                    _parse_clean_vm_auth_onboarding_output_evidence(remote_output)
+                )
+                if auth_onboarding_output_evidence is None:
+                    return finalize_clean_vm_proof(
+                        _blocked_stock_codex_compat_pkg_clean_vm_proof(
+                            tool_paths=tool_paths,
+                            missing_prerequisites=(
+                                "clean VM auth-onboarding proof omitted parseable "
+                                "guided login evidence",
+                            ),
+                            stock_codex_path=stock_codex_path,
+                            stock_codex_version=stock_codex_version,
+                            stock_codex_sha256=stock_codex_sha256,
+                            package_path=package_path,
+                            package_sha256=package_sha256,
+                            tart_name=clean_vm_tart_name,
+                            ssh_target=resolved_target,
+                            ssh_identity=clean_vm_ssh_identity,
+                            ssh_user=clean_vm_ssh_user,
+                            ssh_port=clean_vm_ssh_port,
+                            tart_ip=tart_ip,
+                            remote_work_dir=remote_work_dir,
+                            remote_status="auth-onboarding-evidence-missing",
+                            remote_output_preview=_preview_text(
+                                remote_output,
+                                limit=12000,
+                            ),
+                            tart_started=tart_started,
+                        )
+                    )
+            if update_agent:
                 update_agent_output_evidence = (
                     _parse_clean_vm_update_agent_output_evidence(remote_output)
                 )
@@ -14429,6 +14613,13 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
             update_agent_scheduled_action = None
             update_agent_selected_codex_path = None
             update_agent_host_cache_referenced = None
+            auth_onboarding_launcher_path = None
+            auth_onboarding_codex_home = None
+            auth_onboarding_auth_path = None
+            auth_onboarding_unavailable_reason = None
+            auth_onboarding_command = None
+            auth_onboarding_command_executed = None
+            auth_onboarding_auth_uploaded = None
             if live_output_evidence is not None:
                 (
                     live_thread_id,
@@ -14455,6 +14646,16 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                 update_agent_host_cache_referenced = (
                     update_agent_host_cache_referenced or host_cache_referenced
                 )
+            if auth_onboarding_output_evidence is not None:
+                (
+                    auth_onboarding_launcher_path,
+                    auth_onboarding_codex_home,
+                    auth_onboarding_auth_path,
+                    auth_onboarding_unavailable_reason,
+                    auth_onboarding_command,
+                    auth_onboarding_command_executed,
+                    auth_onboarding_auth_uploaded,
+                ) = auth_onboarding_output_evidence
             return finalize_clean_vm_proof(
                 StockCodexCompatPkgCleanVmProof(
                     status="replacement-ready",
@@ -14496,6 +14697,18 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     update_agent_host_cache_referenced=(
                         update_agent_host_cache_referenced
                     ),
+                    auth_onboarding_requested=auth_onboarding,
+                    auth_onboarding_launcher_path=auth_onboarding_launcher_path,
+                    auth_onboarding_codex_home=auth_onboarding_codex_home,
+                    auth_onboarding_auth_path=auth_onboarding_auth_path,
+                    auth_onboarding_unavailable_reason=(
+                        auth_onboarding_unavailable_reason
+                    ),
+                    auth_onboarding_command=auth_onboarding_command,
+                    auth_onboarding_command_executed=(
+                        auth_onboarding_command_executed
+                    ),
+                    auth_onboarding_auth_uploaded=auth_onboarding_auth_uploaded,
                 )
             )
     finally:
@@ -14577,6 +14790,32 @@ def run_stock_codex_compat_pkg_clean_vm_live_proof(
         remote_channel=_official_stock_codex_remote_channel(),
         live_auth_path=auth_path,
         live_auth_source=auth_source,
+    )
+
+
+def run_stock_codex_compat_pkg_clean_vm_auth_onboarding_proof(
+    stock_codex_path: Path,
+    *,
+    package_path: Path | None,
+    clean_vm_ssh_target: str | None,
+    clean_vm_tart_name: str | None,
+    clean_vm_ssh_identity: Path | None,
+    clean_vm_ssh_user: str | None,
+    clean_vm_ssh_port: int,
+    clean_vm_start_tart: bool,
+) -> StockCodexCompatPkgCleanVmProof:
+    """Prove clean-VM guided auth setup without uploading credentials."""
+    return run_stock_codex_compat_pkg_clean_vm_proof(
+        stock_codex_path,
+        package_path=package_path,
+        clean_vm_ssh_target=clean_vm_ssh_target,
+        clean_vm_tart_name=clean_vm_tart_name,
+        clean_vm_ssh_identity=clean_vm_ssh_identity,
+        clean_vm_ssh_user=clean_vm_ssh_user,
+        clean_vm_ssh_port=clean_vm_ssh_port,
+        clean_vm_start_tart=clean_vm_start_tart,
+        remote_channel=_official_stock_codex_remote_channel(),
+        auth_onboarding=True,
     )
 
 
@@ -19198,6 +19437,125 @@ def print_stock_codex_compat_pkg_clean_vm_update_agent_proof(
         "ASSERTION: launchctl bootstrap, kickstart, and bootout complete, the "
         "scheduled updater run reports up-to-date, and the VM proof does not "
         "upload or reference the host stock Codex cache"
+    )
+
+
+def print_stock_codex_compat_pkg_clean_vm_auth_onboarding_proof(
+    proof: StockCodexCompatPkgCleanVmProof,
+) -> None:
+    """Emit operator evidence for clean-VM guided auth onboarding."""
+    print("stock_codex_compat_pkg_clean_vm_auth_onboarding_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_surface="
+        "signed-pkg-clean-vm-installed-launcher-guided-auth"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_auth_onboarding_status={proof.status}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_missing_prerequisites="
+        f"{json.dumps(list(proof.missing_prerequisites), sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_tool_paths="
+        f"{json.dumps(proof.tool_paths, sort_keys=True)}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_auth_onboarding_package_path={proof.package_path}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_package_sha256="
+        f"{proof.package_sha256}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_auth_onboarding_cask_version={proof.cask_version}")
+    print(f"stock_codex_compat_pkg_clean_vm_auth_onboarding_cask_url={proof.cask_url}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_cask_sha256="
+        f"{proof.cask_sha256}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_channel_policy="
+        f"{proof.channel_policy}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_host_stock_codex_uploaded="
+        f"{proof.host_stock_codex_uploaded}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_requested="
+        f"{proof.auth_onboarding_requested}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_launcher_path="
+        f"{proof.auth_onboarding_launcher_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_codex_home="
+        f"{proof.auth_onboarding_codex_home}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_auth_path="
+        f"{proof.auth_onboarding_auth_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_unavailable_reason="
+        f"{proof.auth_onboarding_unavailable_reason}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_command="
+        f"{proof.auth_onboarding_command!r}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_command_executed="
+        f"{proof.auth_onboarding_command_executed}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_auth_uploaded="
+        f"{proof.auth_onboarding_auth_uploaded}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_auth_onboarding_tart_name={proof.tart_name}")
+    print(f"stock_codex_compat_pkg_clean_vm_auth_onboarding_ssh_target={proof.ssh_target}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_ssh_identity="
+        f"{proof.ssh_identity}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_auth_onboarding_ssh_user={proof.ssh_user}")
+    print(f"stock_codex_compat_pkg_clean_vm_auth_onboarding_ssh_port={proof.ssh_port}")
+    print(f"stock_codex_compat_pkg_clean_vm_auth_onboarding_tart_ip={proof.tart_ip}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_remote_work_dir="
+        f"{proof.remote_work_dir}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_remote_status="
+        f"{proof.remote_status}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_tart_started="
+        f"{proof.tart_started}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_tart_stopped="
+        f"{proof.tart_stopped}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_onboarding_remote_output="
+        f"{proof.remote_output_preview!r}"
+    )
+    if proof.status == "blocked":
+        print(
+            "ASSERTION: clean VM auth-onboarding validation is blocked by "
+            "missing official-channel metadata, disposable VM SSH/Tart "
+            "prerequisites, package artifact, noninteractive sudo, VM uvx, "
+            "operator marker, or clean VM state"
+        )
+        return
+    print(
+        "ASSERTION: the signed/notarized package can install into a disposable "
+        "VM, acquire stock Codex from the official channel inside that VM, "
+        "bootstrap the compatibility launcher, and classify a proof-scoped "
+        "clean CODEX_HOME as needs-auth"
+    )
+    print(
+        "ASSERTION: auth onboarding emits a user-run login command through the "
+        "installed compatibility launcher while proving the command was not "
+        "executed and no auth credential was uploaded"
     )
 
 
@@ -24043,6 +24401,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-pkg-clean-vm-bootstrap",
             "stock-codex-compat-pkg-clean-vm",
             "stock-codex-compat-pkg-clean-vm-remote-acquisition",
+            "stock-codex-compat-pkg-clean-vm-auth-onboarding",
             "stock-codex-compat-pkg-clean-vm-update-agent",
             "stock-codex-compat-pkg-clean-vm-live",
             "stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
@@ -24227,6 +24586,11 @@ def parse_args() -> argparse.Namespace:
             "disposable VM, then proves the packaged runtime downloads, "
             "verifies, extracts, bootstraps, rolls back, and cleans up stock "
             "Codex inside the VM without a host-copied Codex binary. "
+            "'stock-codex-compat-pkg-clean-vm-auth-onboarding' extends that "
+            "clean-VM remote acquisition path by classifying a proof-scoped "
+            "clean CODEX_HOME as needs-auth and emitting a guided login "
+            "command through the installed compatibility launcher without "
+            "uploading credentials or running browser login. "
             "'stock-codex-compat-pkg-clean-vm-update-agent' extends that "
             "clean-VM remote acquisition path by writing the installed "
             "runtime's user LaunchAgent, loading it with launchctl bootstrap, "
@@ -25217,6 +25581,44 @@ def main() -> int:
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_stock_codex_compat_pkg_clean_vm_update_agent_proof(
             run_stock_codex_compat_pkg_clean_vm_update_agent_proof(
+                codex_path,
+                package_path=args.pkg_path,
+                clean_vm_ssh_target=args.clean_vm_ssh_target,
+                clean_vm_tart_name=args.clean_vm_tart_name,
+                clean_vm_ssh_identity=args.clean_vm_ssh_identity,
+                clean_vm_ssh_user=args.clean_vm_ssh_user,
+                clean_vm_ssh_port=args.clean_vm_ssh_port,
+                clean_vm_start_tart=args.clean_vm_start_tart,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-clean-vm-auth-onboarding":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-auth-onboarding does not use "
+                "--apple-bundle; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-auth-onboarding cannot allow a "
+                "Codex-fork binary."
+            )
+        if args.pkg_output_path is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-auth-onboarding consumes "
+                "--pkg-path; produce persistent packages with "
+                "stock-codex-compat-pkg-signed-notarized."
+            )
+        if args.pkg_path is None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-auth-onboarding requires "
+                "--pkg-path from stock-codex-compat-pkg-signed-notarized."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_pkg_clean_vm_auth_onboarding_proof(
+            run_stock_codex_compat_pkg_clean_vm_auth_onboarding_proof(
                 codex_path,
                 package_path=args.pkg_path,
                 clean_vm_ssh_target=args.clean_vm_ssh_target,
