@@ -301,6 +301,17 @@ The next gates should split by product mode:
   stages the official stable Homebrew/OpenAI GitHub release archive, proves
   reuse without another remote-download flag, and keeps host-cache paths out of
   emitted plans;
+- for `stock-codex-compat`, treat pkg-installed runtime stable update promotion
+  and scheduled updater shape as green: `stock-codex-compat-pkg-update-promotion`
+  promotes only the clean user's launcher manifest pointer and
+  `OMNIGENT_STOCK_CODEX_PATH`, writes rollback metadata, suppresses a second
+  promotion as `up-to-date`, and proves rollback restoration; the adjacent
+  `stock-codex-compat-pkg-update-agent` gate packages
+  `runtime/scripts/update_stock_codex_compat.py`, writes a user LaunchAgent plist
+  whose `ProgramArguments` delegate to `uvx --from <installed-runtime> python
+  <installed-runtime>/scripts/update_stock_codex_compat.py`, omits proof-only
+  stale-current flags, runs the updater once directly, and proves the next run is
+  a no-op without another remote-download flag;
 - for `stock-codex-compat`, treat the wrapped MCP relay-tool gate as blocked:
   `stock-codex-compat-wrapper-relay-tool` starts the real Omnigent
   `tool_relay.json` sidecar and advertises `omnigent_wrapper_relay_probe`, but
@@ -329,11 +340,11 @@ The next gates should split by product mode:
   extraction, staged-payload reuse, and no-host-cache leakage from both source
   checkout and packaged-runtime paths. Remaining production choices are
   automated first-boot setup from a raw public image or new machine, browser or
-  device auth onboarding UX, updater scheduling, persistent launcher pointer
-  promotion, alpha/pre-release channel policy, independent archive signature
-  policy, and broader UI/device bridge coverage such as screenshot, snapshot,
-  gesture, or device execution if product scope requires them. Raw unwrapped
-  stock Codex Electron/CLI route parity remains blocked;
+  device auth onboarding UX, launchd enablement policy, alpha/pre-release channel
+  policy, independent archive signature policy, and broader UI/device bridge
+  coverage such as screenshot, snapshot, gesture, or device execution if product
+  scope requires them. Raw unwrapped stock Codex Electron/CLI route parity remains
+  blocked;
 - decide whether automated browser/device login UX, token freshness validation,
   or cross-machine credential packaging is product scope; or
 - broaden the Apple workflow smoke to release/readiness/review only if product

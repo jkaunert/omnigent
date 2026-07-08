@@ -1340,6 +1340,57 @@ class StockCodexCompatPkgUpdatePromotionProof:
 
 
 @dataclass(frozen=True)
+class StockCodexCompatPkgUpdateAgentProof:
+    """Proof result for scheduled updates from a pkg-installed runtime."""
+
+    stock_codex_path: Path
+    stock_codex_version: str
+    stock_codex_sha256: str
+    package_path: Path
+    package_sha256: str
+    source_bundle_sha256: str
+    package_identifier: str
+    package_version: str
+    install_root: Path
+    installed_prefix: Path
+    installed_runtime_root: Path
+    updater_script_path: Path
+    provisioner_script_path: Path
+    clean_home: Path
+    clean_cache_root: Path
+    uvx_path: Path
+    policy_name: str
+    cask_token: str
+    cask_tap: str
+    cask_homepage: str
+    cask_version: str
+    cask_url: str
+    cask_sha256: str
+    archive_executable: str
+    channel_manifest_path: Path
+    launcher_manifest_path: Path
+    rollback_metadata_path: Path
+    launch_agent_path: Path
+    launch_agent_label: str
+    launch_agent_start_interval: int
+    launch_agent_run_at_load: bool
+    launch_agent_program_arguments: tuple[str, ...]
+    update_action: str
+    update_mutates_filesystem: bool
+    plan_action: str
+    plan_mutates_filesystem: bool
+    promotion_action: str
+    promotion_mutates_filesystem: bool
+    promoted_codex_path: Path
+    promoted_env_path: Path
+    post_update_action: str
+    post_update_mutates_filesystem: bool
+    post_update_required: bool
+    host_cache_root: Path
+    host_cache_referenced_by_plans: bool
+
+
+@dataclass(frozen=True)
 class StockCodexCompatPkgCleanAuthProof:
     """Proof result for clean auth onboarding from a pkg-installed runtime."""
 
@@ -15680,6 +15731,540 @@ def run_stock_codex_compat_pkg_update_promotion_proof(
         )
 
 
+def run_stock_codex_compat_pkg_update_agent_proof(
+    stock_codex_path: Path,
+) -> StockCodexCompatPkgUpdateAgentProof:
+    """Prove a pkg-installed runtime owns scheduled update entrypoint shape."""
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    assert_stock_codex_path(stock_codex_path, allow_fork_codex=False)
+    stock_codex_realpath = stock_codex_path.resolve()
+    stock_codex_version = codex_version(stock_codex_realpath)
+    stock_codex_sha256 = sha256_file(stock_codex_realpath)
+    uvx_raw = shutil.which("uvx")
+    if uvx_raw is None:
+        raise SystemExit("Could not find uvx on PATH for pkg update agent proof.")
+    uvx_path = Path(uvx_raw).expanduser().resolve()
+    if not uvx_path.is_file() or not os.access(uvx_path, os.X_OK):
+        raise SystemExit(f"uvx binary is not executable: {uvx_path}")
+
+    cask = _read_homebrew_codex_cask()
+    cask_url = _json_string(cask, "url")
+    cask_sha256 = _json_string(cask, "sha256").lower()
+    cask_version = _json_string(cask, "version")
+    cask_token = _json_string(cask, "token")
+    cask_tap = _json_string(cask, "tap")
+    cask_homepage = _json_string(cask, "homepage")
+    archive_executable = _homebrew_codex_binary_name(cask)
+    _validate_homebrew_codex_cask_metadata(
+        token=cask_token,
+        homepage=cask_homepage,
+        url=cask_url,
+        sha256=cask_sha256,
+    )
+    selected_version = f"codex-cli {cask_version}"
+    provisioner = _load_stock_codex_provisioner()
+    policy_name = provisioner.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY
+
+    source_repo_root = Path(__file__).resolve().parents[1]
+    host_cache_root = (
+        Path.home() / ".local" / "omnigent" / "codex-stock"
+    ).expanduser().resolve()
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-pkg-update-agent-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        artifact_dir = root / "artifacts"
+        artifact_dir.mkdir()
+        package_path = artifact_dir / "omnigent-stock-codex-compat.pkg"
+        payload = _run_stock_codex_compat_pkg_builder_cli_json(
+            [
+                "--repo-root",
+                str(source_repo_root),
+                "--output",
+                str(package_path),
+                "--force",
+            ],
+            repo_root=source_repo_root,
+        )
+        package_proof = _validate_stock_codex_compat_pkg_builder_payload(
+            payload,
+            source_repo_root=source_repo_root,
+        )
+        expanded_payload_root = _expand_stock_codex_compat_pkg(
+            package_proof.package_path,
+            root / "pkg-expanded",
+        )
+        install_root = root / "installed-root"
+        installed_runtime_root = _stage_stock_codex_compat_pkg_install_root(
+            payload_root=expanded_payload_root,
+            install_root=install_root,
+            packaged_runtime_root=package_proof.runtime_root,
+            source_repo_root=source_repo_root,
+        )
+        installed_prefix = install_root / package_proof.install_prefix.relative_to("/")
+        provisioner_script_path = installed_runtime_root / "scripts" / "provision_stock_codex.py"
+        updater_script_path = installed_runtime_root / "scripts" / "update_stock_codex_compat.py"
+        if not provisioner_script_path.is_file():
+            raise SystemExit(
+                "Pkg-installed runtime is missing the stock Codex provisioner.\n"
+                f"expected={provisioner_script_path}"
+            )
+        if not updater_script_path.is_file():
+            raise SystemExit(
+                "Pkg-installed runtime is missing the stock Codex updater.\n"
+                f"expected={updater_script_path}"
+            )
+        pkg_manifest_path = installed_prefix / "pkg-manifest.json"
+        bundle_manifest_path = installed_prefix / "bundle-manifest.json"
+        pkg_manifest = json.loads(pkg_manifest_path.read_text(encoding="utf-8"))
+        bundle_manifest = json.loads(bundle_manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(pkg_manifest, dict) or not isinstance(bundle_manifest, dict):
+            raise SystemExit("Installed compatibility pkg manifests were not JSON objects.")
+        pkg_contract = pkg_manifest.get("contract")
+        if not isinstance(pkg_contract, dict):
+            raise SystemExit(f"Installed compatibility pkg contract missing: {pkg_manifest!r}")
+        if (
+            pkg_contract.get("stockCodexUpdates")
+            != "deferred-to-installed-runtime-command"
+        ):
+            raise SystemExit(
+                "Installed compatibility stock Codex updater contract mismatch: "
+                f"{pkg_contract!r}"
+            )
+        expected_updater_manifest_path = str(
+            package_proof.runtime_root / "scripts" / "update_stock_codex_compat.py"
+        )
+        if pkg_manifest.get("stockCodexUpdater") != expected_updater_manifest_path:
+            raise SystemExit(
+                "Installed compatibility pkg manifest recorded the wrong updater path: "
+                f"{pkg_manifest!r}"
+            )
+        if bundle_manifest.get("sourceRoot") != "<omitted-from-pkg>":
+            raise SystemExit(
+                "Installed compatibility bundle manifest embedded source root: "
+                f"{bundle_manifest!r}"
+            )
+
+        clean_home = root / "home"
+        clean_tmp = root / "tmp"
+        clean_home.mkdir(mode=0o700)
+        clean_tmp.mkdir(mode=0o700)
+        clean_cache_root = clean_home / ".local" / "omnigent" / "codex-stock"
+        if clean_cache_root.exists():
+            raise SystemExit(
+                "Pkg update agent clean cache unexpectedly exists before proof.\n"
+                f"cache={clean_cache_root}"
+            )
+
+        current_codex_path = root / "current" / "codex"
+        current_codex_path.parent.mkdir(parents=True)
+        shutil.copy2(stock_codex_realpath, current_codex_path)
+        current_codex_path.chmod(0o755)
+        if (
+            codex_version(current_codex_path) != stock_codex_version
+            or sha256_file(current_codex_path) != stock_codex_sha256
+        ):
+            raise SystemExit("Pkg update agent temp current Codex copy changed identity.")
+
+        channel_manifest_path = root / "official-remote-update-channel.json"
+        channel_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-channel",
+                    "latest": cask_version,
+                    "artifacts": [
+                        {
+                            "version": selected_version,
+                            "url": cask_url,
+                            "sha256": cask_sha256,
+                            "archiveFormat": "tar.gz",
+                            "archiveExecutable": archive_executable,
+                        }
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        launcher_manifest_path = root / "stock-codex-compat-launcher.json"
+        launcher_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-compat-launcher",
+                    "pinnedCodexPath": str(current_codex_path),
+                    "env": {OMNIGENT_STOCK_CODEX_PATH_ENV: str(current_codex_path)},
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rollback_metadata_path = root / "stock-codex-compat-launcher.rollback.json"
+        launch_agent_path = (
+            clean_home
+            / "Library"
+            / "LaunchAgents"
+            / "ai.omnigent.stock-codex-compat.update.plist"
+        )
+
+        python_path_entries = [str(installed_runtime_root)]
+        if os.environ.get("PYTHONPATH"):
+            python_path_entries.append(os.environ["PYTHONPATH"])
+        env = os.environ.copy()
+        env.update(
+            {
+                "HOME": str(clean_home),
+                "TMPDIR": str(clean_tmp),
+                "PYTHONPATH": os.pathsep.join(python_path_entries),
+            }
+        )
+        env["PATH"] = f"{uvx_path.parent}{os.pathsep}{env.get('PATH', '')}"
+        env.pop("CODEX_HOME", None)
+        env.pop(OMNIGENT_STOCK_CODEX_PATH_ENV, None)
+
+        updater_common_command = [
+            sys.executable,
+            str(updater_script_path),
+            "--runtime-root",
+            str(installed_runtime_root),
+            "--uvx-path",
+            str(uvx_path),
+            "--cache-root",
+            str(clean_cache_root),
+            "--channel-manifest",
+            str(channel_manifest_path),
+            "--expected-sha256",
+            cask_sha256,
+            "--channel-policy",
+            policy_name,
+            "--launcher-manifest",
+            str(launcher_manifest_path),
+            "--rollback-metadata",
+            str(rollback_metadata_path),
+            "--json",
+        ]
+        update_result = _run_stock_codex_provisioner_json(
+            [
+                *updater_common_command,
+                "--allow-remote-channel-download",
+                "--write-launch-agent",
+                "--run-now",
+                "--launch-agent-path",
+                str(launch_agent_path),
+            ],
+            env=env,
+            cwd=installed_runtime_root,
+            failure_label="Pkg-installed Stock Codex scheduled updater command",
+            timeout=300,
+        )
+        update_action = _json_string(update_result, "action")
+        update_mutates = _json_bool(
+            update_result,
+            "mutatesFilesystem",
+            label="Pkg-installed Stock Codex scheduled updater command",
+        )
+        launch_agent = _json_object(
+            update_result,
+            "launchAgent",
+            label="Pkg-installed Stock Codex scheduled updater command",
+        )
+        if launch_agent.get("kind") != "omnigent-stock-codex-compat-update-launch-agent":
+            raise SystemExit(
+                "Pkg-installed scheduled updater emitted wrong launch agent kind: "
+                f"{launch_agent!r}"
+            )
+        if launch_agent.get("path") != str(launch_agent_path):
+            raise SystemExit(
+                "Pkg-installed scheduled updater wrote unexpected LaunchAgent path: "
+                f"{launch_agent!r}"
+            )
+        if launch_agent.get("written") is not True:
+            raise SystemExit(
+                "Pkg-installed scheduled updater did not write LaunchAgent plist: "
+                f"{launch_agent!r}"
+            )
+        launch_agent_label = _json_string(launch_agent, "label")
+        launch_agent_start_interval = launch_agent.get("startInterval")
+        launch_agent_run_at_load = launch_agent.get("runAtLoad")
+        if not isinstance(launch_agent_start_interval, int):
+            raise SystemExit(
+                "Pkg-installed scheduled updater emitted invalid StartInterval: "
+                f"{launch_agent!r}"
+            )
+        if not isinstance(launch_agent_run_at_load, bool):
+            raise SystemExit(
+                "Pkg-installed scheduled updater emitted invalid RunAtLoad: "
+                f"{launch_agent!r}"
+            )
+        raw_program_arguments = launch_agent.get("programArguments")
+        if not isinstance(raw_program_arguments, list) or not all(
+            isinstance(item, str) for item in raw_program_arguments
+        ):
+            raise SystemExit(
+                "Pkg-installed scheduled updater emitted invalid ProgramArguments: "
+                f"{launch_agent!r}"
+            )
+        launch_agent_program_arguments = tuple(raw_program_arguments)
+        with launch_agent_path.open("rb") as handle:
+            launch_agent_plist = plistlib.load(handle)
+        if launch_agent_plist.get("ProgramArguments") != list(
+            launch_agent_program_arguments
+        ):
+            raise SystemExit(
+                "Pkg-installed scheduled updater JSON did not match plist "
+                "ProgramArguments.\n"
+                f"json={launch_agent_program_arguments!r}\nplist={launch_agent_plist!r}"
+            )
+        expected_program_prefix = (
+            str(uvx_path),
+            "--from",
+            str(installed_runtime_root),
+            "python",
+            str(updater_script_path),
+        )
+        if launch_agent_program_arguments[:5] != expected_program_prefix:
+            raise SystemExit(
+                "Pkg-installed scheduled updater plist did not invoke the "
+                "installed updater through uvx --from <runtime>.\n"
+                f"expected_prefix={expected_program_prefix!r}\n"
+                f"actual={launch_agent_program_arguments!r}"
+            )
+        forbidden_scheduled_flags = {
+            "--current-codex",
+            "--write-launch-agent",
+            "--run-now",
+        }
+        forbidden_present = sorted(
+            flag for flag in forbidden_scheduled_flags if flag in launch_agent_program_arguments
+        )
+        if forbidden_present:
+            raise SystemExit(
+                "Pkg-installed scheduled updater plist baked proof-only flags "
+                f"into persistent scheduling: {forbidden_present!r}"
+            )
+        required_scheduled_flags = {
+            "--allow-remote-channel-download",
+            "--runtime-root",
+            "--cache-root",
+            "--channel-manifest",
+            "--launcher-manifest",
+            "--rollback-metadata",
+            "--json",
+        }
+        missing_scheduled_flags = sorted(
+            flag
+            for flag in required_scheduled_flags
+            if flag not in launch_agent_program_arguments
+        )
+        if missing_scheduled_flags:
+            raise SystemExit(
+                "Pkg-installed scheduled updater plist missed required flags: "
+                f"{missing_scheduled_flags!r}"
+            )
+
+        plan = _json_object(
+            update_result,
+            "plan",
+            label="Pkg-installed Stock Codex scheduled updater command",
+        )
+        plan_action = _json_string(plan, "action")
+        plan_mutates = _json_bool(
+            plan,
+            "mutatesFilesystem",
+            label="Pkg-installed Stock Codex scheduled updater command plan",
+        )
+        promotion = _json_object(
+            update_result,
+            "promotion",
+            label="Pkg-installed Stock Codex scheduled updater command",
+        )
+        promotion_action = _json_string(promotion, "action")
+        promotion_mutates = _json_bool(
+            promotion,
+            "mutatesFilesystem",
+            label="Pkg-installed Stock Codex scheduled updater command promotion",
+        )
+        promotion_launcher = _json_object(
+            promotion,
+            "launcherManifest",
+            label="Pkg-installed Stock Codex scheduled updater command promotion",
+        )
+        promotion_env = _json_object(
+            promotion_launcher,
+            "env",
+            label="Pkg-installed Stock Codex scheduled updater command promotion launcher",
+        )
+        promoted_codex_path = Path(_json_string(promotion_launcher, "to")).resolve()
+        promoted_env_path = Path(
+            _json_string(promotion_env, OMNIGENT_STOCK_CODEX_PATH_ENV)
+        ).resolve()
+        promotion_rollback = _json_object(
+            promotion,
+            "rollback",
+            label="Pkg-installed Stock Codex scheduled updater command promotion",
+        )
+        promotion_rollback_metadata_path = Path(
+            _json_string(promotion_rollback, "metadataPath")
+        ).resolve()
+        if update_action != "promoted" or not update_mutates:
+            raise SystemExit(
+                "Pkg-installed scheduled updater did not report promotion.\n"
+                f"result={update_result!r}"
+            )
+        if plan_action != "staged" or not plan_mutates:
+            raise SystemExit(
+                "Pkg-installed scheduled updater did not stage through its first plan.\n"
+                f"result={update_result!r}"
+            )
+        if promotion_action != "promoted" or not promotion_mutates:
+            raise SystemExit(
+                "Pkg-installed scheduled updater did not promote after staging.\n"
+                f"result={update_result!r}"
+            )
+        if promotion_rollback_metadata_path != rollback_metadata_path.resolve():
+            raise SystemExit(
+                "Pkg-installed scheduled updater wrote unexpected rollback metadata.\n"
+                f"expected={rollback_metadata_path}\nactual={promotion_rollback_metadata_path}"
+            )
+        if promoted_codex_path != promoted_env_path:
+            raise SystemExit(
+                "Pkg-installed scheduled updater promoted divergent manifest/env paths.\n"
+                f"manifest={promoted_codex_path}\nenv={promoted_env_path}"
+            )
+        if not promoted_codex_path.is_relative_to(clean_cache_root.resolve()):
+            raise SystemExit(
+                "Pkg-installed scheduled updater promoted a path outside clean cache.\n"
+                f"cache={clean_cache_root}\npromoted={promoted_codex_path}"
+            )
+        if codex_version(promoted_codex_path) != selected_version:
+            raise SystemExit(
+                "Pkg-installed scheduled updater promoted unexpected Codex version.\n"
+                f"expected={selected_version!r}\nactual={codex_version(promoted_codex_path)!r}"
+            )
+
+        promoted_manifest = json.loads(launcher_manifest_path.read_text(encoding="utf-8"))
+        rollback_metadata = json.loads(rollback_metadata_path.read_text(encoding="utf-8"))
+        promoted_manifest_codex_path = Path(
+            _json_string(promoted_manifest, "pinnedCodexPath")
+        ).resolve()
+        if promoted_manifest_codex_path != promoted_codex_path:
+            raise SystemExit(
+                "Pkg-installed scheduled updater did not persist promoted launcher pointer.\n"
+                f"manifest={promoted_manifest!r}"
+            )
+        if Path(_json_string(rollback_metadata, "to")).resolve() != promoted_codex_path:
+            raise SystemExit(
+                "Pkg-installed scheduled updater rollback metadata missed promoted path.\n"
+                f"rollback={rollback_metadata!r}"
+            )
+
+        post_update_result = _run_stock_codex_provisioner_json(
+            updater_common_command,
+            env=env,
+            cwd=installed_runtime_root,
+            failure_label="Pkg-installed Stock Codex scheduled updater post-run",
+            timeout=60,
+        )
+        post_update_action = _json_string(post_update_result, "action")
+        post_update_mutates = _json_bool(
+            post_update_result,
+            "mutatesFilesystem",
+            label="Pkg-installed Stock Codex scheduled updater post-run",
+        )
+        post_update_plan = _json_object(
+            post_update_result,
+            "plan",
+            label="Pkg-installed Stock Codex scheduled updater post-run",
+        )
+        post_update_promotion = _json_object(
+            post_update_plan,
+            "promotion",
+            label="Pkg-installed Stock Codex scheduled updater post-run plan",
+        )
+        post_update_required = _json_bool(
+            post_update_promotion,
+            "required",
+            label="Pkg-installed Stock Codex scheduled updater post-run promotion",
+        )
+        if post_update_action != "up-to-date" or post_update_mutates or post_update_required:
+            raise SystemExit(
+                "Pkg-installed scheduled updater did not become no-op after promotion.\n"
+                f"result={post_update_result!r}"
+            )
+
+        proof_text = (
+            json.dumps(update_result, sort_keys=True)
+            + "\n"
+            + json.dumps(post_update_result, sort_keys=True)
+            + "\n"
+            + json.dumps(promoted_manifest, sort_keys=True)
+            + "\n"
+            + json.dumps(rollback_metadata, sort_keys=True)
+            + "\n"
+            + json.dumps(launch_agent_plist, sort_keys=True)
+        )
+        host_cache_referenced = str(host_cache_root) in proof_text
+        if host_cache_referenced:
+            raise SystemExit(
+                "Pkg-installed scheduled updater referenced the host stock Codex cache.\n"
+                f"host_cache_root={host_cache_root}"
+            )
+
+        return StockCodexCompatPkgUpdateAgentProof(
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            stock_codex_sha256=stock_codex_sha256,
+            package_path=package_proof.package_path,
+            package_sha256=package_proof.package_sha256,
+            source_bundle_sha256=package_proof.source_bundle_sha256,
+            package_identifier=package_proof.package_identifier,
+            package_version=package_proof.package_version,
+            install_root=install_root,
+            installed_prefix=installed_prefix,
+            installed_runtime_root=installed_runtime_root,
+            updater_script_path=updater_script_path,
+            provisioner_script_path=provisioner_script_path,
+            clean_home=clean_home,
+            clean_cache_root=clean_cache_root,
+            uvx_path=uvx_path,
+            policy_name=policy_name,
+            cask_token=cask_token,
+            cask_tap=cask_tap,
+            cask_homepage=cask_homepage,
+            cask_version=cask_version,
+            cask_url=cask_url,
+            cask_sha256=cask_sha256,
+            archive_executable=archive_executable,
+            channel_manifest_path=channel_manifest_path,
+            launcher_manifest_path=launcher_manifest_path,
+            rollback_metadata_path=rollback_metadata_path,
+            launch_agent_path=launch_agent_path,
+            launch_agent_label=launch_agent_label,
+            launch_agent_start_interval=launch_agent_start_interval,
+            launch_agent_run_at_load=launch_agent_run_at_load,
+            launch_agent_program_arguments=launch_agent_program_arguments,
+            update_action=update_action,
+            update_mutates_filesystem=update_mutates,
+            plan_action=plan_action,
+            plan_mutates_filesystem=plan_mutates,
+            promotion_action=promotion_action,
+            promotion_mutates_filesystem=promotion_mutates,
+            promoted_codex_path=promoted_codex_path,
+            promoted_env_path=promoted_env_path,
+            post_update_action=post_update_action,
+            post_update_mutates_filesystem=post_update_mutates,
+            post_update_required=post_update_required,
+            host_cache_root=host_cache_root,
+            host_cache_referenced_by_plans=host_cache_referenced,
+        )
+
+
 def run_stock_codex_compat_pkg_clean_auth_proof(
     stock_codex_path: Path,
 ) -> StockCodexCompatPkgCleanAuthProof:
@@ -17852,6 +18437,113 @@ def print_stock_codex_compat_pkg_update_promotion_proof(
     print(
         "ASSERTION: rollback restores the previous launcher pointer and "
         "returns the installed-runtime plan to stage-ready promotion posture"
+    )
+
+
+def print_stock_codex_compat_pkg_update_agent_proof(
+    proof: StockCodexCompatPkgUpdateAgentProof,
+) -> None:
+    """Emit operator evidence for installed-runtime scheduled updates."""
+    print("stock_codex_compat_pkg_update_agent_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_update_agent_surface="
+        "pkg-installed-runtime-user-launchagent-scheduled-update"
+    )
+    print(f"stock_codex_compat_pkg_update_agent_stock_codex_path={proof.stock_codex_path}")
+    print(
+        "stock_codex_compat_pkg_update_agent_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_agent_stock_codex_sha256="
+        f"{proof.stock_codex_sha256}"
+    )
+    print(f"stock_codex_compat_pkg_update_agent_package_path={proof.package_path}")
+    print(f"stock_codex_compat_pkg_update_agent_package_sha256={proof.package_sha256}")
+    print(
+        "stock_codex_compat_pkg_update_agent_source_bundle_sha256="
+        f"{proof.source_bundle_sha256}"
+    )
+    print(f"stock_codex_compat_pkg_update_agent_identifier={proof.package_identifier}")
+    print(f"stock_codex_compat_pkg_update_agent_version={proof.package_version}")
+    print(f"stock_codex_compat_pkg_update_agent_install_root={proof.install_root}")
+    print(f"stock_codex_compat_pkg_update_agent_installed_prefix={proof.installed_prefix}")
+    print(
+        "stock_codex_compat_pkg_update_agent_installed_runtime_root="
+        f"{proof.installed_runtime_root}"
+    )
+    print(f"stock_codex_compat_pkg_update_agent_updater_script={proof.updater_script_path}")
+    print(f"stock_codex_compat_pkg_update_agent_provisioner_script={proof.provisioner_script_path}")
+    print(f"stock_codex_compat_pkg_update_agent_home={proof.clean_home}")
+    print(f"stock_codex_compat_pkg_update_agent_cache_root={proof.clean_cache_root}")
+    print(f"stock_codex_compat_pkg_update_agent_uvx_path={proof.uvx_path}")
+    print(f"stock_codex_compat_pkg_update_agent_policy_name={proof.policy_name}")
+    print(f"stock_codex_compat_pkg_update_agent_cask_token={proof.cask_token}")
+    print(f"stock_codex_compat_pkg_update_agent_cask_tap={proof.cask_tap}")
+    print(f"stock_codex_compat_pkg_update_agent_cask_homepage={proof.cask_homepage}")
+    print(f"stock_codex_compat_pkg_update_agent_cask_version={proof.cask_version}")
+    print(f"stock_codex_compat_pkg_update_agent_cask_url={proof.cask_url}")
+    print(f"stock_codex_compat_pkg_update_agent_cask_sha256={proof.cask_sha256}")
+    print(f"stock_codex_compat_pkg_update_agent_archive_executable={proof.archive_executable}")
+    print(f"stock_codex_compat_pkg_update_agent_channel_manifest={proof.channel_manifest_path}")
+    print(f"stock_codex_compat_pkg_update_agent_launcher_manifest={proof.launcher_manifest_path}")
+    print(f"stock_codex_compat_pkg_update_agent_rollback_metadata={proof.rollback_metadata_path}")
+    print(f"stock_codex_compat_pkg_update_agent_launch_agent_path={proof.launch_agent_path}")
+    print(f"stock_codex_compat_pkg_update_agent_launch_agent_label={proof.launch_agent_label}")
+    print(
+        "stock_codex_compat_pkg_update_agent_launch_agent_start_interval="
+        f"{proof.launch_agent_start_interval}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_agent_launch_agent_run_at_load="
+        f"{proof.launch_agent_run_at_load}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_agent_program_arguments="
+        f"{shlex.join(proof.launch_agent_program_arguments)}"
+    )
+    print(f"stock_codex_compat_pkg_update_agent_update_action={proof.update_action}")
+    print(
+        "stock_codex_compat_pkg_update_agent_update_mutates_filesystem="
+        f"{proof.update_mutates_filesystem}"
+    )
+    print(f"stock_codex_compat_pkg_update_agent_plan_action={proof.plan_action}")
+    print(
+        "stock_codex_compat_pkg_update_agent_plan_mutates_filesystem="
+        f"{proof.plan_mutates_filesystem}"
+    )
+    print(f"stock_codex_compat_pkg_update_agent_promotion_action={proof.promotion_action}")
+    print(
+        "stock_codex_compat_pkg_update_agent_promotion_mutates_filesystem="
+        f"{proof.promotion_mutates_filesystem}"
+    )
+    print(f"stock_codex_compat_pkg_update_agent_promoted_codex_path={proof.promoted_codex_path}")
+    print(f"stock_codex_compat_pkg_update_agent_promoted_env_path={proof.promoted_env_path}")
+    print(f"stock_codex_compat_pkg_update_agent_post_action={proof.post_update_action}")
+    print(
+        "stock_codex_compat_pkg_update_agent_post_mutates_filesystem="
+        f"{proof.post_update_mutates_filesystem}"
+    )
+    print(f"stock_codex_compat_pkg_update_agent_post_required={proof.post_update_required}")
+    print(f"stock_codex_compat_pkg_update_agent_host_cache_root={proof.host_cache_root}")
+    print(
+        "stock_codex_compat_pkg_update_agent_host_cache_referenced_by_plans="
+        f"{proof.host_cache_referenced_by_plans}"
+    )
+    print("stock_codex_compat_pkg_update_agent_launchctl_load=not_attempted")
+    print("stock_codex_compat_pkg_update_agent_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: the pkg-installed runtime includes an updater command that "
+        "can write a user LaunchAgent plist without loading it"
+    )
+    print(
+        "ASSERTION: the scheduled ProgramArguments invoke uvx --from the "
+        "installed runtime and do not bake proof-only current Codex state"
+    )
+    print(
+        "ASSERTION: the updater can run immediately, stage the stable official "
+        "target, promote the clean launcher manifest, and become up-to-date "
+        "without another remote download"
     )
 
 
@@ -22065,6 +22757,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-pkg-clean-provision",
             "stock-codex-compat-pkg-update-acquisition",
             "stock-codex-compat-pkg-update-promotion",
+            "stock-codex-compat-pkg-update-agent",
             "stock-codex-compat-pkg-clean-auth-onboarding",
             "stock-codex-compat-pkg-signed-notarized",
             "stock-codex-compat-pkg-installer-lifecycle",
@@ -22202,6 +22895,9 @@ def parse_args() -> argparse.Namespace:
             "runtime can stage the stable official stock Codex release, "
             "promote a clean user launcher manifest, suppress promotion as "
             "up-to-date, and roll back to the previous pointer. "
+            "'stock-codex-compat-pkg-update-agent' proves the installed "
+            "runtime can write a user LaunchAgent plist for scheduled stock "
+            "Codex checks and run the updater entrypoint once directly. "
             "'stock-codex-compat-pkg-signed-notarized' builds the pkg with a "
             "Developer ID Installer identity, submits it through notarytool, "
             "staples it, validates the staple, and checks Gatekeeper; when "
@@ -22909,6 +23605,22 @@ def main() -> int:
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_stock_codex_compat_pkg_update_promotion_proof(
             run_stock_codex_compat_pkg_update_promotion_proof(codex_path)
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-update-agent":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-update-agent does not use --apple-bundle; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-update-agent cannot allow a Codex-fork binary."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_pkg_update_agent_proof(
+            run_stock_codex_compat_pkg_update_agent_proof(codex_path)
         )
         return 0
 

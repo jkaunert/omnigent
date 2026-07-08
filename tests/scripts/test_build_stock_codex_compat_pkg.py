@@ -61,6 +61,10 @@ def _write_minimal_repo(repo_root: Path) -> None:
         "#!/usr/bin/env python3\n",
     )
     _write_file(
+        repo_root / "scripts" / "update_stock_codex_compat.py",
+        "#!/usr/bin/env python3\n",
+    )
+    _write_file(
         repo_root / "scripts" / "bootstrap_stock_codex_compat.sh",
         "#!/bin/bash\n",
     )
@@ -104,6 +108,7 @@ def test_build_stock_codex_compat_pkg_contains_unsigned_runtime_contract(
         "runtime": "machine-level-runtime-only",
         "stockCodex": "external-pinned-payload",
         "stockCodexProvisioning": "deferred-to-installed-runtime-command",
+        "stockCodexUpdates": "deferred-to-installed-runtime-command",
         "userBootstrap": "deferred-to-installed-runtime-command",
     }
     assert result.inspection.bundle_manifest["sourceRoot"] == "<omitted-from-pkg>"
@@ -121,6 +126,7 @@ def test_postinstall_validates_target_volume_payload(tmp_path: Path) -> None:
     )
     _write_file(runtime_root / "scripts" / "install_stock_codex_compat_launcher.py", "")
     _write_file(runtime_root / "scripts" / "provision_stock_codex.py", "")
+    _write_file(runtime_root / "scripts" / "update_stock_codex_compat.py", "")
     _write_file(runtime_root / "scripts" / "bootstrap_stock_codex_compat.sh", "")
     _write_file(runtime_root / "scripts" / "bootstrap_stock_codex_compat.py", "")
 
@@ -144,6 +150,7 @@ def test_postinstall_validates_target_volume_payload(tmp_path: Path) -> None:
         'bootstrap_shell_path="${runtime_root}/scripts/bootstrap_stock_codex_compat.sh"'
         in script_text
     )
+    assert 'updater_path="${runtime_root}/scripts/update_stock_codex_compat.py"' in script_text
     assert (
         'bootstrap_python_path="${runtime_root}/scripts/bootstrap_stock_codex_compat.py"'
         in script_text

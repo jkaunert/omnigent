@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import plistlib
 import shlex
 import shutil
 import subprocess
@@ -2351,6 +2352,328 @@ def test_stock_codex_compat_pkg_update_promotion_proof_promotes_and_rolls_back(
     assert proof.rollback_plan_promotion_required is True
     assert proof.omnigent_resolved_promoted_codex_path == proof.acquired_codex_path
     assert proof.omnigent_resolved_rollback_codex_path == proof.current_codex_path
+    assert proof.host_cache_root == host_home / ".local" / "omnigent" / "codex-stock"
+    assert proof.host_cache_referenced_by_plans is False
+
+
+def test_stock_codex_compat_pkg_update_agent_proof_writes_schedule_and_runs_update(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host_home = tmp_path / "host-home"
+    stock_codex = _write_codex_binary(
+        tmp_path / "stock" / "codex",
+        version="codex-cli 0.142.5",
+    )
+    uvx_path = _write_uvx_binary(tmp_path / "bin" / "uvx")
+    cask_url = (
+        "https://github.com/openai/codex/releases/download/"
+        "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+    )
+    cask_sha = "a" * 64
+    cask = {
+        "token": "codex",
+        "tap": "homebrew/cask",
+        "homepage": "https://github.com/openai/codex",
+        "url": cask_url,
+        "sha256": cask_sha,
+        "version": "0.143.0",
+        "artifacts": [
+            {"binary": ["codex-aarch64-apple-darwin", {"target": "codex"}]},
+        ],
+    }
+    monkeypatch.setenv("HOME", str(host_home))
+    monkeypatch.setattr(_MOD, "_read_homebrew_codex_cask", lambda: cask)
+    monkeypatch.setattr(
+        _MOD.shutil,
+        "which",
+        lambda name: str(uvx_path) if name == "uvx" else None,
+    )
+
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir(parents=True)
+    package_path.write_bytes(b"fake-pkg")
+    install_prefix = Path("/Library/Application Support/Omnigent/stock-codex-compat")
+    package_proof = _MOD.StockCodexCompatPkgStructureProof(
+        package_path=package_path,
+        package_sha256=_MOD.sha256_file(package_path),
+        source_bundle_sha256="b" * 64,
+        package_identifier="ai.omnigent.stock-codex-compat",
+        package_version="0.3.0.dev0",
+        install_location="/",
+        install_prefix=install_prefix,
+        runtime_root=install_prefix / "runtime",
+        payload_file_count=1,
+        required_payload_files={"runtime/scripts/update_stock_codex_compat.py": True},
+        script_names=("postinstall",),
+        archive_entries=("Bom", "PackageInfo", "Payload", "Scripts"),
+        signature_status="no signature",
+        signed=False,
+        pkg_manifest_path=install_prefix / "pkg-manifest.json",
+        bundle_manifest_path=install_prefix / "bundle-manifest.json",
+        pkg_contract={
+            "runtime": "machine-level-runtime-only",
+            "userBootstrap": "deferred-to-installed-runtime-command",
+            "stockCodexProvisioning": "deferred-to-installed-runtime-command",
+            "stockCodexUpdates": "deferred-to-installed-runtime-command",
+        },
+        bundle_source_root="<omitted-from-pkg>",
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_run_stock_codex_compat_pkg_builder_cli_json",
+        lambda *_args, **_kwargs: {"kind": "fake-pkg-builder-payload"},
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_validate_stock_codex_compat_pkg_builder_payload",
+        lambda *_args, **_kwargs: package_proof,
+    )
+
+    def fake_expand(package_path_arg: Path, expand_dir: Path) -> Path:
+        assert package_path_arg == package_path
+        payload_root = expand_dir / "Payload"
+        payload_root.mkdir(parents=True)
+        return payload_root
+
+    def fake_stage(
+        *,
+        payload_root: Path,
+        install_root: Path,
+        packaged_runtime_root: Path,
+        source_repo_root: Path,
+    ) -> Path:
+        del payload_root, packaged_runtime_root, source_repo_root
+        installed_prefix = install_root / install_prefix.relative_to("/")
+        runtime_root = installed_prefix / "runtime"
+        (runtime_root / "scripts").mkdir(parents=True)
+        (runtime_root / "scripts" / "provision_stock_codex.py").write_text(
+            "#!/usr/bin/env python3\n",
+            encoding="utf-8",
+        )
+        (runtime_root / "scripts" / "update_stock_codex_compat.py").write_text(
+            "#!/usr/bin/env python3\n",
+            encoding="utf-8",
+        )
+        pkg_manifest = {
+            "contract": {
+                "runtime": "machine-level-runtime-only",
+                "userBootstrap": "deferred-to-installed-runtime-command",
+                "stockCodexProvisioning": "deferred-to-installed-runtime-command",
+                "stockCodexUpdates": "deferred-to-installed-runtime-command",
+            },
+            "stockCodexUpdater": str(
+                package_proof.runtime_root / "scripts" / "update_stock_codex_compat.py"
+            ),
+        }
+        bundle_manifest = {"sourceRoot": "<omitted-from-pkg>"}
+        (installed_prefix / "pkg-manifest.json").write_text(
+            json.dumps(pkg_manifest) + "\n",
+            encoding="utf-8",
+        )
+        (installed_prefix / "bundle-manifest.json").write_text(
+            json.dumps(bundle_manifest) + "\n",
+            encoding="utf-8",
+        )
+        return runtime_root
+
+    monkeypatch.setattr(_MOD, "_expand_stock_codex_compat_pkg", fake_expand)
+    monkeypatch.setattr(_MOD, "_stage_stock_codex_compat_pkg_install_root", fake_stage)
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = False,
+        capture_output: bool = False,
+        text: bool = False,
+        env: dict[str, str] | None = None,
+        cwd: Path | None = None,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text, env, cwd, timeout
+        if len(cmd) >= 2 and cmd[1:] == ["--version"]:
+            version = "codex-cli 0.143.0" if "0.143.0" in cmd[0] else "codex-cli 0.142.5"
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"{version}\n", stderr="")
+        if len(cmd) >= 2 and Path(cmd[1]).name == "update_stock_codex_compat.py":
+            args = cmd[2:]
+            runtime_root = Path(args[args.index("--runtime-root") + 1])
+            cache_root = Path(args[args.index("--cache-root") + 1])
+            channel_manifest = Path(args[args.index("--channel-manifest") + 1])
+            launcher_manifest_path = Path(args[args.index("--launcher-manifest") + 1])
+            rollback_metadata_path = Path(args[args.index("--rollback-metadata") + 1])
+            target_path = cache_root / "0.143.0" / "codex"
+            program_arguments = [
+                str(uvx_path),
+                "--from",
+                str(runtime_root),
+                "python",
+                str(runtime_root / "scripts" / "update_stock_codex_compat.py"),
+                "--runtime-root",
+                str(runtime_root),
+                "--cache-root",
+                str(cache_root),
+                "--channel-manifest",
+                str(channel_manifest),
+                "--channel-policy",
+                "official-openai-github-release",
+                "--launcher-manifest",
+                str(launcher_manifest_path),
+                "--rollback-metadata",
+                str(rollback_metadata_path),
+                "--json",
+                "--expected-sha256",
+                cask_sha,
+                "--allow-remote-channel-download",
+            ]
+            launch_agent = {
+                "kind": "omnigent-stock-codex-compat-update-launch-agent",
+                "label": "ai.omnigent.stock-codex-compat.update",
+                "path": str(
+                    Path(args[args.index("--launch-agent-path") + 1])
+                    if "--launch-agent-path" in args
+                    else tmp_path / "agent.plist"
+                ),
+                "written": "--write-launch-agent" in args,
+                "mutatesFilesystem": "--write-launch-agent" in args,
+                "runAtLoad": True,
+                "startInterval": 86400,
+                "programArguments": program_arguments,
+                "standardOutPath": str(tmp_path / "update.out.log"),
+                "standardErrorPath": str(tmp_path / "update.err.log"),
+            }
+            if launch_agent["written"]:
+                launch_agent_path = Path(str(launch_agent["path"]))
+                launch_agent_path.parent.mkdir(parents=True)
+                with launch_agent_path.open("wb") as handle:
+                    plistlib.dump(
+                        {
+                            "Label": launch_agent["label"],
+                            "ProgramArguments": program_arguments,
+                            "RunAtLoad": True,
+                            "StartInterval": 86400,
+                            "StandardOutPath": launch_agent["standardOutPath"],
+                            "StandardErrorPath": launch_agent["standardErrorPath"],
+                        },
+                        handle,
+                        sort_keys=True,
+                    )
+            if "--run-now" not in args and "--write-launch-agent" not in args:
+                result = {
+                    "kind": "omnigent-stock-codex-compat-update",
+                    "schemaVersion": 1,
+                    "action": "up-to-date",
+                    "mutatesFilesystem": False,
+                    "launchAgent": launch_agent,
+                    "plan": {
+                        "kind": "omnigent-stock-codex-update-plan",
+                        "schemaVersion": 1,
+                        "action": "up-to-date",
+                        "mutatesFilesystem": False,
+                        "promotion": {"required": False, "ready": True},
+                    },
+                    "promotion": None,
+                }
+                return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(result), stderr="")
+
+            _write_codex_binary(target_path, version="codex-cli 0.143.0")
+            launcher_manifest = json.loads(
+                launcher_manifest_path.read_text(encoding="utf-8")
+            )
+            previous = Path(str(launcher_manifest["pinnedCodexPath"])).resolve()
+            launcher_manifest["pinnedCodexPath"] = str(target_path.resolve())
+            launcher_manifest["env"][_MOD.OMNIGENT_STOCK_CODEX_PATH_ENV] = str(
+                target_path.resolve()
+            )
+            launcher_manifest_path.write_text(
+                json.dumps(launcher_manifest) + "\n",
+                encoding="utf-8",
+            )
+            rollback_metadata = {
+                "schemaVersion": 1,
+                "kind": "omnigent-stock-codex-update-rollback",
+                "launcherManifestPath": str(launcher_manifest_path),
+                "from": str(previous),
+                "to": str(target_path.resolve()),
+            }
+            rollback_metadata_path.write_text(
+                json.dumps(rollback_metadata) + "\n",
+                encoding="utf-8",
+            )
+            result = {
+                "kind": "omnigent-stock-codex-compat-update",
+                "schemaVersion": 1,
+                "action": "promoted",
+                "mutatesFilesystem": True,
+                "launchAgent": launch_agent,
+                "plan": {
+                    "kind": "omnigent-stock-codex-update-plan",
+                    "schemaVersion": 1,
+                    "action": "staged",
+                    "mutatesFilesystem": True,
+                    "promotion": {"required": True, "ready": True},
+                },
+                "promotion": {
+                    "kind": "omnigent-stock-codex-update-promotion",
+                    "schemaVersion": 1,
+                    "action": "promoted",
+                    "mutatesFilesystem": True,
+                    "launcherManifest": {
+                        "manifestPath": str(launcher_manifest_path),
+                        "field": "pinnedCodexPath",
+                        "from": str(previous),
+                        "to": str(target_path.resolve()),
+                        "env": {
+                            _MOD.OMNIGENT_STOCK_CODEX_PATH_ENV: str(target_path.resolve())
+                        },
+                    },
+                    "rollback": {
+                        "metadataPath": str(rollback_metadata_path),
+                        "codexPath": str(previous),
+                        "payloadRetention": "versioned-cache-keeps-previous-payload",
+                    },
+                },
+            }
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(result), stderr="")
+        raise AssertionError(f"unexpected subprocess command: {cmd!r}")
+
+    monkeypatch.setattr(_MOD.subprocess, "run", fake_run)
+
+    proof = _MOD.run_stock_codex_compat_pkg_update_agent_proof(stock_codex)
+
+    assert proof.stock_codex_path == stock_codex.resolve()
+    assert proof.stock_codex_version == "codex-cli 0.142.5"
+    assert proof.package_identifier == "ai.omnigent.stock-codex-compat"
+    assert proof.installed_runtime_root == proof.installed_prefix / "runtime"
+    assert proof.updater_script_path == (
+        proof.installed_runtime_root / "scripts" / "update_stock_codex_compat.py"
+    )
+    assert proof.policy_name == "official-openai-github-release"
+    assert proof.cask_version == "0.143.0"
+    assert proof.update_action == "promoted"
+    assert proof.update_mutates_filesystem is True
+    assert proof.plan_action == "staged"
+    assert proof.plan_mutates_filesystem is True
+    assert proof.promotion_action == "promoted"
+    assert proof.promotion_mutates_filesystem is True
+    assert proof.promoted_codex_path == proof.clean_cache_root / "0.143.0" / "codex"
+    assert proof.promoted_env_path == proof.promoted_codex_path
+    assert proof.post_update_action == "up-to-date"
+    assert proof.post_update_mutates_filesystem is False
+    assert proof.post_update_required is False
+    assert proof.launch_agent_label == "ai.omnigent.stock-codex-compat.update"
+    assert proof.launch_agent_start_interval == 86400
+    assert proof.launch_agent_run_at_load is True
+    assert proof.launch_agent_program_arguments[:5] == (
+        str(uvx_path),
+        "--from",
+        str(proof.installed_runtime_root),
+        "python",
+        str(proof.updater_script_path),
+    )
+    assert "--current-codex" not in proof.launch_agent_program_arguments
+    assert "--write-launch-agent" not in proof.launch_agent_program_arguments
+    assert "--run-now" not in proof.launch_agent_program_arguments
+    assert "--allow-remote-channel-download" in proof.launch_agent_program_arguments
     assert proof.host_cache_root == host_home / ".local" / "omnigent" / "codex-stock"
     assert proof.host_cache_referenced_by_plans is False
 
