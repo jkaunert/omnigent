@@ -34,7 +34,9 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TypeVar
+from urllib.error import URLError
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from omnigent_client import OmnigentClient
 
@@ -110,6 +112,7 @@ SELECTED_OWNER = f"{PLUGIN_NAME}:{SELECTED_SKILL}"
 EXPECTED_ROUTE = f"Routing: orchestrator-led\n\nActivated skills\n- `{SELECTED_OWNER}`"
 REFERENCE_SENTINEL = "Use this shared contract for broad brigade-orchestrator lanes"
 TOOL_SENTINEL = "OMNIGENT_TOOL_SENTINEL_42"
+OPENAI_CODEX_LATEST_RELEASE_API = "https://api.github.com/repos/openai/codex/releases/latest"
 ROUTER_MATRIX_REVIEW_OWNER = f"{PLUGIN_NAME}:apple-review-orchestrator"
 ROUTER_MATRIX_FOCUSED_OWNER = f"{PLUGIN_NAME}:apple-decision-stress-test"
 ROUTER_MATRIX_PROMPT_SIGNAL_SENTINEL = "ROUTER_MATRIX_PROMPT_SIGNAL_OK"
@@ -508,6 +511,73 @@ class StockCodexHomebrewRemoteChannelProof:
     provisioned_sha256: str
     provisioned_source_kind: str
     omnigent_resolved_codex_path: Path
+
+
+@dataclass(frozen=True)
+class _GitHubLatestStableCodexChannel:
+    """Validated latest stable GitHub release metadata for stock Codex."""
+
+    tag_name: str
+    version_slug: str
+    selected_version: str
+    release_name: str
+    release_html_url: str
+    published_at: str
+    asset_name: str
+    asset_url: str
+    asset_digest: str
+    asset_sha256: str
+    archive_executable: str
+
+
+@dataclass(frozen=True)
+class StockCodexGitHubLatestStableAcquisitionProof:
+    """Proof result for latest-stable GitHub release acquisition plus live route."""
+
+    source_codex_path: Path
+    source_codex_realpath: Path
+    source_codex_version: str
+    source_codex_sha256: str
+    current_codex_path: Path
+    current_codex_version: str
+    current_codex_sha256: str
+    policy_name: str
+    github_release_tag: str
+    github_release_name: str
+    github_release_url: str
+    github_published_at: str
+    github_asset_name: str
+    github_asset_url: str
+    github_asset_digest: str
+    github_asset_sha256: str
+    archive_executable: str
+    channel_manifest_path: Path
+    clean_home: Path
+    cache_root: Path
+    launcher_manifest_path: Path
+    acquired_payload_dir: Path
+    acquired_codex_path: Path
+    acquired_version: str
+    acquired_sha256: str
+    acquired_source_kind: str
+    acquired_channel_artifact: dict[str, Any]
+    acquisition_action: str
+    acquisition_mutates_filesystem: bool
+    acquisition_promotion_required: bool
+    acquisition_promotion_ready: bool
+    acquisition_launcher_update_required: bool
+    acquisition_rollback_codex_path: Path
+    reuse_action: str
+    reuse_mutates_filesystem: bool
+    reuse_without_remote_download: bool
+    blocked_without_remote_error: str
+    blocked_without_remote_cache_mutated: bool
+    omnigent_resolved_codex_path: Path
+    live_transcript_preview: str
+    live_route_prefix_present: bool
+    live_graph_ok: bool
+    host_cache_root: Path
+    host_cache_referenced_by_plans: bool
 
 
 @dataclass(frozen=True)
@@ -2395,6 +2465,101 @@ def run_stock_codex_homebrew_remote_channel_proof() -> StockCodexHomebrewRemoteC
         )
 
 
+def _read_openai_codex_latest_release() -> dict[str, Any]:
+    """Read the latest non-prerelease OpenAI Codex release from GitHub."""
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "omnigent-stock-codex-replacement-proof",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = Request(OPENAI_CODEX_LATEST_RELEASE_API, headers=headers)
+    try:
+        with urlopen(request, timeout=60) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except URLError as exc:
+        raise SystemExit(
+            f"Could not read latest OpenAI Codex GitHub release: {exc}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise SystemExit("Latest OpenAI Codex GitHub release response was not JSON") from exc
+    if not isinstance(payload, dict):
+        raise SystemExit(f"Latest OpenAI Codex GitHub release was not an object: {payload!r}")
+    return payload
+
+
+def _github_latest_stable_codex_channel_from_release(
+    release: dict[str, Any],
+) -> _GitHubLatestStableCodexChannel:
+    """Return validated stock-Codex archive metadata from a GitHub release."""
+    tag_name = _json_string(release, "tag_name")
+    if not tag_name.startswith("rust-v"):
+        raise SystemExit(f"Unexpected OpenAI Codex release tag: {tag_name!r}")
+    version_slug = tag_name.removeprefix("rust-v")
+    if re.fullmatch(r"\d+(?:\.\d+)+", version_slug) is None:
+        raise SystemExit(f"Latest OpenAI Codex release is not a stable numeric tag: {tag_name!r}")
+    if release.get("draft") is True:
+        raise SystemExit(f"Latest OpenAI Codex release is still a draft: {tag_name}")
+    if release.get("prerelease") is True:
+        raise SystemExit(f"Latest OpenAI Codex release is a prerelease: {tag_name}")
+    release_html_url = _json_string(release, "html_url")
+    published_at = _json_string(release, "published_at")
+    release_name = str(release.get("name") or version_slug)
+    archive_executable = _stock_codex_archive_executable_name()
+    asset_name = f"{archive_executable}.tar.gz"
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        raise SystemExit(f"Latest OpenAI Codex release omitted assets: {release!r}")
+    matches = [
+        asset for asset in assets if isinstance(asset, dict) and asset.get("name") == asset_name
+    ]
+    if len(matches) != 1:
+        raise SystemExit(
+            f"Expected one latest OpenAI Codex asset named {asset_name!r}, found {len(matches)}"
+        )
+    asset = matches[0]
+    asset_url = _json_string(asset, "browser_download_url")
+    parsed = urlparse(asset_url)
+    expected_path = f"/openai/codex/releases/download/{tag_name}/{asset_name}"
+    if parsed.scheme != "https" or parsed.netloc != "github.com" or parsed.path != expected_path:
+        raise SystemExit(
+            "Latest OpenAI Codex asset URL did not match the expected GitHub "
+            f"release path.\nexpected_path={expected_path!r}\nactual={asset_url!r}"
+        )
+    asset_digest = _json_string(asset, "digest").lower()
+    if not asset_digest.startswith("sha256:"):
+        raise SystemExit(
+            f"Latest OpenAI Codex asset omitted a sha256 digest: {asset_digest!r}"
+        )
+    asset_sha256 = asset_digest.removeprefix("sha256:")
+    if len(asset_sha256) != 64 or any(char not in "0123456789abcdef" for char in asset_sha256):
+        raise SystemExit(
+            f"Latest OpenAI Codex asset digest was not a sha256 hex digest: {asset_digest!r}"
+        )
+    return _GitHubLatestStableCodexChannel(
+        tag_name=tag_name,
+        version_slug=version_slug,
+        selected_version=f"codex-cli {version_slug}",
+        release_name=release_name,
+        release_html_url=release_html_url,
+        published_at=published_at,
+        asset_name=asset_name,
+        asset_url=asset_url,
+        asset_digest=asset_digest,
+        asset_sha256=asset_sha256,
+        archive_executable=archive_executable,
+    )
+
+
+def _github_latest_stable_codex_channel() -> _GitHubLatestStableCodexChannel:
+    """Return the latest stable stock-Codex release channel metadata."""
+    return _github_latest_stable_codex_channel_from_release(
+        _read_openai_codex_latest_release()
+    )
+
+
 def _read_homebrew_codex_cask() -> dict[str, Any]:
     """Return the current local Homebrew cask metadata for Codex."""
     completed = subprocess.run(
@@ -3954,6 +4119,514 @@ def print_stock_codex_update_acquisition_proof(
     print(
         "ASSERTION: acquisition records promotion and rollback intent, but "
         "does not promote persistent launcher or environment pointers"
+    )
+
+
+def run_stock_codex_github_latest_stable_acquisition_proof(
+    source_codex_path: Path,
+    *,
+    agent_dir: Path,
+    live_timeout_seconds: float,
+) -> StockCodexGitHubLatestStableAcquisitionProof:
+    """Acquire latest stable GitHub stock Codex and prove a live route turn."""
+    source_codex_realpath = source_codex_path.expanduser().resolve()
+    source_digest = sha256_file(source_codex_realpath)
+    source_version = codex_version(source_codex_realpath)
+    latest = _github_latest_stable_codex_channel()
+    repo_root = Path(__file__).resolve().parents[1]
+    provisioner_script = repo_root / "scripts" / "provision_stock_codex.py"
+    provisioner = _load_stock_codex_provisioner()
+    policy_name = provisioner.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY
+    host_cache_root = (
+        Path.home() / ".local" / "omnigent" / "codex-stock"
+    ).expanduser().resolve()
+    expected_channel_artifact = {
+        "archiveExecutable": latest.archive_executable,
+        "archiveFormat": "tar.gz",
+        "sha256": latest.asset_sha256,
+        "url": latest.asset_url,
+        "version": latest.selected_version,
+        "versionSlug": latest.version_slug,
+    }
+
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-github-latest-stable-"
+    ) as temp_root:
+        root = Path(temp_root).resolve()
+        clean_home = root / "home"
+        clean_tmp = root / "tmp"
+        clean_home.mkdir(mode=0o700)
+        clean_tmp.mkdir(mode=0o700)
+        cache_root = clean_home / ".local" / "omnigent" / "codex-stock"
+        blocked_cache_root = clean_home / ".local" / "omnigent" / "blocked-codex-stock"
+
+        current_codex_path = root / "current" / "codex"
+        current_codex_path.parent.mkdir(parents=True)
+        shutil.copy2(source_codex_realpath, current_codex_path)
+        current_codex_path.chmod(0o755)
+        current_codex_version = codex_version(current_codex_path)
+        current_codex_sha = sha256_file(current_codex_path)
+        if current_codex_version != source_version or current_codex_sha != source_digest:
+            raise SystemExit(
+                "GitHub latest-stable proof temp current Codex copy changed identity.\n"
+                f"source_version={source_version!r}\ncurrent_version={current_codex_version!r}\n"
+                f"source_sha={source_digest}\ncurrent_sha={current_codex_sha}"
+            )
+
+        channel_manifest_path = root / "github-latest-stable-channel.json"
+        channel_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-channel",
+                    "latest": latest.version_slug,
+                    "artifacts": [
+                        {
+                            "version": latest.selected_version,
+                            "url": latest.asset_url,
+                            "sha256": latest.asset_sha256,
+                            "archiveFormat": "tar.gz",
+                            "archiveExecutable": latest.archive_executable,
+                        }
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        launcher_manifest_path = root / "stock-codex-compat-launcher.json"
+        launcher_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex-compat-launcher",
+                    "pinnedCodexPath": str(current_codex_path),
+                    "env": {OMNIGENT_STOCK_CODEX_PATH_ENV: str(current_codex_path)},
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        env = os.environ.copy()
+        env.update({"HOME": str(clean_home), "TMPDIR": str(clean_tmp)})
+        env.pop("CODEX_HOME", None)
+        env.pop(OMNIGENT_STOCK_CODEX_PATH_ENV, None)
+        common_command = [
+            sys.executable,
+            str(provisioner_script),
+            "--plan-update",
+            "--channel-manifest",
+            str(channel_manifest_path),
+            "--expected-sha256",
+            latest.asset_sha256,
+            "--channel-policy",
+            policy_name,
+            "--current-codex",
+            str(current_codex_path),
+            "--launcher-manifest",
+            str(launcher_manifest_path),
+            "--stage-update",
+            "--json",
+        ]
+
+        blocked_completed = subprocess.run(
+            [
+                *common_command,
+                "--cache-root",
+                str(blocked_cache_root),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=repo_root,
+            timeout=60,
+        )
+        if blocked_completed.returncode == 0:
+            raise SystemExit(
+                "GitHub latest-stable acquisition unexpectedly succeeded without "
+                "explicit download permission.\n"
+                f"stdout={blocked_completed.stdout}\nstderr={blocked_completed.stderr}"
+            )
+        blocked_without_remote_error = (
+            blocked_completed.stderr or blocked_completed.stdout
+        ).strip()
+        if "allow-remote-channel-download" not in blocked_without_remote_error:
+            raise SystemExit(
+                "GitHub latest-stable acquisition failure did not require explicit "
+                "download opt-in.\n"
+                f"stdout={blocked_completed.stdout}\nstderr={blocked_completed.stderr}"
+            )
+        blocked_without_remote_cache_mutated = blocked_cache_root.exists() and any(
+            blocked_cache_root.rglob("*")
+        )
+        if blocked_without_remote_cache_mutated:
+            raise SystemExit(
+                "GitHub latest-stable acquisition without opt-in mutated its blocked cache.\n"
+                f"cache_root={blocked_cache_root}"
+            )
+
+        acquisition_plan = _run_stock_codex_provisioner_json(
+            [
+                *common_command,
+                "--cache-root",
+                str(cache_root),
+                "--allow-remote-channel-download",
+            ],
+            env=env,
+            cwd=repo_root,
+            failure_label="Stock Codex GitHub latest-stable acquisition",
+            timeout=360,
+        )
+        acquisition_action = _json_string(acquisition_plan, "action")
+        acquisition_mutates = _json_bool(
+            acquisition_plan,
+            "mutatesFilesystem",
+            label="Stock Codex GitHub latest-stable acquisition",
+        )
+        acquisition_target = _json_object(
+            acquisition_plan,
+            "target",
+            label="Stock Codex GitHub latest-stable acquisition",
+        )
+        acquisition_target_state = _json_string(acquisition_target, "state")
+        acquired_codex_path = Path(_json_string(acquisition_target, "codexPath")).resolve()
+        acquired_payload_dir = Path(_json_string(acquisition_target, "payloadDir")).resolve()
+        acquisition_promotion = _json_object(
+            acquisition_plan,
+            "promotion",
+            label="Stock Codex GitHub latest-stable acquisition",
+        )
+        acquisition_promotion_required = _json_bool(
+            acquisition_promotion,
+            "required",
+            label="Stock Codex GitHub latest-stable acquisition promotion",
+        )
+        acquisition_promotion_ready = _json_bool(
+            acquisition_promotion,
+            "ready",
+            label="Stock Codex GitHub latest-stable acquisition promotion",
+        )
+        acquisition_launcher = _json_object(
+            acquisition_promotion,
+            "launcherManifest",
+            label="Stock Codex GitHub latest-stable acquisition promotion",
+        )
+        acquisition_launcher_update_required = _json_bool(
+            acquisition_launcher,
+            "updateRequired",
+            label="Stock Codex GitHub latest-stable acquisition launcher promotion",
+        )
+        acquisition_rollback = _json_object(
+            acquisition_plan,
+            "rollback",
+            label="Stock Codex GitHub latest-stable acquisition",
+        )
+        acquisition_rollback_codex_path = Path(
+            _json_string(acquisition_rollback, "codexPath")
+        ).resolve()
+        staged_payload = _json_object(
+            acquisition_plan,
+            "stagedPayload",
+            label="Stock Codex GitHub latest-stable acquisition",
+        )
+        acquired_version = _json_string(staged_payload, "version")
+        acquired_sha = _json_string(staged_payload, "sha256")
+        acquired_source_kind = _json_string(staged_payload, "sourceKind")
+        acquired_channel_artifact = staged_payload.get("channelArtifact")
+        if not isinstance(acquired_channel_artifact, dict):
+            raise SystemExit(
+                "GitHub latest-stable acquisition staged payload omitted channel artifact.\n"
+                f"plan={acquisition_plan!r}"
+            )
+        if acquisition_action != "staged" or acquisition_target_state != "ready":
+            raise SystemExit(
+                "GitHub latest-stable acquisition did not stage a ready target.\n"
+                f"plan={acquisition_plan!r}"
+            )
+        if not acquisition_mutates:
+            raise SystemExit(
+                "GitHub latest-stable acquisition did not report filesystem mutation.\n"
+                f"plan={acquisition_plan!r}"
+            )
+        if not acquisition_promotion_required or not acquisition_promotion_ready:
+            raise SystemExit(
+                "GitHub latest-stable acquisition did not report target-ready "
+                f"promotion intent.\nplan={acquisition_plan!r}"
+            )
+        if not acquisition_launcher_update_required:
+            raise SystemExit(
+                "GitHub latest-stable acquisition did not report launcher update intent.\n"
+                f"plan={acquisition_plan!r}"
+            )
+        if acquisition_rollback_codex_path != current_codex_path.resolve():
+            raise SystemExit(
+                "GitHub latest-stable acquisition rollback path did not preserve "
+                f"current Codex.\nexpected={current_codex_path}\n"
+                f"actual={acquisition_rollback_codex_path}"
+            )
+        if acquired_version != latest.selected_version or acquired_source_kind != "channel":
+            raise SystemExit(
+                "GitHub latest-stable acquisition staged payload metadata mismatch.\n"
+                f"plan={acquisition_plan!r}"
+            )
+        if acquired_channel_artifact != expected_channel_artifact:
+            raise SystemExit(
+                "GitHub latest-stable acquisition staged payload artifact mismatch.\n"
+                f"expected={expected_channel_artifact!r}\nactual={acquired_channel_artifact!r}"
+            )
+        if not acquired_codex_path.is_file() or not os.access(acquired_codex_path, os.X_OK):
+            raise SystemExit(
+                f"GitHub latest-stable acquired Codex is not executable: {acquired_codex_path}"
+            )
+        actual_acquired_version = codex_version(acquired_codex_path)
+        if actual_acquired_version != latest.selected_version:
+            raise SystemExit(
+                "GitHub latest-stable acquired Codex reported an unexpected version.\n"
+                f"expected={latest.selected_version!r}\nactual={actual_acquired_version!r}"
+            )
+        acquired_manifest_path = acquired_payload_dir / "manifest.json"
+        acquired_manifest = json.loads(acquired_manifest_path.read_text(encoding="utf-8"))
+        if acquired_manifest.get("sourcePath") != latest.asset_url:
+            raise SystemExit(
+                f"GitHub latest-stable acquisition manifest source mismatch: {acquired_manifest!r}"
+            )
+        if acquired_manifest.get("sourceKind") != "channel":
+            raise SystemExit(
+                "GitHub latest-stable acquisition manifest source kind mismatch: "
+                f"{acquired_manifest!r}"
+            )
+        if acquired_manifest.get("channelArtifact") != expected_channel_artifact:
+            raise SystemExit(
+                "GitHub latest-stable acquisition manifest artifact mismatch: "
+                f"{acquired_manifest!r}"
+            )
+
+        reuse_plan = _run_stock_codex_provisioner_json(
+            [
+                *common_command,
+                "--cache-root",
+                str(cache_root),
+            ],
+            env=env,
+            cwd=repo_root,
+            failure_label="Stock Codex GitHub latest-stable acquisition reuse",
+            timeout=60,
+        )
+        reuse_action = _json_string(reuse_plan, "action")
+        reuse_mutates = _json_bool(
+            reuse_plan,
+            "mutatesFilesystem",
+            label="Stock Codex GitHub latest-stable acquisition reuse",
+        )
+        reuse_target = _json_object(
+            reuse_plan,
+            "target",
+            label="Stock Codex GitHub latest-stable acquisition reuse",
+        )
+        reuse_target_state = _json_string(reuse_target, "state")
+        reuse_target_path = Path(_json_string(reuse_target, "codexPath")).resolve()
+        if reuse_action != "stage-ready" or reuse_target_state != "ready":
+            raise SystemExit(
+                "GitHub latest-stable acquisition reuse did not report a "
+                f"preverified ready target.\nplan={reuse_plan!r}"
+            )
+        if reuse_target_path != acquired_codex_path:
+            raise SystemExit(
+                "GitHub latest-stable acquisition reuse selected a different target.\n"
+                f"expected={acquired_codex_path}\nactual={reuse_target_path}"
+            )
+        if reuse_mutates:
+            raise SystemExit(
+                f"GitHub latest-stable acquisition reuse mutated filesystem state: {reuse_plan!r}"
+            )
+
+        with temporary_env({OMNIGENT_STOCK_CODEX_PATH_ENV: str(acquired_codex_path)}):
+            resolved_raw = _find_codex_cli()
+        if resolved_raw is None:
+            raise SystemExit(f"{OMNIGENT_STOCK_CODEX_PATH_ENV} did not resolve a Codex binary.")
+        resolved_path = Path(resolved_raw).expanduser().resolve()
+        if resolved_path != acquired_codex_path:
+            raise SystemExit(
+                "Omnigent resolver did not select the GitHub latest-stable "
+                f"Codex payload.\nexpected={acquired_codex_path}\nactual={resolved_raw}"
+            )
+
+        live_transcript = run_live_proof_step(
+            "github-latest-stable-graph",
+            timeout_seconds=live_timeout_seconds,
+            action=lambda: run_live_runner_proof(agent_dir, acquired_codex_path),
+        )
+
+        plan_text = (
+            json.dumps(acquisition_plan, sort_keys=True)
+            + "\n"
+            + json.dumps(reuse_plan, sort_keys=True)
+            + "\n"
+            + json.dumps(acquired_manifest, sort_keys=True)
+        )
+        host_cache_referenced = str(host_cache_root) in plan_text
+        if host_cache_referenced:
+            raise SystemExit(
+                "GitHub latest-stable acquisition plan referenced the host "
+                f"stock Codex cache.\nhost_cache_root={host_cache_root}"
+            )
+
+        return StockCodexGitHubLatestStableAcquisitionProof(
+            source_codex_path=source_codex_path,
+            source_codex_realpath=source_codex_realpath,
+            source_codex_version=source_version,
+            source_codex_sha256=source_digest,
+            current_codex_path=current_codex_path,
+            current_codex_version=current_codex_version,
+            current_codex_sha256=current_codex_sha,
+            policy_name=policy_name,
+            github_release_tag=latest.tag_name,
+            github_release_name=latest.release_name,
+            github_release_url=latest.release_html_url,
+            github_published_at=latest.published_at,
+            github_asset_name=latest.asset_name,
+            github_asset_url=latest.asset_url,
+            github_asset_digest=latest.asset_digest,
+            github_asset_sha256=latest.asset_sha256,
+            archive_executable=latest.archive_executable,
+            channel_manifest_path=channel_manifest_path,
+            clean_home=clean_home,
+            cache_root=cache_root,
+            launcher_manifest_path=launcher_manifest_path,
+            acquired_payload_dir=acquired_payload_dir,
+            acquired_codex_path=acquired_codex_path,
+            acquired_version=acquired_version,
+            acquired_sha256=acquired_sha,
+            acquired_source_kind=acquired_source_kind,
+            acquired_channel_artifact=acquired_channel_artifact,
+            acquisition_action=acquisition_action,
+            acquisition_mutates_filesystem=acquisition_mutates,
+            acquisition_promotion_required=acquisition_promotion_required,
+            acquisition_promotion_ready=acquisition_promotion_ready,
+            acquisition_launcher_update_required=acquisition_launcher_update_required,
+            acquisition_rollback_codex_path=acquisition_rollback_codex_path,
+            reuse_action=reuse_action,
+            reuse_mutates_filesystem=reuse_mutates,
+            reuse_without_remote_download=True,
+            blocked_without_remote_error=blocked_without_remote_error,
+            blocked_without_remote_cache_mutated=blocked_without_remote_cache_mutated,
+            omnigent_resolved_codex_path=resolved_path,
+            live_transcript_preview=_preview_text(live_transcript, limit=500),
+            live_route_prefix_present=live_transcript.startswith(EXPECTED_ROUTE),
+            live_graph_ok="GRAPH_OK" in live_transcript,
+            host_cache_root=host_cache_root,
+            host_cache_referenced_by_plans=host_cache_referenced,
+        )
+
+
+def print_stock_codex_github_latest_stable_acquisition_proof(
+    proof: StockCodexGitHubLatestStableAcquisitionProof,
+) -> None:
+    """Emit operator evidence for latest-stable GitHub acquisition."""
+    print("stock_codex_github_latest_stable_acquisition_rehearsal=selected")
+    print(f"stock_codex_github_latest_stable_policy_name={proof.policy_name}")
+    print(f"stock_codex_github_latest_stable_source_path={proof.source_codex_path}")
+    print(f"stock_codex_github_latest_stable_source_realpath={proof.source_codex_realpath}")
+    print(f"stock_codex_github_latest_stable_source_version={proof.source_codex_version}")
+    print(f"stock_codex_github_latest_stable_source_sha256={proof.source_codex_sha256}")
+    print(f"stock_codex_github_latest_stable_current_path={proof.current_codex_path}")
+    print(f"stock_codex_github_latest_stable_current_version={proof.current_codex_version}")
+    print(f"stock_codex_github_latest_stable_current_sha256={proof.current_codex_sha256}")
+    print(f"stock_codex_github_latest_stable_release_tag={proof.github_release_tag}")
+    print(f"stock_codex_github_latest_stable_release_name={proof.github_release_name}")
+    print(f"stock_codex_github_latest_stable_release_url={proof.github_release_url}")
+    print(f"stock_codex_github_latest_stable_published_at={proof.github_published_at}")
+    print(f"stock_codex_github_latest_stable_asset_name={proof.github_asset_name}")
+    print(f"stock_codex_github_latest_stable_asset_url={proof.github_asset_url}")
+    print(f"stock_codex_github_latest_stable_asset_digest={proof.github_asset_digest}")
+    print(f"stock_codex_github_latest_stable_asset_sha256={proof.github_asset_sha256}")
+    print(f"stock_codex_github_latest_stable_archive_executable={proof.archive_executable}")
+    print(f"stock_codex_github_latest_stable_channel_manifest={proof.channel_manifest_path}")
+    print(f"stock_codex_github_latest_stable_clean_home={proof.clean_home}")
+    print(f"stock_codex_github_latest_stable_cache_root={proof.cache_root}")
+    print(f"stock_codex_github_latest_stable_launcher_manifest={proof.launcher_manifest_path}")
+    print(f"stock_codex_github_latest_stable_payload_dir={proof.acquired_payload_dir}")
+    print(f"stock_codex_github_latest_stable_path={proof.acquired_codex_path}")
+    print(f"stock_codex_github_latest_stable_version={proof.acquired_version}")
+    print(f"stock_codex_github_latest_stable_binary_sha256={proof.acquired_sha256}")
+    print(f"stock_codex_github_latest_stable_source_kind={proof.acquired_source_kind}")
+    print(f"stock_codex_github_latest_stable_action={proof.acquisition_action}")
+    print(
+        "stock_codex_github_latest_stable_mutates_filesystem="
+        f"{proof.acquisition_mutates_filesystem}"
+    )
+    print(
+        "stock_codex_github_latest_stable_promotion_required="
+        f"{proof.acquisition_promotion_required}"
+    )
+    print(
+        "stock_codex_github_latest_stable_promotion_ready="
+        f"{proof.acquisition_promotion_ready}"
+    )
+    print(
+        "stock_codex_github_latest_stable_launcher_update_required="
+        f"{proof.acquisition_launcher_update_required}"
+    )
+    print(
+        "stock_codex_github_latest_stable_rollback_codex_path="
+        f"{proof.acquisition_rollback_codex_path}"
+    )
+    print(f"stock_codex_github_latest_stable_reuse_action={proof.reuse_action}")
+    print(
+        "stock_codex_github_latest_stable_reuse_mutates_filesystem="
+        f"{proof.reuse_mutates_filesystem}"
+    )
+    print(
+        "stock_codex_github_latest_stable_reuse_without_remote_download="
+        f"{proof.reuse_without_remote_download}"
+    )
+    print(
+        "stock_codex_github_latest_stable_blocked_without_remote_cache_mutated="
+        f"{proof.blocked_without_remote_cache_mutated}"
+    )
+    print(
+        "stock_codex_github_latest_stable_blocked_without_remote_error="
+        f"{proof.blocked_without_remote_error!r}"
+    )
+    print(
+        "stock_codex_github_latest_stable_omnigent_resolved_codex_path="
+        f"{proof.omnigent_resolved_codex_path}"
+    )
+    print(
+        "stock_codex_github_latest_stable_live_route_prefix_present="
+        f"{proof.live_route_prefix_present}"
+    )
+    print(f"stock_codex_github_latest_stable_live_graph_ok={proof.live_graph_ok}")
+    print(
+        "stock_codex_github_latest_stable_live_transcript_preview="
+        f"{proof.live_transcript_preview!r}"
+    )
+    print(f"stock_codex_github_latest_stable_host_cache_root={proof.host_cache_root}")
+    print(
+        "stock_codex_github_latest_stable_host_cache_referenced_by_plans="
+        f"{proof.host_cache_referenced_by_plans}"
+    )
+    print("stock_codex_github_latest_stable_cache_lifecycle=temporary_removed_after_proof")
+    print(
+        "ASSERTION: GitHub latest-stable release selection uses the official "
+        "non-prerelease OpenAI Codex release asset digest, not lagging Homebrew "
+        "cask metadata"
+    )
+    print(
+        "ASSERTION: acquisition requires explicit remote-download opt-in, verifies "
+        "the GitHub release asset SHA-256, extracts the declared executable, and "
+        "stages a reusable channel payload"
+    )
+    print(
+        "ASSERTION: the acquired latest-stable stock Codex payload runs the normal "
+        "Omnigent graph proof with deterministic route evidence before GRAPH_OK"
     )
 
 
@@ -24994,6 +25667,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-production-channel-policy",
             "stock-codex-update-doctor",
             "stock-codex-update-acquisition",
+            "stock-codex-github-latest-stable-acquisition",
             "clean-auth-onboarding",
             "stock-codex-compat",
             "stock-codex-compat-live",
@@ -25082,6 +25756,9 @@ def parse_args() -> argparse.Namespace:
             "'stock-codex-update-acquisition' proves official remote "
             "archive acquisition through --plan-update --stage-update without "
             "persistent pointer promotion. "
+            "'stock-codex-github-latest-stable-acquisition' proves latest "
+            "non-prerelease GitHub release asset-digest acquisition plus a "
+            "live graph route proof without waiting for Homebrew cask metadata. "
             "'clean-auth-onboarding' proves clean CODEX_HOME needs-auth "
             "classification plus populated auth detection without running "
             "interactive login. "
@@ -25532,6 +26209,18 @@ def main() -> int:
             run_stock_codex_update_acquisition_proof(codex_path)
         )
         return 0
+
+    if requested_proof == "stock-codex-github-latest-stable-acquisition":
+        if args.skip_live:
+            raise SystemExit(
+                "stock-codex-github-latest-stable-acquisition requires a live "
+                "graph proof; omit --skip-live."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-github-latest-stable-acquisition cannot allow a "
+                "Codex-fork binary."
+            )
 
     if requested_proof == "clean-auth-onboarding":
         if args.apple_bundle is not None:
@@ -26785,6 +27474,14 @@ def main() -> int:
             return 0
 
         assert codex_path is not None
+        if proof == "stock-codex-github-latest-stable-acquisition":
+            latest_stable_proof = run_stock_codex_github_latest_stable_acquisition_proof(
+                codex_path,
+                agent_dir=agent_dir,
+                live_timeout_seconds=args.live_proof_timeout,
+            )
+            print_stock_codex_github_latest_stable_acquisition_proof(latest_stable_proof)
+            return 0
         if proof in {"graph", "all", "cutover-ready"}:
             transcript = run_live_proof_step(
                 "graph",

@@ -454,6 +454,266 @@ def test_stock_codex_update_acquisition_proof_stages_and_reuses_remote(
     assert proof.host_cache_referenced_by_plans is False
 
 
+def test_github_latest_stable_channel_uses_release_asset_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        _MOD,
+        "_stock_codex_archive_executable_name",
+        lambda: "codex-aarch64-apple-darwin",
+    )
+    release = {
+        "tag_name": "rust-v0.143.0",
+        "name": "0.143.0",
+        "html_url": "https://github.com/openai/codex/releases/tag/rust-v0.143.0",
+        "published_at": "2026-07-08T01:31:10Z",
+        "draft": False,
+        "prerelease": False,
+        "assets": [
+            {
+                "name": "codex-aarch64-apple-darwin.tar.gz",
+                "browser_download_url": (
+                    "https://github.com/openai/codex/releases/download/"
+                    "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+                ),
+                "digest": "sha256:" + ("B" * 64),
+            },
+        ],
+    }
+
+    channel = _MOD._github_latest_stable_codex_channel_from_release(release)
+
+    assert channel.tag_name == "rust-v0.143.0"
+    assert channel.version_slug == "0.143.0"
+    assert channel.selected_version == "codex-cli 0.143.0"
+    assert channel.asset_name == "codex-aarch64-apple-darwin.tar.gz"
+    assert channel.asset_digest == "sha256:" + ("b" * 64)
+    assert channel.asset_sha256 == "b" * 64
+    assert channel.archive_executable == "codex-aarch64-apple-darwin"
+
+
+def test_github_latest_stable_channel_rejects_prerelease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        _MOD,
+        "_stock_codex_archive_executable_name",
+        lambda: "codex-aarch64-apple-darwin",
+    )
+    release = {
+        "tag_name": "rust-v0.143.1-alpha.1",
+        "name": "0.143.1-alpha.1",
+        "html_url": "https://github.com/openai/codex/releases/tag/rust-v0.143.1-alpha.1",
+        "published_at": "2026-07-08T03:00:00Z",
+        "draft": False,
+        "prerelease": True,
+        "assets": [],
+    }
+
+    with pytest.raises(SystemExit, match="stable numeric tag"):
+        _MOD._github_latest_stable_codex_channel_from_release(release)
+
+
+def test_stock_codex_github_latest_stable_acquisition_proof_uses_asset_digest_and_live_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host_home = tmp_path / "host-home"
+    stock_codex = _write_codex_binary(
+        tmp_path / "bin" / "codex",
+        version="codex-cli 0.142.5",
+    )
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    asset_url = (
+        "https://github.com/openai/codex/releases/download/"
+        "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+    )
+    asset_sha = "c" * 64
+    expected_artifact = {
+        "archiveExecutable": "codex-aarch64-apple-darwin",
+        "archiveFormat": "tar.gz",
+        "sha256": asset_sha,
+        "url": asset_url,
+        "version": "codex-cli 0.143.0",
+        "versionSlug": "0.143.0",
+    }
+    channel = _MOD._GitHubLatestStableCodexChannel(
+        tag_name="rust-v0.143.0",
+        version_slug="0.143.0",
+        selected_version="codex-cli 0.143.0",
+        release_name="0.143.0",
+        release_html_url="https://github.com/openai/codex/releases/tag/rust-v0.143.0",
+        published_at="2026-07-08T01:31:10Z",
+        asset_name="codex-aarch64-apple-darwin.tar.gz",
+        asset_url=asset_url,
+        asset_digest=f"sha256:{asset_sha}",
+        asset_sha256=asset_sha,
+        archive_executable="codex-aarch64-apple-darwin",
+    )
+    monkeypatch.setenv("HOME", str(host_home))
+    monkeypatch.setattr(_MOD, "_github_latest_stable_codex_channel", lambda: channel)
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = False,
+        capture_output: bool = False,
+        text: bool = False,
+        env: dict[str, str] | None = None,
+        cwd: Path | None = None,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text, env, cwd, timeout
+        if len(cmd) >= 2 and cmd[1:] == ["--version"]:
+            version = "codex-cli 0.143.0" if "0.143.0" in cmd[0] else "codex-cli 0.142.5"
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"{version}\n", stderr="")
+        if len(cmd) >= 2 and Path(cmd[1]).name == "provision_stock_codex.py":
+            args = cmd[2:]
+            cache_root = Path(args[args.index("--cache-root") + 1])
+            channel_manifest = Path(args[args.index("--channel-manifest") + 1])
+            manifest_payload = json.loads(channel_manifest.read_text(encoding="utf-8"))
+            assert manifest_payload["latest"] == "0.143.0"
+            assert manifest_payload["artifacts"] == [
+                {
+                    "archiveExecutable": "codex-aarch64-apple-darwin",
+                    "archiveFormat": "tar.gz",
+                    "sha256": asset_sha,
+                    "url": asset_url,
+                    "version": "codex-cli 0.143.0",
+                }
+            ]
+            assert args[args.index("--expected-sha256") + 1] == asset_sha
+            allow_remote = "--allow-remote-channel-download" in args
+            target_dir = cache_root / "0.143.0"
+            target_path = target_dir / "codex"
+            if not allow_remote and not target_path.exists():
+                return subprocess.CompletedProcess(
+                    cmd,
+                    1,
+                    stdout="",
+                    stderr="error: Remote channel downloads require "
+                    "--allow-remote-channel-download.\n",
+                )
+            mutates = False
+            action = "stage-ready"
+            if allow_remote:
+                _write_codex_binary(target_path, version="codex-cli 0.143.0")
+                mutates = True
+                action = "staged"
+                manifest = {
+                    "schemaVersion": 1,
+                    "kind": "omnigent-stock-codex",
+                    "sourceKind": "channel",
+                    "version": "codex-cli 0.143.0",
+                    "versionSlug": "0.143.0",
+                    "sha256": _MOD.sha256_file(target_path),
+                    "sourcePath": asset_url,
+                    "sourceRealpath": asset_url,
+                    "channelArtifact": expected_artifact,
+                }
+                (target_dir / "manifest.json").write_text(
+                    json.dumps(manifest) + "\n",
+                    encoding="utf-8",
+                )
+            sha = _MOD.sha256_file(target_path)
+            current_arg = args[args.index("--current-codex") + 1]
+            plan = {
+                "kind": "omnigent-stock-codex-update-plan",
+                "schemaVersion": 1,
+                "action": action,
+                "mutatesFilesystem": mutates,
+                "target": {
+                    "state": "ready",
+                    "payloadDir": str(target_dir),
+                    "codexPath": str(target_path),
+                    "error": None,
+                },
+                "promotion": {
+                    "required": True,
+                    "ready": True,
+                    "env": {_MOD.OMNIGENT_STOCK_CODEX_PATH_ENV: str(target_path)},
+                    "launcherManifest": {
+                        "updateRequired": True,
+                        "ready": True,
+                    },
+                },
+                "rollback": {
+                    "codexPath": current_arg,
+                    "payloadRetention": "versioned-cache-keeps-previous-payload",
+                },
+                "stagedPayload": {
+                    "codexPath": str(target_path),
+                    "payloadDir": str(target_dir),
+                    "manifestPath": str(target_dir / "manifest.json"),
+                    "version": "codex-cli 0.143.0",
+                    "versionSlug": "0.143.0",
+                    "sha256": sha,
+                    "sourcePath": asset_url,
+                    "sourceRealpath": asset_url,
+                    "sourceKind": "channel",
+                    "channelArtifact": expected_artifact,
+                },
+            }
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(plan), stderr="")
+        raise AssertionError(f"unexpected subprocess command: {cmd!r}")
+
+    live_codex_paths: list[Path] = []
+
+    def fake_run_live_proof_step(
+        label: str,
+        *,
+        timeout_seconds: float,
+        action: Any,
+    ) -> str:
+        assert label == "github-latest-stable-graph"
+        assert timeout_seconds == 12
+        return action()
+
+    def fake_run_live_runner_proof(agent_dir_arg: Path, codex_path_arg: Path) -> str:
+        assert agent_dir_arg == agent_dir
+        assert "0.143.0" in str(codex_path_arg)
+        live_codex_paths.append(codex_path_arg)
+        return _MOD.EXPECTED_ROUTE + "\n\nGRAPH_OK"
+
+    monkeypatch.setattr(_MOD.subprocess, "run", fake_run)
+    monkeypatch.setattr(_MOD, "run_live_proof_step", fake_run_live_proof_step)
+    monkeypatch.setattr(_MOD, "run_live_runner_proof", fake_run_live_runner_proof)
+
+    proof = _MOD.run_stock_codex_github_latest_stable_acquisition_proof(
+        stock_codex,
+        agent_dir=agent_dir,
+        live_timeout_seconds=12,
+    )
+
+    assert proof.source_codex_path == stock_codex.resolve()
+    assert proof.source_codex_version == "codex-cli 0.142.5"
+    assert proof.policy_name == "official-openai-github-release"
+    assert proof.github_release_tag == "rust-v0.143.0"
+    assert proof.github_asset_digest == f"sha256:{asset_sha}"
+    assert proof.github_asset_sha256 == asset_sha
+    assert proof.github_asset_url == asset_url
+    assert proof.acquisition_action == "staged"
+    assert proof.acquisition_mutates_filesystem is True
+    assert proof.acquisition_promotion_required is True
+    assert proof.acquisition_promotion_ready is True
+    assert proof.acquisition_launcher_update_required is True
+    assert proof.acquired_version == "codex-cli 0.143.0"
+    assert proof.acquired_source_kind == "channel"
+    assert proof.acquired_channel_artifact == expected_artifact
+    assert proof.reuse_action == "stage-ready"
+    assert proof.reuse_mutates_filesystem is False
+    assert proof.reuse_without_remote_download is True
+    assert "allow-remote-channel-download" in proof.blocked_without_remote_error
+    assert proof.blocked_without_remote_cache_mutated is False
+    assert proof.omnigent_resolved_codex_path == proof.acquired_codex_path
+    assert proof.live_route_prefix_present is True
+    assert proof.live_graph_ok is True
+    assert live_codex_paths == [proof.acquired_codex_path]
+    assert proof.host_cache_root == host_home / ".local" / "omnigent" / "codex-stock"
+    assert proof.host_cache_referenced_by_plans is False
+
+
 def test_stock_codex_compat_proof_installs_plugin_and_bridge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
