@@ -4597,6 +4597,202 @@ def test_clean_vm_ssh_command_avoids_persistent_known_hosts() -> None:
     assert command[-1] == "admin@192.0.2.10"
 
 
+def test_clean_vm_bootstrap_script_installs_uvx_without_shell_profile_mutation() -> None:
+    script = _MOD._clean_vm_bootstrap_script_text()
+
+    assert ".omnigent-stock-codex-compat-clean-user-ok" in script
+    assert "refusing unexpected guest HOME" in script
+    assert "grep -qxF \"$ssh_public_key\"" in script
+    assert "sudo -n true" in script
+    assert "systemsetup -setremotelogin on" in script
+    assert "--clean-vm-bootstrap-install-uv was not supplied" in script
+    assert "export INSTALLER_NO_MODIFY_PATH=1" in script
+    assert "curl -LsSf \"$uv_installer_url\" | sh" in script
+    assert "stock_codex_compat_clean_vm_bootstrap_status=replacement-ready" in script
+    assert "stock_codex_compat_clean_vm_bootstrap_uvx_path" in script
+
+
+def test_stock_codex_compat_pkg_clean_vm_bootstrap_blocks_existing_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    identity = tmp_path / "id_ed25519"
+    identity.write_text("private-key\n", encoding="utf-8")
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        if path is not None:
+            return None
+        return {
+            "ssh": "/usr/bin/ssh",
+            "ssh-keygen": "/usr/bin/ssh-keygen",
+            "tart": "/usr/local/bin/tart",
+        }.get(name)
+
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+    monkeypatch.setattr(
+        _MOD,
+        "_ssh_public_key_for_identity",
+        lambda **_kwargs: "ssh-ed25519 AAAATEST clean-vm",
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_tart_vm_names",
+        lambda _tart_path: {"ghcr.io/cirruslabs/macos-tahoe-base:latest", "target-vm"},
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_clean_vm_bootstrap_proof(
+        clean_vm_source_tart_name="ghcr.io/cirruslabs/macos-tahoe-base:latest",
+        clean_vm_tart_name="target-vm",
+        clean_vm_ssh_identity=identity,
+        clean_vm_ssh_user="admin",
+        clean_vm_ssh_port=22,
+        clean_vm_bootstrap_install_uv=True,
+    )
+
+    assert proof.status == "blocked"
+    assert any("target already exists" in item for item in proof.missing_prerequisites)
+    assert proof.tart_clone_completed is False
+
+
+def test_stock_codex_compat_pkg_clean_vm_bootstrap_clones_and_verifies_ssh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    identity = tmp_path / "id_ed25519"
+    identity.write_text("private-key\n", encoding="utf-8")
+    run_calls: list[list[str]] = []
+    popen_calls: list[list[str]] = []
+    source_vm = "ghcr.io/cirruslabs/macos-tahoe-base:latest"
+    target_vm = "omnigent-clean-bootstrap-test"
+
+    class FakePopen:
+        def __init__(self, args: list[str], **_kwargs: object) -> None:
+            popen_calls.append(args)
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        if path is not None:
+            return None
+        return {
+            "ssh": "/usr/bin/ssh",
+            "ssh-keygen": "/usr/bin/ssh-keygen",
+            "tart": "/usr/local/bin/tart",
+        }.get(name)
+
+    def fake_run(
+        args: list[str],
+        *,
+        check: bool = False,
+        capture_output: bool = False,
+        text: bool = False,
+        timeout: float | None = None,
+        input: str | None = None,
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text, timeout
+        run_calls.append(args)
+        if args[:3] == ["/usr/bin/ssh-keygen", "-y", "-f"]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout="ssh-ed25519 AAAATEST key\n",
+                stderr="",
+            )
+        if args == ["/usr/local/bin/tart", "clone", source_vm, target_vm]:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if args == ["/usr/local/bin/tart", "set", target_vm, "--random-mac"]:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if args == ["/usr/local/bin/tart", "ip", target_vm, "--wait", "180"]:
+            return subprocess.CompletedProcess(args, 0, stdout="192.0.2.20\n", stderr="")
+        if args == ["/usr/local/bin/tart", "exec", target_vm, "/usr/bin/true"]:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if args[:5] == ["/usr/local/bin/tart", "exec", "-i", target_vm, "/bin/bash"]:
+            assert input is not None
+            assert "INSTALLER_NO_MODIFY_PATH=1" in input
+            assert args[-3:] == [
+                "ssh-ed25519 AAAATEST key",
+                "1",
+                _MOD.UV_STANDALONE_INSTALLER_URL,
+            ]
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout=(
+                    "stock_codex_compat_clean_vm_bootstrap_status=replacement-ready\n"
+                    "stock_codex_compat_clean_vm_bootstrap_marker_path="
+                    "/Users/admin/.omnigent-stock-codex-compat-clean-user-ok\n"
+                    "stock_codex_compat_clean_vm_bootstrap_uvx_path="
+                    "/Users/admin/.local/bin/uvx\n"
+                    "stock_codex_compat_clean_vm_bootstrap_sudo_noninteractive=true\n"
+                ),
+                stderr="",
+            )
+        if args == ["/usr/local/bin/tart", "stop", target_vm, "--timeout", "30"]:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected subprocess.run args: {args}")
+
+    def fake_run_clean_vm_ssh_command(
+        remote_command: str,
+        *,
+        ssh_path: str,
+        ssh_target: str,
+        ssh_port: int,
+        ssh_identity: Path | None,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del remote_command, ssh_path, ssh_target, ssh_port, ssh_identity, timeout
+        return subprocess.CompletedProcess(
+            ["ssh"],
+            0,
+            stdout=(
+                "stock_codex_compat_clean_vm_bootstrap_ssh_ready=true\n"
+                "stock_codex_compat_clean_vm_bootstrap_sudo_noninteractive=true\n"
+                "stock_codex_compat_clean_vm_bootstrap_marker_path="
+                "/Users/admin/.omnigent-stock-codex-compat-clean-user-ok\n"
+                "stock_codex_compat_clean_vm_bootstrap_uvx_path="
+                "/Users/admin/.local/bin/uvx\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+    monkeypatch.setattr(_MOD, "_tart_vm_names", lambda _tart_path: {source_vm})
+    monkeypatch.setattr(_MOD.subprocess, "run", fake_run)
+    monkeypatch.setattr(_MOD.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(
+        _MOD,
+        "_wait_for_clean_vm_ssh",
+        lambda **_kwargs: subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(_MOD, "_run_clean_vm_ssh_command", fake_run_clean_vm_ssh_command)
+
+    proof = _MOD.run_stock_codex_compat_pkg_clean_vm_bootstrap_proof(
+        clean_vm_source_tart_name=source_vm,
+        clean_vm_tart_name=target_vm,
+        clean_vm_ssh_identity=identity,
+        clean_vm_ssh_user="admin",
+        clean_vm_ssh_port=22,
+        clean_vm_bootstrap_install_uv=True,
+    )
+
+    assert proof.status == "replacement-ready"
+    assert proof.source_tart_name == source_vm
+    assert proof.target_tart_name == target_vm
+    assert proof.tart_clone_completed is True
+    assert proof.tart_random_mac_completed is True
+    assert proof.tart_started is True
+    assert proof.tart_stopped is True
+    assert proof.tart_ip == "192.0.2.20"
+    assert proof.ssh_target == "admin@192.0.2.20"
+    assert proof.ssh_ready is True
+    assert proof.sudo_noninteractive is True
+    assert proof.uvx_path == "/Users/admin/.local/bin/uvx"
+    assert proof.clean_marker_path == (
+        "/Users/admin/.omnigent-stock-codex-compat-clean-user-ok"
+    )
+    assert popen_calls == [["/usr/local/bin/tart", "run", "--no-graphics", target_vm]]
+    assert [call[:2] for call in run_calls].count(["/usr/local/bin/tart", "stop"]) == 1
+
+
 def test_stock_codex_compat_pkg_external_clean_user_uses_marked_home(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -343,18 +343,25 @@ The next gates should split by product mode:
   `d0185a22380036b97703144f91bbcb701806c3638ebcbe98b2aa38df43baf581`: it
   writes the user LaunchAgent, loads/kickstarts/unloads it through launchd,
   parses the scheduled updater JSON, and verifies `host_cache_referenced=False`.
+  The raw Tart clean-VM bootstrap gate is also green:
+  `stock-codex-compat-pkg-clean-vm-bootstrap` cloned the cached
+  `ghcr.io/cirruslabs/macos-tahoe-base:latest` source image into
+  `omnigent-clean-bootstrap-proof`, randomized the clone MAC, waited for Tart
+  guest-agent readiness, injected key SSH, marked the guest home disposable,
+  installed user-local `uvx` without shell profile mutation, verified
+  noninteractive sudo plus SSH, stopped the clone, and then the same clone passed
+  the clean-VM update-agent gate with the signed/notarized package above.
   The production stock-Codex channel policy gate
   is green for official-source validation, clean-cache reuse before network
   access, fail-closed non-official URL rejection, resolver selection,
   explicit-download remote acquisition, SHA verification, safe archive
   extraction, staged-payload reuse, and no-host-cache leakage from both source
-  checkout and packaged-runtime paths. Remaining production choices are
-  automated first-boot setup from a raw public image or new machine, browser or
-  device auth onboarding UX, launchd enablement policy, alpha/pre-release channel
-  policy, independent archive signature policy, and broader UI/device bridge
-  coverage such as screenshot, snapshot, gesture, or device execution if product
-  scope requires them. Raw unwrapped stock Codex Electron/CLI route parity remains
-  blocked;
+  checkout and packaged-runtime paths. Remaining production choices are non-Tart
+  clean-machine provisioning, browser or device auth onboarding UX, launchd
+  enablement policy, alpha/pre-release channel policy, independent archive
+  signature policy, and broader UI/device bridge coverage such as screenshot,
+  snapshot, gesture, or device execution if product scope requires them. Raw
+  unwrapped stock Codex Electron/CLI route parity remains blocked;
 - decide whether automated browser/device login UX, token freshness validation,
   or cross-machine credential packaging is product scope; or
 - broaden the Apple workflow smoke to release/readiness/review only if product

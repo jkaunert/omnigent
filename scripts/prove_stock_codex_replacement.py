@@ -1729,6 +1729,34 @@ class StockCodexCompatPkgCleanVmProof:
 
 
 @dataclass(frozen=True)
+class StockCodexCompatPkgCleanVmBootstrapProof:
+    """Proof result for preparing a raw Tart VM clone for clean-VM package gates."""
+
+    status: str
+    missing_prerequisites: tuple[str, ...]
+    tool_paths: dict[str, str | None]
+    source_tart_name: str | None
+    target_tart_name: str | None
+    ssh_user: str | None
+    ssh_port: int | None
+    ssh_identity: Path | None
+    ssh_public_key_sha256: str | None
+    install_uv_requested: bool
+    tart_clone_completed: bool
+    tart_random_mac_completed: bool
+    tart_started: bool
+    tart_stopped: bool
+    tart_ip: str | None
+    ssh_target: str | None
+    tart_exec_status: str | None
+    ssh_ready: bool | None
+    sudo_noninteractive: bool | None
+    clean_marker_path: str | None
+    uvx_path: str | None
+    remote_output_preview: str | None
+
+
+@dataclass(frozen=True)
 class _OfficialStockCodexRemoteChannel:
     """Official Homebrew/OpenAI GitHub channel metadata for VM acquisition."""
 
@@ -11239,6 +11267,7 @@ EXTERNAL_CLEAN_USER_MARKER_NAME = ".omnigent-stock-codex-compat-clean-user-ok"
 EXTERNAL_CLEAN_USER_PROOF_ROOT_NAME = (
     ".omnigent-stock-codex-compat-clean-user-proof"
 )
+UV_STANDALONE_INSTALLER_URL = "https://astral.sh/uv/install.sh"
 _CLEAN_USER_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
 _CLEAN_USER_SUBPROCESS_ENV_KEYS = (
     "HOME",
@@ -12465,6 +12494,139 @@ def _resolve_clean_vm_ssh_target(
     return f"{ssh_user}@{tart_ip}", tart_ip, tart_started, ()
 
 
+def _clean_vm_bootstrap_script_text() -> str:
+    """Return the guest-agent bootstrap script for raw disposable Tart clones."""
+    marker_name = shlex.quote(EXTERNAL_CLEAN_USER_MARKER_NAME)
+    uv_installer_url = shlex.quote(UV_STANDALONE_INSTALLER_URL)
+    return f'''#!/bin/bash
+set -euo pipefail
+
+ssh_public_key="$1"
+install_uv="${{2:-0}}"
+uv_installer_url="${{3:-{uv_installer_url}}}"
+marker="$HOME/{marker_name}"
+
+fail() {{
+  printf 'stock_codex_compat_clean_vm_bootstrap_error=%s\\n' "$*" >&2
+  exit 70
+}}
+
+have() {{
+  command -v "$1" >/dev/null 2>&1
+}}
+
+[ "$(uname -s)" = "Darwin" ] || fail "requires macOS guest"
+[ -n "${{USER:-}}" ] || fail "guest USER is empty"
+case "$HOME" in
+  /Users/*) ;;
+  *) fail "refusing unexpected guest HOME: $HOME" ;;
+esac
+[ "$HOME" != "/var/root" ] || fail "refusing to prepare root home"
+[ -n "$ssh_public_key" ] || fail "missing SSH public key"
+case "$ssh_public_key" in
+  ssh-*) ;;
+  *) fail "SSH public key must start with ssh-" ;;
+esac
+
+umask 077
+mkdir -p "$HOME/.ssh" "$HOME/.local/bin"
+authorized_keys="$HOME/.ssh/authorized_keys"
+touch "$authorized_keys"
+if ! grep -qxF "$ssh_public_key" "$authorized_keys"; then
+  printf '%s\\n' "$ssh_public_key" >> "$authorized_keys"
+fi
+chmod 700 "$HOME/.ssh"
+chmod 600 "$authorized_keys"
+touch "$marker"
+chmod 600 "$marker"
+
+have sudo || fail "missing tool: sudo"
+sudo -n true >/dev/null 2>&1 || fail "sudo requires interactive authentication"
+if have systemsetup; then
+  sudo -n systemsetup -setremotelogin on >/dev/null 2>&1 || true
+fi
+
+path_prefix="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin"
+export PATH="$path_prefix:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+if ! have uvx; then
+  if [ "$install_uv" != "1" ]; then
+    fail "missing uvx and --clean-vm-bootstrap-install-uv was not supplied"
+  fi
+  have curl || fail "missing tool: curl"
+  export INSTALLER_NO_MODIFY_PATH=1
+  curl -LsSf "$uv_installer_url" | sh
+  hash -r
+fi
+uvx_path="$(command -v uvx || true)"
+[ -n "$uvx_path" ] || fail "uvx install did not expose uvx on PATH"
+"$uvx_path" --version >/dev/null 2>&1 || fail "uvx --version failed"
+
+printf 'stock_codex_compat_clean_vm_bootstrap_status=replacement-ready\\n'
+printf 'stock_codex_compat_clean_vm_bootstrap_user=%s\\n' "$USER"
+printf 'stock_codex_compat_clean_vm_bootstrap_home=%s\\n' "$HOME"
+printf 'stock_codex_compat_clean_vm_bootstrap_marker_path=%s\\n' "$marker"
+printf 'stock_codex_compat_clean_vm_bootstrap_uvx_path=%s\\n' "$uvx_path"
+printf 'stock_codex_compat_clean_vm_bootstrap_sudo_noninteractive=true\\n'
+printf 'stock_codex_compat_clean_vm_bootstrap_ssh_authorized_key=true\\n'
+'''
+
+
+def _parse_clean_vm_bootstrap_evidence(output: str) -> dict[str, str]:
+    """Parse key=value evidence emitted by the clean-VM bootstrap scripts."""
+    prefix = "stock_codex_compat_clean_vm_bootstrap_"
+    evidence: dict[str, str] = {}
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line.startswith(prefix) or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        evidence[key.removeprefix(prefix)] = value
+    return evidence
+
+
+def _clean_vm_bootstrap_ssh_check_command() -> str:
+    """Return an SSH-side verification command for a prepared clean VM."""
+    return f'''set -euo pipefail
+path_prefix="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin"
+export PATH="$path_prefix:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+marker="$HOME/{EXTERNAL_CLEAN_USER_MARKER_NAME}"
+[ -f "$marker" ] || exit 70
+sudo -n true >/dev/null 2>&1 || exit 71
+uvx_path="$(command -v uvx || true)"
+[ -n "$uvx_path" ] || exit 72
+"$uvx_path" --version >/dev/null 2>&1 || exit 73
+printf 'stock_codex_compat_clean_vm_bootstrap_ssh_ready=true\\n'
+printf 'stock_codex_compat_clean_vm_bootstrap_sudo_noninteractive=true\\n'
+printf 'stock_codex_compat_clean_vm_bootstrap_marker_path=%s\\n' "$marker"
+printf 'stock_codex_compat_clean_vm_bootstrap_uvx_path=%s\\n' "$uvx_path"
+'''
+
+
+def _ssh_public_key_for_identity(*, ssh_keygen_path: str, identity: Path) -> str:
+    completed = subprocess.run(
+        [ssh_keygen_path, "-y", "-f", str(identity)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        raise SystemExit(
+            "Could not derive clean VM SSH public key from identity.\n"
+            f"identity={identity}\n"
+            f"exit={completed.returncode}\n"
+            f"stdout={completed.stdout}\n"
+            f"stderr={completed.stderr}"
+        )
+    public_key_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    if not public_key_lines:
+        raise SystemExit(f"SSH public key derivation emitted no key for {identity}.")
+    public_key = public_key_lines[-1]
+    if not public_key.startswith("ssh-"):
+        raise SystemExit(f"Unexpected SSH public key format for {identity}: {public_key!r}")
+    return public_key
+
+
 def _official_stock_codex_remote_channel() -> _OfficialStockCodexRemoteChannel:
     """Return validated official stock-Codex release metadata for remote acquisition."""
     cask = _read_homebrew_codex_cask()
@@ -13310,6 +13472,409 @@ printf '%s=%s\n' \
   'stock_codex_compat_pkg_clean_vm_remote_acquisition_provisioned_codex' \
   "$provisioned_codex"
 '''
+
+
+def _blocked_stock_codex_compat_pkg_clean_vm_bootstrap_proof(
+    *,
+    tool_paths: dict[str, str | None],
+    missing_prerequisites: tuple[str, ...],
+    source_tart_name: str | None,
+    target_tart_name: str | None,
+    ssh_user: str | None,
+    ssh_port: int | None,
+    ssh_identity: Path | None,
+    ssh_public_key_sha256: str | None = None,
+    install_uv_requested: bool = False,
+    tart_clone_completed: bool = False,
+    tart_random_mac_completed: bool = False,
+    tart_started: bool = False,
+    tart_stopped: bool = False,
+    tart_ip: str | None = None,
+    ssh_target: str | None = None,
+    tart_exec_status: str | None = None,
+    ssh_ready: bool | None = None,
+    sudo_noninteractive: bool | None = None,
+    clean_marker_path: str | None = None,
+    uvx_path: str | None = None,
+    remote_output_preview: str | None = None,
+) -> StockCodexCompatPkgCleanVmBootstrapProof:
+    return StockCodexCompatPkgCleanVmBootstrapProof(
+        status="blocked",
+        missing_prerequisites=missing_prerequisites,
+        tool_paths=tool_paths,
+        source_tart_name=source_tart_name,
+        target_tart_name=target_tart_name,
+        ssh_user=ssh_user,
+        ssh_port=ssh_port,
+        ssh_identity=ssh_identity,
+        ssh_public_key_sha256=ssh_public_key_sha256,
+        install_uv_requested=install_uv_requested,
+        tart_clone_completed=tart_clone_completed,
+        tart_random_mac_completed=tart_random_mac_completed,
+        tart_started=tart_started,
+        tart_stopped=tart_stopped,
+        tart_ip=tart_ip,
+        ssh_target=ssh_target,
+        tart_exec_status=tart_exec_status,
+        ssh_ready=ssh_ready,
+        sudo_noninteractive=sudo_noninteractive,
+        clean_marker_path=clean_marker_path,
+        uvx_path=uvx_path,
+        remote_output_preview=remote_output_preview,
+    )
+
+
+def run_stock_codex_compat_pkg_clean_vm_bootstrap_proof(
+    *,
+    clean_vm_source_tart_name: str | None,
+    clean_vm_tart_name: str | None,
+    clean_vm_ssh_identity: Path | None,
+    clean_vm_ssh_user: str | None,
+    clean_vm_ssh_port: int,
+    clean_vm_bootstrap_install_uv: bool,
+) -> StockCodexCompatPkgCleanVmBootstrapProof:
+    """Prepare a disposable Tart clone for the clean-VM package proof contract."""
+    tool_paths = {
+        "tart": shutil.which("tart"),
+        "ssh": shutil.which("ssh"),
+        "ssh-keygen": shutil.which("ssh-keygen"),
+    }
+    missing: list[str] = []
+    if not tool_paths["tart"]:
+        missing.append("missing tool: tart")
+    if not tool_paths["ssh"]:
+        missing.append("missing tool: ssh")
+    if not tool_paths["ssh-keygen"]:
+        missing.append("missing tool: ssh-keygen")
+    if not clean_vm_source_tart_name:
+        missing.append(
+            "stock-codex-compat-pkg-clean-vm-bootstrap requires "
+            "--clean-vm-source-tart-name"
+        )
+    if not clean_vm_tart_name:
+        missing.append(
+            "stock-codex-compat-pkg-clean-vm-bootstrap requires "
+            "--clean-vm-tart-name as the disposable clone target"
+        )
+    if not clean_vm_ssh_user:
+        missing.append("--clean-vm-ssh-user is required for the prepared clone")
+    if clean_vm_ssh_identity is None:
+        missing.append("--clean-vm-ssh-identity is required for key SSH bootstrap")
+        resolved_identity = None
+    else:
+        resolved_identity = clean_vm_ssh_identity.expanduser().resolve()
+        if not resolved_identity.is_file():
+            missing.append(f"missing clean VM SSH identity: {resolved_identity}")
+
+    ssh_public_key: str | None = None
+    ssh_public_key_sha256: str | None = None
+    if not missing and tool_paths["ssh-keygen"] and resolved_identity is not None:
+        try:
+            ssh_public_key = _ssh_public_key_for_identity(
+                ssh_keygen_path=tool_paths["ssh-keygen"],
+                identity=resolved_identity,
+            )
+        except SystemExit as exc:
+            missing.append(str(exc))
+        else:
+            ssh_public_key_sha256 = hashlib.sha256(
+                ssh_public_key.encode("utf-8")
+            ).hexdigest()
+
+    tart_names: set[str] = set()
+    if not missing and tool_paths["tart"]:
+        try:
+            tart_names = _tart_vm_names(tool_paths["tart"])
+        except SystemExit as exc:
+            missing.append(str(exc))
+        if clean_vm_source_tart_name and clean_vm_source_tart_name not in tart_names:
+            missing.append(
+                f"clean VM source Tart image is not locally available: "
+                f"{clean_vm_source_tart_name}"
+            )
+        if clean_vm_tart_name and clean_vm_tart_name in tart_names:
+            missing.append(
+                f"clean VM bootstrap target already exists: {clean_vm_tart_name}"
+            )
+
+    if missing:
+        return _blocked_stock_codex_compat_pkg_clean_vm_bootstrap_proof(
+            tool_paths=tool_paths,
+            missing_prerequisites=tuple(missing),
+            source_tart_name=clean_vm_source_tart_name,
+            target_tart_name=clean_vm_tart_name,
+            ssh_user=clean_vm_ssh_user,
+            ssh_port=clean_vm_ssh_port,
+            ssh_identity=resolved_identity,
+            ssh_public_key_sha256=ssh_public_key_sha256,
+            install_uv_requested=clean_vm_bootstrap_install_uv,
+        )
+
+    assert tool_paths["tart"] is not None
+    assert tool_paths["ssh"] is not None
+    assert clean_vm_source_tart_name is not None
+    assert clean_vm_tart_name is not None
+    assert clean_vm_ssh_user is not None
+    assert resolved_identity is not None
+    assert ssh_public_key is not None
+
+    tart_clone_completed = False
+    tart_random_mac_completed = False
+    tart_started = False
+    tart_stopped = False
+    tart_ip: str | None = None
+    ssh_target: str | None = None
+    tart_exec_status: str | None = None
+    ssh_ready: bool | None = None
+    sudo_noninteractive: bool | None = None
+    clean_marker_path: str | None = None
+    uvx_path: str | None = None
+    remote_output_preview: str | None = None
+
+    def finalize_bootstrap(
+        proof: StockCodexCompatPkgCleanVmBootstrapProof,
+    ) -> StockCodexCompatPkgCleanVmBootstrapProof:
+        nonlocal tart_stopped
+        if tart_started and not tart_stopped:
+            with contextlib.suppress(Exception):
+                stop = subprocess.run(
+                    [tool_paths["tart"], "stop", clean_vm_tart_name, "--timeout", "30"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                tart_stopped = stop.returncode == 0
+        return replace(proof, tart_stopped=tart_stopped)
+
+    def blocked(
+        message: str,
+        *,
+        status: str | None = None,
+        output: str | None = None,
+    ) -> StockCodexCompatPkgCleanVmBootstrapProof:
+        return finalize_bootstrap(
+            _blocked_stock_codex_compat_pkg_clean_vm_bootstrap_proof(
+                tool_paths=tool_paths,
+                missing_prerequisites=(message,),
+                source_tart_name=clean_vm_source_tart_name,
+                target_tart_name=clean_vm_tart_name,
+                ssh_user=clean_vm_ssh_user,
+                ssh_port=clean_vm_ssh_port,
+                ssh_identity=resolved_identity,
+                ssh_public_key_sha256=ssh_public_key_sha256,
+                install_uv_requested=clean_vm_bootstrap_install_uv,
+                tart_clone_completed=tart_clone_completed,
+                tart_random_mac_completed=tart_random_mac_completed,
+                tart_started=tart_started,
+                tart_stopped=tart_stopped,
+                tart_ip=tart_ip,
+                ssh_target=ssh_target,
+                tart_exec_status=status,
+                ssh_ready=ssh_ready,
+                sudo_noninteractive=sudo_noninteractive,
+                clean_marker_path=clean_marker_path,
+                uvx_path=uvx_path,
+                remote_output_preview=_preview_text(output or "", limit=12000),
+            )
+        )
+
+    try:
+        clone = subprocess.run(
+            [
+                tool_paths["tart"],
+                "clone",
+                clean_vm_source_tart_name,
+                clean_vm_tart_name,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1800,
+        )
+        tart_clone_completed = clone.returncode == 0
+        if not tart_clone_completed:
+            return blocked(
+                "could not clone raw clean VM source image",
+                status=f"clone-exit-{clone.returncode}",
+                output=clone.stdout + clone.stderr,
+            )
+
+        random_mac = subprocess.run(
+            [tool_paths["tart"], "set", clean_vm_tart_name, "--random-mac"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        tart_random_mac_completed = random_mac.returncode == 0
+        if not tart_random_mac_completed:
+            return blocked(
+                "could not randomize clean VM clone MAC address",
+                status=f"random-mac-exit-{random_mac.returncode}",
+                output=random_mac.stdout + random_mac.stderr,
+            )
+
+        subprocess.Popen(
+            [tool_paths["tart"], "run", "--no-graphics", clean_vm_tart_name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        tart_started = True
+        ip = subprocess.run(
+            [tool_paths["tart"], "ip", clean_vm_tart_name, "--wait", "180"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=210,
+        )
+        if ip.returncode != 0:
+            return blocked(
+                "could not resolve raw clean VM clone IP",
+                status=f"ip-exit-{ip.returncode}",
+                output=ip.stdout + ip.stderr,
+            )
+        tart_ip = ip.stdout.strip().splitlines()[-1].strip() if ip.stdout.strip() else None
+        if not tart_ip:
+            return blocked("Tart IP resolver returned no address", status="ip-empty")
+        ssh_target = f"{clean_vm_ssh_user}@{tart_ip}"
+
+        guest_agent_deadline = time.monotonic() + 180
+        guest_agent_probe = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr="",
+        )
+        while time.monotonic() < guest_agent_deadline:
+            guest_agent_probe = subprocess.run(
+                [tool_paths["tart"], "exec", clean_vm_tart_name, "/usr/bin/true"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if guest_agent_probe.returncode == 0:
+                break
+            time.sleep(5)
+        if guest_agent_probe.returncode != 0:
+            return blocked(
+                "raw clean VM Tart guest agent did not become ready",
+                status=f"tart-exec-probe-exit-{guest_agent_probe.returncode}",
+                output=(guest_agent_probe.stdout or "") + (guest_agent_probe.stderr or ""),
+            )
+
+        bootstrap = subprocess.run(
+            [
+                tool_paths["tart"],
+                "exec",
+                "-i",
+                clean_vm_tart_name,
+                "/bin/bash",
+                "-s",
+                "--",
+                ssh_public_key,
+                "1" if clean_vm_bootstrap_install_uv else "0",
+                UV_STANDALONE_INSTALLER_URL,
+            ],
+            input=_clean_vm_bootstrap_script_text(),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1200,
+        )
+        bootstrap_output = (bootstrap.stdout or "") + (bootstrap.stderr or "")
+        remote_output_preview = _preview_text(bootstrap_output, limit=12000)
+        tart_exec_status = f"exit-{bootstrap.returncode}"
+        bootstrap_evidence = _parse_clean_vm_bootstrap_evidence(bootstrap_output)
+        sudo_noninteractive = bootstrap_evidence.get("sudo_noninteractive") == "true"
+        clean_marker_path = bootstrap_evidence.get("marker_path")
+        uvx_path = bootstrap_evidence.get("uvx_path")
+        if (
+            bootstrap.returncode != 0
+            or bootstrap_evidence.get("status") != "replacement-ready"
+        ):
+            return blocked(
+                "raw clean VM guest-agent bootstrap did not pass",
+                status=tart_exec_status,
+                output=bootstrap_output,
+            )
+
+        ssh_probe = _wait_for_clean_vm_ssh(
+            ssh_path=tool_paths["ssh"],
+            ssh_target=ssh_target,
+            ssh_port=clean_vm_ssh_port,
+            ssh_identity=resolved_identity,
+            timeout=180,
+        )
+        ssh_ready = ssh_probe.returncode == 0
+        if not ssh_ready:
+            return blocked(
+                "prepared clean VM SSH did not become reachable",
+                status="ssh-unreachable",
+                output=(ssh_probe.stdout or "") + (ssh_probe.stderr or ""),
+            )
+
+        ssh_check = _run_clean_vm_ssh_command(
+            _clean_vm_bootstrap_ssh_check_command(),
+            ssh_path=tool_paths["ssh"],
+            ssh_target=ssh_target,
+            ssh_port=clean_vm_ssh_port,
+            ssh_identity=resolved_identity,
+            timeout=120,
+        )
+        ssh_check_output = (ssh_check.stdout or "") + (ssh_check.stderr or "")
+        remote_output_preview = _preview_text(
+            bootstrap_output + "\n" + ssh_check_output,
+            limit=12000,
+        )
+        ssh_evidence = _parse_clean_vm_bootstrap_evidence(ssh_check_output)
+        sudo_noninteractive = ssh_evidence.get("sudo_noninteractive") == "true"
+        clean_marker_path = ssh_evidence.get("marker_path") or clean_marker_path
+        uvx_path = ssh_evidence.get("uvx_path") or uvx_path
+        if ssh_check.returncode != 0 or ssh_evidence.get("ssh_ready") != "true":
+            return blocked(
+                "prepared clean VM SSH verification did not pass",
+                status=f"ssh-check-exit-{ssh_check.returncode}",
+                output=ssh_check_output,
+            )
+
+        return finalize_bootstrap(
+            StockCodexCompatPkgCleanVmBootstrapProof(
+                status="replacement-ready",
+                missing_prerequisites=(),
+                tool_paths=tool_paths,
+                source_tart_name=clean_vm_source_tart_name,
+                target_tart_name=clean_vm_tart_name,
+                ssh_user=clean_vm_ssh_user,
+                ssh_port=clean_vm_ssh_port,
+                ssh_identity=resolved_identity,
+                ssh_public_key_sha256=ssh_public_key_sha256,
+                install_uv_requested=clean_vm_bootstrap_install_uv,
+                tart_clone_completed=tart_clone_completed,
+                tart_random_mac_completed=tart_random_mac_completed,
+                tart_started=tart_started,
+                tart_stopped=tart_stopped,
+                tart_ip=tart_ip,
+                ssh_target=ssh_target,
+                tart_exec_status=tart_exec_status,
+                ssh_ready=ssh_ready,
+                sudo_noninteractive=sudo_noninteractive,
+                clean_marker_path=clean_marker_path,
+                uvx_path=uvx_path,
+                remote_output_preview=remote_output_preview,
+            )
+        )
+    finally:
+        if tart_started and not tart_stopped:
+            with contextlib.suppress(Exception):
+                subprocess.run(
+                    [tool_paths["tart"], "stop", clean_vm_tart_name, "--timeout", "30"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
 
 
 def run_stock_codex_compat_pkg_clean_vm_proof(
@@ -18247,6 +18812,102 @@ def print_stock_codex_compat_pkg_external_clean_user_proof(
         "ASSERTION: the external clean-user path reaches needs-auth "
         "classification, rolls back the user launcher, removes canary-created "
         "user state plus package receipt state, and detaches the temporary image"
+    )
+
+
+def print_stock_codex_compat_pkg_clean_vm_bootstrap_proof(
+    proof: StockCodexCompatPkgCleanVmBootstrapProof,
+) -> None:
+    """Emit operator evidence for raw Tart clone clean-VM preparation."""
+    print("stock_codex_compat_pkg_clean_vm_bootstrap_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_clean_vm_bootstrap_surface="
+        "raw-tart-image-to-disposable-clean-vm-proof-target"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_bootstrap_status={proof.status}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_bootstrap_missing_prerequisites="
+        f"{json.dumps(list(proof.missing_prerequisites), sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_bootstrap_tool_paths="
+        f"{json.dumps(proof.tool_paths, sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_bootstrap_source_tart_name="
+        f"{proof.source_tart_name}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_bootstrap_target_tart_name="
+        f"{proof.target_tart_name}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_bootstrap_ssh_user={proof.ssh_user}")
+    print(f"stock_codex_compat_pkg_clean_vm_bootstrap_ssh_port={proof.ssh_port}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_bootstrap_ssh_identity="
+        f"{proof.ssh_identity}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_bootstrap_ssh_public_key_sha256="
+        f"{proof.ssh_public_key_sha256}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_bootstrap_install_uv_requested="
+        f"{proof.install_uv_requested}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_bootstrap_tart_clone_completed="
+        f"{proof.tart_clone_completed}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_bootstrap_tart_random_mac_completed="
+        f"{proof.tart_random_mac_completed}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_bootstrap_tart_started="
+        f"{proof.tart_started}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_bootstrap_tart_stopped="
+        f"{proof.tart_stopped}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_bootstrap_tart_ip={proof.tart_ip}")
+    print(f"stock_codex_compat_pkg_clean_vm_bootstrap_ssh_target={proof.ssh_target}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_bootstrap_tart_exec_status="
+        f"{proof.tart_exec_status}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_bootstrap_ssh_ready={proof.ssh_ready}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_bootstrap_sudo_noninteractive="
+        f"{proof.sudo_noninteractive}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_bootstrap_clean_marker_path="
+        f"{proof.clean_marker_path}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_bootstrap_uvx_path={proof.uvx_path}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_bootstrap_remote_output="
+        f"{proof.remote_output_preview!r}"
+    )
+    if proof.status == "blocked":
+        print(
+            "ASSERTION: raw clean-VM bootstrap is blocked by a missing cached "
+            "source Tart image, an existing target clone, missing SSH identity, "
+            "guest-agent failure, missing uvx without explicit install opt-in, "
+            "interactive sudo, or failed SSH verification"
+        )
+        return
+    print(
+        "ASSERTION: a raw cached Tart macOS image can be cloned into a "
+        "disposable target VM, prepared through Tart guest-agent exec, stopped, "
+        "and made reachable through key SSH for the existing clean-VM package gates"
+    )
+    print(
+        "ASSERTION: the prepared clone has the disposable user marker, "
+        "noninteractive sudo, user-local uvx, randomized MAC, and no dependency "
+        "on the preexisting omnigent-clean VM"
     )
 
 
@@ -23379,6 +24040,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-pkg-installer-lifecycle",
             "stock-codex-compat-pkg-clean-user-canary",
             "stock-codex-compat-pkg-external-clean-user",
+            "stock-codex-compat-pkg-clean-vm-bootstrap",
             "stock-codex-compat-pkg-clean-vm",
             "stock-codex-compat-pkg-clean-vm-remote-acquisition",
             "stock-codex-compat-pkg-clean-vm-update-agent",
@@ -23544,6 +24206,12 @@ def parse_args() -> argparse.Namespace:
             "user state, then removes payload and receipt state before "
             "detaching the image; macOS installer requires root/admin "
             "privileges for the live install step. "
+            "'stock-codex-compat-pkg-clean-vm-bootstrap' clones a cached raw "
+            "Tart macOS source image into a new disposable target VM, starts it "
+            "headless, uses Tart guest-agent exec to add the SSH public key, "
+            "mark the user home disposable, optionally install user-local uvx, "
+            "then verifies key SSH, noninteractive sudo, uvx, and the marker "
+            "before stopping the clone for the existing clean-VM package gates. "
             "'stock-codex-compat-pkg-clean-vm' consumes --pkg-path and either "
             "--clean-vm-ssh-target or --clean-vm-tart-name, copies the "
             "signed/notarized pkg plus a file-backed stock Codex channel "
@@ -23717,6 +24385,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--clean-vm-source-tart-name",
+        default=None,
+        help=(
+            "Cached source Tart image for stock-codex-compat-pkg-clean-vm-bootstrap, "
+            "for example ghcr.io/cirruslabs/macos-tahoe-base:latest. The proof "
+            "refuses to pull implicitly; run tart pull first if the source is missing."
+        ),
+    )
+    parser.add_argument(
         "--clean-vm-tart-name",
         default=None,
         help=(
@@ -23755,6 +24432,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Start --clean-vm-tart-name with 'tart run --no-graphics' before "
             "resolving its IP, then stop it after the proof attempt."
+        ),
+    )
+    parser.add_argument(
+        "--clean-vm-bootstrap-install-uv",
+        action="store_true",
+        help=(
+            "Allow stock-codex-compat-pkg-clean-vm-bootstrap to install uvx into "
+            "the disposable VM user's ~/.local/bin via the official uv standalone "
+            "installer with shell startup-file mutation disabled. Without this "
+            "flag, a missing uvx blocks the proof."
         ),
     )
     parser.add_argument(
@@ -24384,6 +25071,49 @@ def main() -> int:
                 package_path=args.pkg_path,
                 clean_user_home=args.clean_user_home,
                 clean_user_name=args.clean_user_name,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-clean-vm-bootstrap":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-bootstrap does not use "
+                "--apple-bundle; omit it."
+            )
+        if args.codex_path is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-bootstrap prepares a VM and "
+                "does not use --codex-path; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-bootstrap cannot allow a "
+                "Codex-fork binary."
+            )
+        if args.pkg_path is not None or args.pkg_output_path is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-bootstrap does not consume or "
+                "produce pkg artifacts; omit --pkg-path and --pkg-output-path."
+            )
+        if args.clean_vm_ssh_target is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-bootstrap prepares a new Tart "
+                "clone; use --clean-vm-tart-name instead of --clean-vm-ssh-target."
+            )
+        if args.clean_vm_start_tart:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-bootstrap starts the clone itself; "
+                "omit --clean-vm-start-tart."
+            )
+        print_stock_codex_compat_pkg_clean_vm_bootstrap_proof(
+            run_stock_codex_compat_pkg_clean_vm_bootstrap_proof(
+                clean_vm_source_tart_name=args.clean_vm_source_tart_name,
+                clean_vm_tart_name=args.clean_vm_tart_name,
+                clean_vm_ssh_identity=args.clean_vm_ssh_identity,
+                clean_vm_ssh_user=args.clean_vm_ssh_user,
+                clean_vm_ssh_port=args.clean_vm_ssh_port,
+                clean_vm_bootstrap_install_uv=args.clean_vm_bootstrap_install_uv,
             )
         )
         return 0
