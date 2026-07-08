@@ -1384,6 +1384,14 @@ class StockCodexCompatPkgUpdatePromotionProof:
     current_codex_version: str
     current_codex_sha256: str
     policy_name: str
+    github_release_tag: str
+    github_release_name: str
+    github_release_url: str
+    github_published_at: str
+    github_asset_name: str
+    github_asset_url: str
+    github_asset_digest: str
+    github_asset_sha256: str
     cask_token: str
     cask_tap: str
     cask_homepage: str
@@ -1446,6 +1454,14 @@ class StockCodexCompatPkgUpdateAgentProof:
     clean_cache_root: Path
     uvx_path: Path
     policy_name: str
+    github_release_tag: str
+    github_release_name: str
+    github_release_url: str
+    github_published_at: str
+    github_asset_name: str
+    github_asset_url: str
+    github_asset_digest: str
+    github_asset_sha256: str
     cask_token: str
     cask_tap: str
     cask_homepage: str
@@ -17536,21 +17552,15 @@ def run_stock_codex_compat_pkg_update_promotion_proof(
     stock_codex_realpath = stock_codex_path.resolve()
     stock_codex_version = codex_version(stock_codex_realpath)
     stock_codex_sha256 = sha256_file(stock_codex_realpath)
-    cask = _read_homebrew_codex_cask()
-    cask_url = _json_string(cask, "url")
-    cask_sha256 = _json_string(cask, "sha256").lower()
-    cask_version = _json_string(cask, "version")
-    cask_token = _json_string(cask, "token")
-    cask_tap = _json_string(cask, "tap")
-    cask_homepage = _json_string(cask, "homepage")
-    archive_executable = _homebrew_codex_binary_name(cask)
-    _validate_homebrew_codex_cask_metadata(
-        token=cask_token,
-        homepage=cask_homepage,
-        url=cask_url,
-        sha256=cask_sha256,
-    )
-    selected_version = f"codex-cli {cask_version}"
+    latest = _github_latest_stable_codex_channel()
+    cask_url = latest.asset_url
+    cask_sha256 = latest.asset_sha256
+    cask_version = latest.version_slug
+    cask_token = "codex"
+    cask_tap = "github-releases/latest"
+    cask_homepage = "https://github.com/openai/codex"
+    archive_executable = latest.archive_executable
+    selected_version = latest.selected_version
     provisioner = _load_stock_codex_provisioner()
     policy_name = provisioner.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY
 
@@ -18152,6 +18162,14 @@ def run_stock_codex_compat_pkg_update_promotion_proof(
             current_codex_version=current_codex_version,
             current_codex_sha256=current_codex_sha,
             policy_name=policy_name,
+            github_release_tag=latest.tag_name,
+            github_release_name=latest.release_name,
+            github_release_url=latest.release_html_url,
+            github_published_at=latest.published_at,
+            github_asset_name=latest.asset_name,
+            github_asset_url=latest.asset_url,
+            github_asset_digest=latest.asset_digest,
+            github_asset_sha256=latest.asset_sha256,
             cask_token=cask_token,
             cask_tap=cask_tap,
             cask_homepage=cask_homepage,
@@ -18210,21 +18228,15 @@ def run_stock_codex_compat_pkg_update_agent_proof(
     if not uvx_path.is_file() or not os.access(uvx_path, os.X_OK):
         raise SystemExit(f"uvx binary is not executable: {uvx_path}")
 
-    cask = _read_homebrew_codex_cask()
-    cask_url = _json_string(cask, "url")
-    cask_sha256 = _json_string(cask, "sha256").lower()
-    cask_version = _json_string(cask, "version")
-    cask_token = _json_string(cask, "token")
-    cask_tap = _json_string(cask, "tap")
-    cask_homepage = _json_string(cask, "homepage")
-    archive_executable = _homebrew_codex_binary_name(cask)
-    _validate_homebrew_codex_cask_metadata(
-        token=cask_token,
-        homepage=cask_homepage,
-        url=cask_url,
-        sha256=cask_sha256,
-    )
-    selected_version = f"codex-cli {cask_version}"
+    latest = _github_latest_stable_codex_channel()
+    cask_url = latest.asset_url
+    cask_sha256 = latest.asset_sha256
+    cask_version = latest.version_slug
+    cask_token = "codex"
+    cask_tap = "github-releases/latest"
+    cask_homepage = "https://github.com/openai/codex"
+    archive_executable = latest.archive_executable
+    selected_version = latest.selected_version
     provisioner = _load_stock_codex_provisioner()
     policy_name = provisioner.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY
 
@@ -18698,6 +18710,14 @@ def run_stock_codex_compat_pkg_update_agent_proof(
             clean_cache_root=clean_cache_root,
             uvx_path=uvx_path,
             policy_name=policy_name,
+            github_release_tag=latest.tag_name,
+            github_release_name=latest.release_name,
+            github_release_url=latest.release_html_url,
+            github_published_at=latest.published_at,
+            github_asset_name=latest.asset_name,
+            github_asset_url=latest.asset_url,
+            github_asset_digest=latest.asset_digest,
+            github_asset_sha256=latest.asset_sha256,
             cask_token=cask_token,
             cask_tap=cask_tap,
             cask_homepage=cask_homepage,
@@ -21313,6 +21333,38 @@ def print_stock_codex_compat_pkg_update_promotion_proof(
     print(f"stock_codex_compat_pkg_update_promotion_current_version={proof.current_codex_version}")
     print(f"stock_codex_compat_pkg_update_promotion_current_sha256={proof.current_codex_sha256}")
     print(f"stock_codex_compat_pkg_update_promotion_policy_name={proof.policy_name}")
+    print(
+        "stock_codex_compat_pkg_update_promotion_github_release_tag="
+        f"{proof.github_release_tag}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_promotion_github_release_name="
+        f"{proof.github_release_name}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_promotion_github_release_url="
+        f"{proof.github_release_url}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_promotion_github_published_at="
+        f"{proof.github_published_at}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_promotion_github_asset_name="
+        f"{proof.github_asset_name}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_promotion_github_asset_url="
+        f"{proof.github_asset_url}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_promotion_github_asset_digest="
+        f"{proof.github_asset_digest}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_promotion_github_asset_sha256="
+        f"{proof.github_asset_sha256}"
+    )
     print(f"stock_codex_compat_pkg_update_promotion_cask_token={proof.cask_token}")
     print(f"stock_codex_compat_pkg_update_promotion_cask_tap={proof.cask_tap}")
     print(f"stock_codex_compat_pkg_update_promotion_cask_homepage={proof.cask_homepage}")
@@ -21412,8 +21464,9 @@ def print_stock_codex_compat_pkg_update_promotion_proof(
     )
     print("stock_codex_compat_pkg_update_promotion_cache_lifecycle=temporary_removed_after_proof")
     print(
-        "ASSERTION: the pkg-installed runtime stages the stable official stock "
-        "Codex target before any persistent launcher pointer is promoted"
+        "ASSERTION: the pkg-installed runtime stages the latest non-prerelease "
+        "OpenAI GitHub stock Codex release and verifies the release asset "
+        "SHA-256 before any persistent launcher pointer is promoted"
     )
     print(
         "ASSERTION: promotion updates only the clean user's launcher manifest "
@@ -21464,6 +21517,38 @@ def print_stock_codex_compat_pkg_update_agent_proof(
     print(f"stock_codex_compat_pkg_update_agent_cache_root={proof.clean_cache_root}")
     print(f"stock_codex_compat_pkg_update_agent_uvx_path={proof.uvx_path}")
     print(f"stock_codex_compat_pkg_update_agent_policy_name={proof.policy_name}")
+    print(
+        "stock_codex_compat_pkg_update_agent_github_release_tag="
+        f"{proof.github_release_tag}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_agent_github_release_name="
+        f"{proof.github_release_name}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_agent_github_release_url="
+        f"{proof.github_release_url}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_agent_github_published_at="
+        f"{proof.github_published_at}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_agent_github_asset_name="
+        f"{proof.github_asset_name}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_agent_github_asset_url="
+        f"{proof.github_asset_url}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_agent_github_asset_digest="
+        f"{proof.github_asset_digest}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_agent_github_asset_sha256="
+        f"{proof.github_asset_sha256}"
+    )
     print(f"stock_codex_compat_pkg_update_agent_cask_token={proof.cask_token}")
     print(f"stock_codex_compat_pkg_update_agent_cask_tap={proof.cask_tap}")
     print(f"stock_codex_compat_pkg_update_agent_cask_homepage={proof.cask_homepage}")
@@ -21527,9 +21612,10 @@ def print_stock_codex_compat_pkg_update_agent_proof(
         "installed runtime and do not bake proof-only current Codex state"
     )
     print(
-        "ASSERTION: the updater can run immediately, stage the stable official "
-        "target, promote the clean launcher manifest, and become up-to-date "
-        "without another remote download"
+        "ASSERTION: the updater can run immediately, stage the latest "
+        "non-prerelease OpenAI GitHub stock Codex release with release asset "
+        "SHA-256 verification, promote the clean launcher manifest, and "
+        "become up-to-date without another remote download"
     )
 
 
@@ -25887,12 +25973,14 @@ def parse_args() -> argparse.Namespace:
             "stock Codex release through --plan-update --stage-update, "
             "without waiting for Homebrew cask metadata. "
             "'stock-codex-compat-pkg-update-promotion' proves the installed "
-            "runtime can stage the stable official stock Codex release, "
-            "promote a clean user launcher manifest, suppress promotion as "
-            "up-to-date, and roll back to the previous pointer. "
+            "runtime can stage the latest non-prerelease OpenAI GitHub stock "
+            "Codex release, verify the release asset SHA-256, promote a clean "
+            "user launcher manifest, suppress promotion as up-to-date, and "
+            "roll back to the previous pointer. "
             "'stock-codex-compat-pkg-update-agent' proves the installed "
-            "runtime can write a user LaunchAgent plist for scheduled stock "
-            "Codex checks and run the updater entrypoint once directly. "
+            "runtime can write a user LaunchAgent plist for scheduled latest "
+            "non-prerelease OpenAI GitHub stock Codex checks and run the "
+            "updater entrypoint once directly. "
             "'stock-codex-compat-pkg-signed-notarized' builds the pkg with a "
             "Developer ID Installer identity, submits it through notarytool, "
             "staples it, validates the staple, and checks Gatekeeper; when "
