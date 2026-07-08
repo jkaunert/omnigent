@@ -2510,6 +2510,8 @@ def test_stock_codex_compat_pkg_update_agent_proof_writes_schedule_and_runs_upda
                 str(runtime_root / "scripts" / "update_stock_codex_compat.py"),
                 "--runtime-root",
                 str(runtime_root),
+                "--uvx-path",
+                str(uvx_path),
                 "--cache-root",
                 str(cache_root),
                 "--channel-manifest",
@@ -2673,6 +2675,7 @@ def test_stock_codex_compat_pkg_update_agent_proof_writes_schedule_and_runs_upda
     assert "--current-codex" not in proof.launch_agent_program_arguments
     assert "--write-launch-agent" not in proof.launch_agent_program_arguments
     assert "--run-now" not in proof.launch_agent_program_arguments
+    assert "--uvx-path" in proof.launch_agent_program_arguments
     assert "--allow-remote-channel-download" in proof.launch_agent_program_arguments
     assert proof.host_cache_root == host_home / ".local" / "omnigent" / "codex-stock"
     assert proof.host_cache_referenced_by_plans is False
@@ -4038,6 +4041,12 @@ def test_clean_vm_remote_acquisition_script_uses_url_backed_channel() -> None:
     assert "STOCK_CODEX_COMPAT_LIVE_OK" in script
     assert "stock_codex_compat_pkg_clean_vm_live_status=replacement-ready" in script
     assert "stock_codex_compat_pkg_clean_vm_remote_acquisition_status=replacement-ready" in script
+    assert 'update_agent_mode="${9:-}"' in script
+    assert "--write-launch-agent" in script
+    assert 'launchctl bootstrap "$launch_domain" "$launch_agent_path"' in script
+    assert 'launchctl kickstart -k "$launch_domain/$launch_agent_label"' in script
+    assert 'launchctl bootout "$launch_domain/$launch_agent_label"' in script
+    assert "stock_codex_compat_pkg_clean_vm_update_agent_status=replacement-ready" in script
 
 
 def test_stock_codex_compat_pkg_clean_vm_remote_acquisition_does_not_upload_stock_binary(
@@ -4173,6 +4182,170 @@ def test_stock_codex_compat_pkg_clean_vm_remote_acquisition_does_not_upload_stoc
     bash_commands = [command for command in remote_commands if command.startswith("/bin/bash ")]
     assert len(bash_commands) == 1
     assert "codex-aarch64-apple-darwin.tar.gz" in bash_commands[0]
+    assert str(stock_codex) not in bash_commands[0]
+
+
+def test_stock_codex_compat_pkg_clean_vm_update_agent_loads_launchd_without_stock_binary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = _write_codex_binary(
+        tmp_path / "stock" / "codex",
+        version="codex-cli 0.142.5",
+    )
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+    remote_channel = _MOD._OfficialStockCodexRemoteChannel(
+        policy_name="official-openai-github-release",
+        cask_token="codex",
+        cask_tap="homebrew/cask",
+        cask_homepage="https://github.com/openai/codex",
+        cask_version="0.143.0",
+        cask_url=(
+            "https://github.com/openai/codex/releases/download/"
+            "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+        ),
+        cask_sha256="e" * 64,
+        selected_version="codex-cli 0.143.0",
+        archive_executable="codex-aarch64-apple-darwin",
+    )
+    uploads: list[tuple[Path, str]] = []
+    uploaded_channel: dict[str, object] = {}
+    remote_commands: list[str] = []
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        if path is not None:
+            return None
+        return {
+            "ssh": "/usr/bin/ssh",
+            "scp": "/usr/bin/scp",
+            "tart": "/usr/local/bin/tart",
+        }.get(name)
+
+    def fake_copy_clean_vm_file(
+        *,
+        scp_path: str,
+        ssh_target: str,
+        ssh_port: int,
+        ssh_identity: Path | None,
+        source: Path,
+        remote_destination: str,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del scp_path, ssh_target, ssh_port, ssh_identity, timeout
+        uploads.append((source, remote_destination))
+        if source.name == "channel.json":
+            uploaded_channel.update(json.loads(source.read_text(encoding="utf-8")))
+        return subprocess.CompletedProcess(["scp"], 0, stdout="", stderr="")
+
+    def fake_run_clean_vm_ssh_command(
+        remote_command: str,
+        *,
+        ssh_path: str,
+        ssh_target: str,
+        ssh_port: int,
+        ssh_identity: Path | None,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del ssh_path, ssh_target, ssh_port, ssh_identity, timeout
+        remote_commands.append(remote_command)
+        if remote_command.startswith("/usr/bin/mktemp"):
+            return subprocess.CompletedProcess(
+                ["ssh"],
+                0,
+                stdout="/tmp/omnigent-stock-codex-compat-clean-vm-update-agent.test\n",
+                stderr="",
+            )
+        if remote_command.startswith("chmod "):
+            return subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr="")
+        if remote_command.startswith("/bin/bash "):
+            update_agent_evidence = {
+                "directAction": "up-to-date",
+                "hostCacheReferenced": False,
+                "kind": "omnigent-clean-vm-update-agent-evidence",
+                "launchAgentLabel": "ai.omnigent.stock-codex-compat.update",
+                "launchAgentPath": (
+                    "/Users/admin/Library/LaunchAgents/"
+                    "ai.omnigent.stock-codex-compat.update.plist"
+                ),
+                "launchDomain": "user/501",
+                "launchctlBootout": "unloaded",
+                "launchctlBootstrap": "loaded",
+                "launchctlKickstart": "completed",
+                "scheduledAction": "up-to-date",
+                "selectedCodexPath": "/Users/admin/.local/omnigent/codex-stock/0.143.0/codex",
+            }
+            return subprocess.CompletedProcess(
+                ["ssh"],
+                0,
+                stdout=(
+                    json.dumps(update_agent_evidence, sort_keys=True)
+                    + "\n"
+                    "stock_codex_compat_pkg_clean_vm_update_agent_status="
+                    "replacement-ready\n"
+                ),
+                stderr="",
+            )
+        if remote_command.startswith("rm -rf "):
+            return subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected remote command: {remote_command}")
+
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+    monkeypatch.setattr(
+        _MOD,
+        "_official_stock_codex_remote_channel",
+        lambda: remote_channel,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_wait_for_clean_vm_ssh",
+        lambda **_kwargs: subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(_MOD, "_copy_clean_vm_file", fake_copy_clean_vm_file)
+    monkeypatch.setattr(_MOD, "_run_clean_vm_ssh_command", fake_run_clean_vm_ssh_command)
+
+    proof = _MOD.run_stock_codex_compat_pkg_clean_vm_update_agent_proof(
+        stock_codex,
+        package_path=package_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_tart_name=None,
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_user=None,
+        clean_vm_ssh_port=22,
+        clean_vm_start_tart=False,
+    )
+
+    uploaded_sources = [source for source, _destination in uploads]
+    assert proof.status == "replacement-ready"
+    assert proof.proof_variant == "official-remote-channel-update-agent"
+    assert proof.update_agent_requested is True
+    assert proof.host_stock_codex_uploaded is False
+    assert proof.update_agent_launch_agent_label == "ai.omnigent.stock-codex-compat.update"
+    assert proof.update_agent_launch_domain == "user/501"
+    assert proof.update_agent_launchctl_bootstrap == "loaded"
+    assert proof.update_agent_launchctl_kickstart == "completed"
+    assert proof.update_agent_launchctl_bootout == "unloaded"
+    assert proof.update_agent_direct_action == "up-to-date"
+    assert proof.update_agent_scheduled_action == "up-to-date"
+    assert proof.update_agent_selected_codex_path == Path(
+        "/Users/admin/.local/omnigent/codex-stock/0.143.0/codex"
+    )
+    assert proof.update_agent_host_cache_referenced is False
+    assert stock_codex.resolve() not in [source.resolve() for source in uploaded_sources]
+    assert [source.name for source in uploaded_sources] == [
+        "omnigent-stock-codex-compat.pkg",
+        "channel.json",
+        "clean_vm_proof.sh",
+    ]
+    artifacts = uploaded_channel["artifacts"]
+    assert isinstance(artifacts, list)
+    assert artifacts[0]["url"] == remote_channel.cask_url
+    assert artifacts[0]["sha256"] == remote_channel.cask_sha256
+    assert "path" not in artifacts[0]
+    bash_commands = [command for command in remote_commands if command.startswith("/bin/bash ")]
+    assert len(bash_commands) == 1
+    assert bash_commands[0].endswith("'' update-agent")
     assert str(stock_codex) not in bash_commands[0]
 
 
@@ -4377,6 +4550,34 @@ def test_clean_vm_live_output_evidence_requires_installed_launcher_surface() -> 
     )
 
     assert _MOD._parse_clean_vm_live_output_evidence(output) is None
+
+
+def test_clean_vm_update_agent_output_evidence_requires_launchctl_completion() -> None:
+    output = (
+        json.dumps(
+            {
+                "directAction": "up-to-date",
+                "hostCacheReferenced": False,
+                "kind": "omnigent-clean-vm-update-agent-evidence",
+                "launchAgentLabel": "ai.omnigent.stock-codex-compat.update",
+                "launchAgentPath": (
+                    "/Users/admin/Library/LaunchAgents/"
+                    "ai.omnigent.stock-codex-compat.update.plist"
+                ),
+                "launchDomain": "user/501",
+                "launchctlBootout": "unloaded",
+                "launchctlBootstrap": "loaded",
+                "launchctlKickstart": "not-run",
+                "scheduledAction": "up-to-date",
+                "selectedCodexPath": "/Users/admin/.local/omnigent/codex-stock/0.143.0/codex",
+            },
+            sort_keys=True,
+        )
+        + "\n"
+        + "stock_codex_compat_pkg_clean_vm_update_agent_status=replacement-ready\n"
+    )
+
+    assert _MOD._parse_clean_vm_update_agent_output_evidence(output) is None
 
 
 def test_clean_vm_ssh_command_avoids_persistent_known_hosts() -> None:

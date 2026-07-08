@@ -187,6 +187,9 @@ def test_update_writes_launch_agent_and_promotes_ready_target(
     program_arguments = plist["ProgramArguments"]
     assert program_arguments[:4] == [str(uvx_path), "--from", str(runtime_root), "python"]
     assert program_arguments[4] == str(runtime_root / "scripts" / "update_stock_codex_compat.py")
+    assert program_arguments[
+        program_arguments.index("--uvx-path") + 1
+    ] == str(uvx_path.resolve())
     assert "--write-launch-agent" not in program_arguments
     assert "--run-now" not in program_arguments
     assert "--current-codex" not in program_arguments

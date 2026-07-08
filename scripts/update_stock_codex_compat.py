@@ -199,6 +199,8 @@ def launch_agent_program_arguments(
         str(updater),
         "--runtime-root",
         str(runtime_root),
+        "--uvx-path",
+        str(uvx_path),
         "--cache-root",
         str(cache_root),
         "--channel-manifest",

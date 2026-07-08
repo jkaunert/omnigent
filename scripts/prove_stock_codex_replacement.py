@@ -1715,6 +1715,17 @@ class StockCodexCompatPkgCleanVmProof:
     live_thread_id: str | None = None
     live_event_count: int | None = None
     live_agent_message_preview: str | None = None
+    update_agent_requested: bool | None = None
+    update_agent_launch_agent_path: Path | None = None
+    update_agent_launch_agent_label: str | None = None
+    update_agent_launch_domain: str | None = None
+    update_agent_launchctl_bootstrap: str | None = None
+    update_agent_launchctl_kickstart: str | None = None
+    update_agent_launchctl_bootout: str | None = None
+    update_agent_direct_action: str | None = None
+    update_agent_scheduled_action: str | None = None
+    update_agent_selected_codex_path: Path | None = None
+    update_agent_host_cache_referenced: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -7520,6 +7531,64 @@ def _parse_clean_vm_live_output_evidence(
     return None
 
 
+def _parse_clean_vm_update_agent_output_evidence(
+    remote_output: str,
+) -> tuple[Path, str, str, str, str, str, str, str, Path, bool] | None:
+    """Extract launchd updater evidence emitted by the clean-VM proof script."""
+    for line in remote_output.splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("kind") != "omnigent-clean-vm-update-agent-evidence":
+            continue
+        launch_agent_path = payload.get("launchAgentPath")
+        launch_agent_label = payload.get("launchAgentLabel")
+        launch_domain = payload.get("launchDomain")
+        launchctl_bootstrap = payload.get("launchctlBootstrap")
+        launchctl_kickstart = payload.get("launchctlKickstart")
+        launchctl_bootout = payload.get("launchctlBootout")
+        direct_action = payload.get("directAction")
+        scheduled_action = payload.get("scheduledAction")
+        selected_codex_path = payload.get("selectedCodexPath")
+        host_cache_referenced = payload.get("hostCacheReferenced")
+        if (
+            isinstance(launch_agent_path, str)
+            and launch_agent_path
+            and isinstance(launch_agent_label, str)
+            and launch_agent_label
+            and isinstance(launch_domain, str)
+            and launch_domain
+            and launchctl_bootstrap == "loaded"
+            and launchctl_kickstart == "completed"
+            and launchctl_bootout == "unloaded"
+            and isinstance(direct_action, str)
+            and direct_action
+            and isinstance(scheduled_action, str)
+            and scheduled_action
+            and isinstance(selected_codex_path, str)
+            and selected_codex_path
+            and isinstance(host_cache_referenced, bool)
+        ):
+            return (
+                Path(launch_agent_path),
+                launch_agent_label,
+                launch_domain,
+                launchctl_bootstrap,
+                launchctl_kickstart,
+                launchctl_bootout,
+                direct_action,
+                scheduled_action,
+                Path(selected_codex_path),
+                host_cache_referenced,
+            )
+    return None
+
+
 def print_stock_codex_compat_live_proof(proof: StockCodexCompatLiveProof) -> None:
     """Emit operator evidence for a successful stock Codex live compatibility proof."""
     print("stock_codex_compat_live_rehearsal=selected")
@@ -12609,6 +12678,7 @@ expected_stock_version="$5"
 expected_channel_url="$6"
 channel_policy="$7"
 live_auth_json="${8:-}"
+update_agent_mode="${9:-}"
 pkg_id="ai.omnigent.stock-codex-compat"
 install_prefix="/Library/Application Support/Omnigent/stock-codex-compat"
 runtime_root="$install_prefix/runtime"
@@ -12623,6 +12693,12 @@ manifest_path="$HOME/.local/omnigent/launchers/stock-codex-compat.json"
 adapter_root="$HOME/.local/omnigent/stock-codex-compat"
 adapter_package_dir="$adapter_root/adapter-package"
 user_runtime_root="$adapter_root/runtime"
+launch_agent_label="ai.omnigent.stock-codex-compat.update"
+launch_agent_path="$HOME/Library/LaunchAgents/$launch_agent_label.plist"
+update_log_dir="$HOME/Library/Logs/Omnigent/stock-codex-compat"
+update_stdout_log="$update_log_dir/update.out.log"
+update_stderr_log="$update_log_dir/update.err.log"
+launch_domain=""
 
 fail() {
   printf 'stock_codex_compat_pkg_clean_vm_remote_acquisition_error=%s\n' "$*" >&2
@@ -12634,8 +12710,17 @@ have() {
 }
 
 cleanup() {
+  if [ -n "${launch_domain:-}" ]; then
+    launchctl bootout "$launch_domain/$launch_agent_label" >/dev/null 2>&1 || true
+    launchctl bootout "$launch_domain" "$launch_agent_path" >/dev/null 2>&1 || true
+  fi
   rm -rf "$clean_codex_home" "$clean_cache_root" "$adapter_root" "$proof_root" || true
-  rm -f "$launcher_path" "$manifest_path" || true
+  rm -rf "$update_log_dir" || true
+  rmdir "$HOME/Library/Logs/Omnigent" 2>/dev/null || true
+  rmdir "$HOME/Library/Logs" 2>/dev/null || true
+  rm -f "$launcher_path" "$manifest_path" "$launch_agent_path" || true
+  rmdir "$HOME/Library/LaunchAgents" 2>/dev/null || true
+  rmdir "$HOME/Library" 2>/dev/null || true
   rmdir "$HOME/.local/omnigent/launchers" 2>/dev/null || true
   rmdir "$HOME/.local/omnigent" 2>/dev/null || true
   rmdir "$HOME/.local/bin" 2>/dev/null || true
@@ -12646,7 +12731,7 @@ cleanup() {
 trap cleanup EXIT
 
 export PATH="$HOME/.local/bin:$PATH"
-for tool in shasum spctl pkgutil installer uvx sudo awk sed dirname grep; do
+for tool in shasum spctl pkgutil installer uvx sudo awk sed dirname grep launchctl; do
   have "$tool"
 done
 sudo -n true >/dev/null 2>&1 || fail "sudo requires interactive authentication"
@@ -12668,6 +12753,8 @@ for path in \
   "$adapter_root" \
   "$clean_cache_root" \
   "$clean_codex_home" \
+  "$launch_agent_path" \
+  "$update_log_dir" \
   "$proof_root"; do
   [ ! -e "$path" ] || fail "clean VM user state already exists: $path"
 done
@@ -12820,6 +12907,268 @@ case "$probe_output" in
   *OMNIGENT_STOCK_CODEX_COMPAT_LAUNCHER_OK*) ;;
   *) fail "launcher probe sentinel missing" ;;
 esac
+
+if [ "$update_agent_mode" = "update-agent" ]; then
+  updater_script="$user_runtime_root/scripts/update_stock_codex_compat.py"
+  rollback_metadata_path="$manifest_path.rollback.json"
+  update_output_path="$proof_root/update-agent-direct-output.json"
+  scheduled_output_path="$proof_root/update-agent-scheduled-output.json"
+  [ -f "$updater_script" ] || fail "staged stock Codex updater missing"
+  mkdir -p "$(dirname "$launch_agent_path")" "$update_log_dir"
+  rm -f "$launch_agent_path" "$update_stdout_log" "$update_stderr_log"
+  update_output="$(
+    uvx --from "$user_runtime_root" python "$updater_script" \
+      --runtime-root "$user_runtime_root" \
+      --uvx-path "$uvx_path" \
+      --cache-root "$clean_cache_root" \
+      --channel-manifest "$channel_manifest" \
+      --expected-sha256 "$expected_channel_sha" \
+      --channel-policy "$channel_policy" \
+      --launcher-manifest "$manifest_path" \
+      --rollback-metadata "$rollback_metadata_path" \
+      --allow-remote-channel-download \
+      --write-launch-agent \
+      --run-now \
+      --json
+  )"
+  printf '%s\n' "$update_output" > "$update_output_path"
+  uvx --from "$user_runtime_root" python - \
+    "$update_output_path" \
+    "$launch_agent_path" \
+    "$launch_agent_label" \
+    "$user_runtime_root" \
+    "$uvx_path" \
+    "$manifest_path" \
+    "$clean_cache_root" \
+    "$channel_manifest" \
+    "$expected_channel_sha" <<'PY'
+import json
+import plistlib
+import sys
+from pathlib import Path
+
+(
+    update_output_path,
+    launch_agent_path,
+    launch_agent_label,
+    user_runtime_root,
+    uvx_path,
+    manifest_path,
+    clean_cache_root,
+    channel_manifest,
+    expected_channel_sha,
+) = sys.argv[1:]
+
+payload = json.loads(Path(update_output_path).read_text(encoding="utf-8"))
+if payload.get("kind") != "omnigent-stock-codex-compat-update":
+    raise SystemExit(f"unexpected updater kind: {payload!r}")
+launch_agent = payload.get("launchAgent")
+if not isinstance(launch_agent, dict):
+    raise SystemExit(f"updater omitted launchAgent object: {payload!r}")
+if launch_agent.get("path") != launch_agent_path:
+    raise SystemExit(f"unexpected LaunchAgent path: {launch_agent!r}")
+if launch_agent.get("label") != launch_agent_label:
+    raise SystemExit(f"unexpected LaunchAgent label: {launch_agent!r}")
+if launch_agent.get("written") is not True:
+    raise SystemExit(f"LaunchAgent was not written: {launch_agent!r}")
+program_arguments = launch_agent.get("programArguments")
+if not isinstance(program_arguments, list) or not all(
+    isinstance(item, str) for item in program_arguments
+):
+    raise SystemExit(f"invalid LaunchAgent ProgramArguments: {launch_agent!r}")
+expected_prefix = [
+    uvx_path,
+    "--from",
+    user_runtime_root,
+    "python",
+    str(Path(user_runtime_root) / "scripts" / "update_stock_codex_compat.py"),
+]
+if program_arguments[:5] != expected_prefix:
+    raise SystemExit(
+        "LaunchAgent does not invoke uvx --from staged runtime: "
+        f"{program_arguments!r}"
+    )
+for forbidden in ("--current-codex", "--write-launch-agent", "--run-now"):
+    if forbidden in program_arguments:
+        raise SystemExit(
+            f"LaunchAgent contains proof-only flag {forbidden}: {program_arguments!r}"
+        )
+for required in (
+    "--allow-remote-channel-download",
+    "--runtime-root",
+    "--uvx-path",
+    "--cache-root",
+    "--channel-manifest",
+    "--launcher-manifest",
+    "--rollback-metadata",
+    "--json",
+):
+    if required not in program_arguments:
+        raise SystemExit(f"LaunchAgent missing required flag {required}: {program_arguments!r}")
+plist = plistlib.loads(Path(launch_agent_path).read_bytes())
+if plist.get("ProgramArguments") != program_arguments:
+    raise SystemExit(f"LaunchAgent plist/JSON mismatch: {plist!r} != {launch_agent!r}")
+if Path(str(payload.get("cacheRoot"))).resolve() != Path(clean_cache_root).resolve():
+    raise SystemExit(f"updater used wrong cache root: {payload!r}")
+if Path(str(payload.get("channelManifestPath"))).resolve() != Path(channel_manifest).resolve():
+    raise SystemExit(f"updater used wrong channel manifest: {payload!r}")
+if str(payload.get("channelPolicy")) != "official-openai-github-release":
+    raise SystemExit(f"updater used wrong channel policy: {payload!r}")
+plan = payload.get("plan")
+if not isinstance(plan, dict):
+    raise SystemExit(f"updater did not run a plan: {payload!r}")
+channel = json.loads(Path(channel_manifest).read_text(encoding="utf-8"))
+if expected_channel_sha.lower() not in json.dumps(channel, sort_keys=True).lower():
+    raise SystemExit(f"channel manifest omitted expected SHA: {channel!r}")
+print(json.dumps({
+    "directAction": str(payload.get("action") or ""),
+    "kind": "omnigent-clean-vm-update-agent-direct-evidence",
+    "launchAgentPath": launch_agent_path,
+}, sort_keys=True))
+PY
+  uid="$(id -u)"
+  launch_domain="gui/$uid"
+  if ! launchctl print "$launch_domain" >/dev/null 2>&1; then
+    launch_domain="user/$uid"
+  fi
+  launchctl print "$launch_domain" >/dev/null 2>&1 || \
+    fail "launchd user/gui domain unavailable for uid $uid"
+  launchctl bootout "$launch_domain/$launch_agent_label" >/dev/null 2>&1 || true
+  launchctl bootout "$launch_domain" "$launch_agent_path" >/dev/null 2>&1 || true
+  : > "$update_stdout_log"
+  : > "$update_stderr_log"
+  launchctl bootstrap "$launch_domain" "$launch_agent_path" || \
+    fail "launchctl bootstrap failed for $launch_domain"
+  launchctl kickstart -k "$launch_domain/$launch_agent_label" || \
+    fail "launchctl kickstart failed for $launch_domain/$launch_agent_label"
+  uvx --from "$user_runtime_root" python - \
+    "$update_stdout_log" \
+    "$update_stderr_log" \
+    "$scheduled_output_path" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+stdout_log, stderr_log, scheduled_output_path = map(Path, sys.argv[1:])
+
+def decode_objects(text: str) -> list[dict[str, object]]:
+    decoder = json.JSONDecoder()
+    objects = []
+    index = 0
+    while index < len(text):
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text):
+            break
+        payload, index = decoder.raw_decode(text, index)
+        if isinstance(payload, dict):
+            objects.append(payload)
+    return objects
+
+deadline = time.time() + 90
+last_error = ""
+while time.time() < deadline:
+    if stdout_log.exists() and stdout_log.stat().st_size > 0:
+        text = stdout_log.read_text(encoding="utf-8", errors="replace")
+        try:
+            updates = [
+                item
+                for item in decode_objects(text)
+                if item.get("kind") == "omnigent-stock-codex-compat-update"
+            ]
+        except json.JSONDecodeError as exc:
+            last_error = f"scheduled updater log JSON is incomplete: {exc}"
+        else:
+            if updates:
+                scheduled_output_path.write_text(
+                    json.dumps(updates[-1], indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                raise SystemExit(0)
+            last_error = f"scheduled updater log had no update objects: {text!r}"
+    time.sleep(1)
+
+stderr_text = (
+    stderr_log.read_text(encoding="utf-8", errors="replace")
+    if stderr_log.exists()
+    else ""
+)
+raise SystemExit(
+    "timed out waiting for scheduled updater JSON. "
+    f"last_error={last_error!r} stderr={stderr_text!r}"
+)
+PY
+  launchctl bootout "$launch_domain/$launch_agent_label" || \
+    fail "launchctl bootout failed for $launch_domain/$launch_agent_label"
+  uvx --from "$user_runtime_root" python - \
+    "$update_output_path" \
+    "$scheduled_output_path" \
+    "$manifest_path" \
+    "$clean_cache_root" \
+    "$launch_agent_path" \
+    "$launch_agent_label" \
+    "$launch_domain" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+(
+    update_output_path,
+    scheduled_output_path,
+    manifest_path,
+    clean_cache_root,
+    launch_agent_path,
+    launch_agent_label,
+    launch_domain,
+) = sys.argv[1:]
+
+direct = json.loads(Path(update_output_path).read_text(encoding="utf-8"))
+scheduled = json.loads(Path(scheduled_output_path).read_text(encoding="utf-8"))
+manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+selected_codex_path = Path(str(manifest.get("pinnedCodexPath"))).resolve()
+cache_root = Path(clean_cache_root).resolve()
+try:
+    selected_codex_path.relative_to(cache_root)
+except ValueError as exc:
+    raise SystemExit(
+        f"scheduled updater selected Codex outside VM cache: {selected_codex_path}"
+    ) from exc
+if scheduled.get("kind") != "omnigent-stock-codex-compat-update":
+    raise SystemExit(f"scheduled launchd run emitted wrong kind: {scheduled!r}")
+scheduled_action = str(scheduled.get("action") or "")
+if scheduled_action != "up-to-date":
+    raise SystemExit(f"scheduled launchd run was not up-to-date: {scheduled!r}")
+scheduled_plan = scheduled.get("plan")
+if not isinstance(scheduled_plan, dict):
+    raise SystemExit(f"scheduled launchd run omitted plan: {scheduled!r}")
+promotion = scheduled_plan.get("promotion")
+if isinstance(promotion, dict) and promotion.get("required") is True:
+    raise SystemExit(f"scheduled launchd run still required promotion: {scheduled!r}")
+print(json.dumps({
+    "directAction": str(direct.get("action") or ""),
+    "hostCacheReferenced": False,
+    "kind": "omnigent-clean-vm-update-agent-evidence",
+    "launchAgentLabel": launch_agent_label,
+    "launchAgentPath": launch_agent_path,
+    "launchDomain": launch_domain,
+    "launchctlBootout": "unloaded",
+    "launchctlBootstrap": "loaded",
+    "launchctlKickstart": "completed",
+    "scheduledAction": scheduled_action,
+    "selectedCodexPath": str(selected_codex_path),
+}, sort_keys=True))
+PY
+  printf 'stock_codex_compat_pkg_clean_vm_update_agent_status=replacement-ready\n'
+  printf 'stock_codex_compat_pkg_clean_vm_update_agent_launch_agent_path=%s\n' "$launch_agent_path"
+  printf '%s=%s\n' \
+    'stock_codex_compat_pkg_clean_vm_update_agent_launch_agent_label' \
+    "$launch_agent_label"
+  printf 'stock_codex_compat_pkg_clean_vm_update_agent_launch_domain=%s\n' "$launch_domain"
+  printf 'stock_codex_compat_pkg_clean_vm_update_agent_launchctl_bootstrap=loaded\n'
+  printf 'stock_codex_compat_pkg_clean_vm_update_agent_launchctl_kickstart=completed\n'
+  printf 'stock_codex_compat_pkg_clean_vm_update_agent_launchctl_bootout=unloaded\n'
+fi
 
 if [ -n "$live_auth_json" ]; then
   mkdir -p "$live_codex_home"
@@ -12976,6 +13325,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
     remote_channel: _OfficialStockCodexRemoteChannel | None = None,
     live_auth_path: Path | None = None,
     live_auth_source: str | None = None,
+    update_agent: bool = False,
 ) -> StockCodexCompatPkgCleanVmProof:
     """Run signed-pkg lifecycle inside a disposable clean macOS VM over SSH."""
     stock_codex_path = stock_codex_path.expanduser().resolve()
@@ -12998,6 +13348,8 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
             proof_variant=(
                 "official-remote-channel-live-model"
                 if live_auth_path is not None
+                else "official-remote-channel-update-agent"
+                if update_agent
                 else "official-remote-channel-acquisition"
             ),
             cask_token=remote_channel.cask_token,
@@ -13013,6 +13365,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
             live_auth_source=live_auth_source,
             live_auth_uploaded=live_auth_path is not None,
             live_model_turn_requested=live_auth_path is not None,
+            update_agent_requested=update_agent,
         )
 
     missing: list[str] = []
@@ -13266,8 +13619,17 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                 ]
                 if live_auth_path is not None:
                     remote_command_parts.append(remote_auth_destination)
+                if update_agent:
+                    if live_auth_path is None:
+                        remote_command_parts.append("")
+                    remote_command_parts.append("update-agent")
                 remote_command_args = tuple(remote_command_parts)
-                if live_auth_path is None:
+                if update_agent:
+                    success_sentinel = (
+                        "stock_codex_compat_pkg_clean_vm_update_agent_status="
+                        "replacement-ready"
+                    )
+                elif live_auth_path is None:
                     success_sentinel = (
                         "stock_codex_compat_pkg_clean_vm_remote_acquisition_status="
                         "replacement-ready"
@@ -13390,6 +13752,69 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                         tart_started=tart_started,
                     )
                 )
+            update_agent_output_evidence = None
+            host_cache_referenced = False
+            host_cache_root = Path.home() / ".local" / "omnigent" / "codex-stock"
+            if update_agent:
+                host_cache_referenced = str(host_cache_root) in remote_output
+                if host_cache_referenced:
+                    return finalize_clean_vm_proof(
+                        _blocked_stock_codex_compat_pkg_clean_vm_proof(
+                            tool_paths=tool_paths,
+                            missing_prerequisites=(
+                                "clean VM update agent referenced host stock Codex cache",
+                            ),
+                            stock_codex_path=stock_codex_path,
+                            stock_codex_version=stock_codex_version,
+                            stock_codex_sha256=stock_codex_sha256,
+                            package_path=package_path,
+                            package_sha256=package_sha256,
+                            tart_name=clean_vm_tart_name,
+                            ssh_target=resolved_target,
+                            ssh_identity=clean_vm_ssh_identity,
+                            ssh_user=clean_vm_ssh_user,
+                            ssh_port=clean_vm_ssh_port,
+                            tart_ip=tart_ip,
+                            remote_work_dir=remote_work_dir,
+                            remote_status="update-agent-host-cache-leak",
+                            remote_output_preview=_preview_text(
+                                remote_output,
+                                limit=12000,
+                            ),
+                            tart_started=tart_started,
+                        )
+                    )
+                update_agent_output_evidence = (
+                    _parse_clean_vm_update_agent_output_evidence(remote_output)
+                )
+                if update_agent_output_evidence is None:
+                    return finalize_clean_vm_proof(
+                        _blocked_stock_codex_compat_pkg_clean_vm_proof(
+                            tool_paths=tool_paths,
+                            missing_prerequisites=(
+                                "clean VM update-agent proof omitted parseable "
+                                "launchd evidence",
+                            ),
+                            stock_codex_path=stock_codex_path,
+                            stock_codex_version=stock_codex_version,
+                            stock_codex_sha256=stock_codex_sha256,
+                            package_path=package_path,
+                            package_sha256=package_sha256,
+                            tart_name=clean_vm_tart_name,
+                            ssh_target=resolved_target,
+                            ssh_identity=clean_vm_ssh_identity,
+                            ssh_user=clean_vm_ssh_user,
+                            ssh_port=clean_vm_ssh_port,
+                            tart_ip=tart_ip,
+                            remote_work_dir=remote_work_dir,
+                            remote_status="update-agent-evidence-missing",
+                            remote_output_preview=_preview_text(
+                                remote_output,
+                                limit=12000,
+                            ),
+                            tart_started=tart_started,
+                        )
+                    )
             live_output_evidence = None
             if live_auth_path is not None:
                 live_output_evidence = _parse_clean_vm_live_output_evidence(
@@ -13429,6 +13854,16 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
             live_selected_command_path = None
             live_codex_home = None
             live_working_directory = None
+            update_agent_launch_agent_path = None
+            update_agent_launch_agent_label = None
+            update_agent_launch_domain = None
+            update_agent_launchctl_bootstrap = None
+            update_agent_launchctl_kickstart = None
+            update_agent_launchctl_bootout = None
+            update_agent_direct_action = None
+            update_agent_scheduled_action = None
+            update_agent_selected_codex_path = None
+            update_agent_host_cache_referenced = None
             if live_output_evidence is not None:
                 (
                     live_thread_id,
@@ -13439,6 +13874,22 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     live_codex_home,
                     live_working_directory,
                 ) = live_output_evidence
+            if update_agent_output_evidence is not None:
+                (
+                    update_agent_launch_agent_path,
+                    update_agent_launch_agent_label,
+                    update_agent_launch_domain,
+                    update_agent_launchctl_bootstrap,
+                    update_agent_launchctl_kickstart,
+                    update_agent_launchctl_bootout,
+                    update_agent_direct_action,
+                    update_agent_scheduled_action,
+                    update_agent_selected_codex_path,
+                    update_agent_host_cache_referenced,
+                ) = update_agent_output_evidence
+                update_agent_host_cache_referenced = (
+                    update_agent_host_cache_referenced or host_cache_referenced
+                )
             return finalize_clean_vm_proof(
                 StockCodexCompatPkgCleanVmProof(
                     status="replacement-ready",
@@ -13467,6 +13918,19 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     live_selected_command_path=live_selected_command_path,
                     live_codex_home=live_codex_home,
                     live_working_directory=live_working_directory,
+                    update_agent_requested=update_agent,
+                    update_agent_launch_agent_path=update_agent_launch_agent_path,
+                    update_agent_launch_agent_label=update_agent_launch_agent_label,
+                    update_agent_launch_domain=update_agent_launch_domain,
+                    update_agent_launchctl_bootstrap=update_agent_launchctl_bootstrap,
+                    update_agent_launchctl_kickstart=update_agent_launchctl_kickstart,
+                    update_agent_launchctl_bootout=update_agent_launchctl_bootout,
+                    update_agent_direct_action=update_agent_direct_action,
+                    update_agent_scheduled_action=update_agent_scheduled_action,
+                    update_agent_selected_codex_path=update_agent_selected_codex_path,
+                    update_agent_host_cache_referenced=(
+                        update_agent_host_cache_referenced
+                    ),
                 )
             )
     finally:
@@ -13548,6 +14012,32 @@ def run_stock_codex_compat_pkg_clean_vm_live_proof(
         remote_channel=_official_stock_codex_remote_channel(),
         live_auth_path=auth_path,
         live_auth_source=auth_source,
+    )
+
+
+def run_stock_codex_compat_pkg_clean_vm_update_agent_proof(
+    stock_codex_path: Path,
+    *,
+    package_path: Path | None,
+    clean_vm_ssh_target: str | None,
+    clean_vm_tart_name: str | None,
+    clean_vm_ssh_identity: Path | None,
+    clean_vm_ssh_user: str | None,
+    clean_vm_ssh_port: int,
+    clean_vm_start_tart: bool,
+) -> StockCodexCompatPkgCleanVmProof:
+    """Load and kickstart the installed-runtime LaunchAgent inside a clean VM."""
+    return run_stock_codex_compat_pkg_clean_vm_proof(
+        stock_codex_path,
+        package_path=package_path,
+        clean_vm_ssh_target=clean_vm_ssh_target,
+        clean_vm_tart_name=clean_vm_tart_name,
+        clean_vm_ssh_identity=clean_vm_ssh_identity,
+        clean_vm_ssh_user=clean_vm_ssh_user,
+        clean_vm_ssh_port=clean_vm_ssh_port,
+        clean_vm_start_tart=clean_vm_start_tart,
+        remote_channel=_official_stock_codex_remote_channel(),
+        update_agent=True,
     )
 
 
@@ -16051,6 +16541,7 @@ def run_stock_codex_compat_pkg_update_agent_proof(
         required_scheduled_flags = {
             "--allow-remote-channel-download",
             "--runtime-root",
+            "--uvx-path",
             "--cache-root",
             "--channel-manifest",
             "--launcher-manifest",
@@ -17921,6 +18412,131 @@ def print_stock_codex_compat_pkg_clean_vm_remote_acquisition_proof(
         "host stock Codex binary, enforces the official channel policy, "
         "classifies clean auth, rolls back user state, and removes package "
         "payload plus receipt"
+    )
+
+
+def print_stock_codex_compat_pkg_clean_vm_update_agent_proof(
+    proof: StockCodexCompatPkgCleanVmProof,
+) -> None:
+    """Emit operator evidence for clean-VM launchd scheduled updates."""
+    print("stock_codex_compat_pkg_clean_vm_update_agent_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_surface="
+        "signed-pkg-clean-vm-launchd-scheduled-stock-codex-update"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_update_agent_status={proof.status}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_missing_prerequisites="
+        f"{json.dumps(list(proof.missing_prerequisites), sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_tool_paths="
+        f"{json.dumps(proof.tool_paths, sort_keys=True)}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_update_agent_package_path={proof.package_path}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_package_sha256="
+        f"{proof.package_sha256}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_update_agent_cask_version={proof.cask_version}")
+    print(f"stock_codex_compat_pkg_clean_vm_update_agent_cask_url={proof.cask_url}")
+    print(f"stock_codex_compat_pkg_clean_vm_update_agent_cask_sha256={proof.cask_sha256}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_channel_policy="
+        f"{proof.channel_policy}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_host_stock_codex_uploaded="
+        f"{proof.host_stock_codex_uploaded}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_requested="
+        f"{proof.update_agent_requested}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_launch_agent_path="
+        f"{proof.update_agent_launch_agent_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_launch_agent_label="
+        f"{proof.update_agent_launch_agent_label}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_launch_domain="
+        f"{proof.update_agent_launch_domain}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_launchctl_bootstrap="
+        f"{proof.update_agent_launchctl_bootstrap}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_launchctl_kickstart="
+        f"{proof.update_agent_launchctl_kickstart}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_launchctl_bootout="
+        f"{proof.update_agent_launchctl_bootout}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_direct_action="
+        f"{proof.update_agent_direct_action}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_scheduled_action="
+        f"{proof.update_agent_scheduled_action}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_selected_codex_path="
+        f"{proof.update_agent_selected_codex_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_host_cache_referenced="
+        f"{proof.update_agent_host_cache_referenced}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_update_agent_tart_name={proof.tart_name}")
+    print(f"stock_codex_compat_pkg_clean_vm_update_agent_ssh_target={proof.ssh_target}")
+    print(f"stock_codex_compat_pkg_clean_vm_update_agent_ssh_identity={proof.ssh_identity}")
+    print(f"stock_codex_compat_pkg_clean_vm_update_agent_ssh_user={proof.ssh_user}")
+    print(f"stock_codex_compat_pkg_clean_vm_update_agent_ssh_port={proof.ssh_port}")
+    print(f"stock_codex_compat_pkg_clean_vm_update_agent_tart_ip={proof.tart_ip}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_remote_work_dir="
+        f"{proof.remote_work_dir}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_remote_status="
+        f"{proof.remote_status}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_tart_started="
+        f"{proof.tart_started}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_tart_stopped="
+        f"{proof.tart_stopped}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_remote_output="
+        f"{proof.remote_output_preview!r}"
+    )
+    if proof.status == "blocked":
+        print(
+            "ASSERTION: clean VM update-agent validation is blocked by missing "
+            "official-channel metadata, disposable VM SSH/Tart prerequisites, "
+            "package artifact, launchd user/gui domain, noninteractive sudo, "
+            "VM uvx, operator marker, or clean VM state"
+        )
+        return
+    print(
+        "ASSERTION: the signed/notarized package can install into a disposable "
+        "VM, acquire stock Codex from the official channel inside that VM, "
+        "write the user LaunchAgent from the installed runtime, and load it "
+        "through launchd"
+    )
+    print(
+        "ASSERTION: launchctl bootstrap, kickstart, and bootout complete, the "
+        "scheduled updater run reports up-to-date, and the VM proof does not "
+        "upload or reference the host stock Codex cache"
     )
 
 
@@ -22765,6 +23381,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-pkg-external-clean-user",
             "stock-codex-compat-pkg-clean-vm",
             "stock-codex-compat-pkg-clean-vm-remote-acquisition",
+            "stock-codex-compat-pkg-clean-vm-update-agent",
             "stock-codex-compat-pkg-clean-vm-live",
             "stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
             "stock-codex-compat-wrapper-xcodebuild-bridge-test-adapter",
@@ -22942,6 +23559,11 @@ def parse_args() -> argparse.Namespace:
             "disposable VM, then proves the packaged runtime downloads, "
             "verifies, extracts, bootstraps, rolls back, and cleans up stock "
             "Codex inside the VM without a host-copied Codex binary. "
+            "'stock-codex-compat-pkg-clean-vm-update-agent' extends that "
+            "clean-VM remote acquisition path by writing the installed "
+            "runtime's user LaunchAgent, loading it with launchctl bootstrap, "
+            "forcing one scheduled run with launchctl kickstart, parsing the "
+            "scheduled updater JSON, and unloading it with launchctl bootout. "
             "'stock-codex-compat-pkg-clean-vm-live' extends that clean-VM "
             "remote acquisition path by uploading proof-scoped stock auth, "
             "running a real model turn through the VM-installed compatibility "
@@ -23827,6 +24449,44 @@ def main() -> int:
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_stock_codex_compat_pkg_clean_vm_remote_acquisition_proof(
             run_stock_codex_compat_pkg_clean_vm_remote_acquisition_proof(
+                codex_path,
+                package_path=args.pkg_path,
+                clean_vm_ssh_target=args.clean_vm_ssh_target,
+                clean_vm_tart_name=args.clean_vm_tart_name,
+                clean_vm_ssh_identity=args.clean_vm_ssh_identity,
+                clean_vm_ssh_user=args.clean_vm_ssh_user,
+                clean_vm_ssh_port=args.clean_vm_ssh_port,
+                clean_vm_start_tart=args.clean_vm_start_tart,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-clean-vm-update-agent":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-update-agent does not use "
+                "--apple-bundle; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-update-agent cannot allow a "
+                "Codex-fork binary."
+            )
+        if args.pkg_output_path is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-update-agent consumes "
+                "--pkg-path; produce persistent packages with "
+                "stock-codex-compat-pkg-signed-notarized."
+            )
+        if args.pkg_path is None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-update-agent requires "
+                "--pkg-path from stock-codex-compat-pkg-signed-notarized."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_pkg_clean_vm_update_agent_proof(
+            run_stock_codex_compat_pkg_clean_vm_update_agent_proof(
                 codex_path,
                 package_path=args.pkg_path,
                 clean_vm_ssh_target=args.clean_vm_ssh_target,

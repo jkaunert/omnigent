@@ -309,9 +309,14 @@ The next gates should split by product mode:
   `stock-codex-compat-pkg-update-agent` gate packages
   `runtime/scripts/update_stock_codex_compat.py`, writes a user LaunchAgent plist
   whose `ProgramArguments` delegate to `uvx --from <installed-runtime> python
-  <installed-runtime>/scripts/update_stock_codex_compat.py`, omits proof-only
-  stale-current flags, runs the updater once directly, and proves the next run is
-  a no-op without another remote-download flag;
+  <installed-runtime>/scripts/update_stock_codex_compat.py`, preserve
+  `--uvx-path <absolute-uvx>` for launchd's sparse environment, omit proof-only
+  stale-current flags, run the updater once directly, and prove the next run is a
+  no-op without another remote-download flag. The clean-VM
+  `stock-codex-compat-pkg-clean-vm-update-agent` gate now loads that generated
+  LaunchAgent in `gui/501`, forces a scheduled updater run with
+  `launchctl kickstart -k`, parses `scheduled_action=up-to-date`, unloads with
+  `launchctl bootout`, and proves no host stock Codex cache reference;
 - for `stock-codex-compat`, treat the wrapped MCP relay-tool gate as blocked:
   `stock-codex-compat-wrapper-relay-tool` starts the real Omnigent
   `tool_relay.json` sidecar and advertises `omnigent_wrapper_relay_probe`, but
@@ -333,7 +338,12 @@ The next gates should split by product mode:
   `CODEX_HOME`, working-directory, and thread
   `019f3fd9-093f-7550-8474-3c67eb5fe6c9` evidence, and preserves the deterministic
   `Routing: orchestrator-led` route evidence before
-  `STOCK_CODEX_COMPAT_LIVE_OK`. The production stock-Codex channel policy gate
+  `STOCK_CODEX_COMPAT_LIVE_OK`. The clean-VM update-agent gate is green on the
+  fixed signed/notarized package SHA-256
+  `d0185a22380036b97703144f91bbcb701806c3638ebcbe98b2aa38df43baf581`: it
+  writes the user LaunchAgent, loads/kickstarts/unloads it through launchd,
+  parses the scheduled updater JSON, and verifies `host_cache_referenced=False`.
+  The production stock-Codex channel policy gate
   is green for official-source validation, clean-cache reuse before network
   access, fail-closed non-official URL rejection, resolver selection,
   explicit-download remote acquisition, SHA verification, safe archive
