@@ -314,17 +314,19 @@ def test_stock_codex_update_acquisition_proof_stages_and_reuses_remote(
         "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
     )
     cask_sha = "a" * 64
-    cask = {
-        "token": "codex",
-        "tap": "homebrew/cask",
-        "homepage": "https://github.com/openai/codex",
-        "url": cask_url,
-        "sha256": cask_sha,
-        "version": "0.143.0",
-        "artifacts": [
-            {"binary": ["codex-aarch64-apple-darwin", {"target": "codex"}]},
-        ],
-    }
+    channel = _MOD._GitHubLatestStableCodexChannel(
+        tag_name="rust-v0.143.0",
+        version_slug="0.143.0",
+        selected_version="codex-cli 0.143.0",
+        release_name="0.143.0",
+        release_html_url="https://github.com/openai/codex/releases/tag/rust-v0.143.0",
+        published_at="2026-07-08T01:31:10Z",
+        asset_name="codex-aarch64-apple-darwin.tar.gz",
+        asset_url=cask_url,
+        asset_digest=f"sha256:{cask_sha}",
+        asset_sha256=cask_sha,
+        archive_executable="codex-aarch64-apple-darwin",
+    )
     expected_artifact = {
         "archiveExecutable": "codex-aarch64-apple-darwin",
         "archiveFormat": "tar.gz",
@@ -334,7 +336,12 @@ def test_stock_codex_update_acquisition_proof_stages_and_reuses_remote(
         "versionSlug": "0.143.0",
     }
     monkeypatch.setenv("HOME", str(host_home))
-    monkeypatch.setattr(_MOD, "_read_homebrew_codex_cask", lambda: cask)
+    monkeypatch.setattr(_MOD, "_github_latest_stable_codex_channel", lambda: channel)
+    monkeypatch.setattr(
+        _MOD,
+        "_read_homebrew_codex_cask",
+        lambda: (_ for _ in ()).throw(AssertionError("Homebrew should not be read")),
+    )
 
     def fake_run(
         cmd: list[str],
@@ -435,6 +442,9 @@ def test_stock_codex_update_acquisition_proof_stages_and_reuses_remote(
     assert proof.source_codex_path == stock_codex.resolve()
     assert proof.source_codex_version == "codex-cli 0.142.5"
     assert proof.policy_name == "official-openai-github-release"
+    assert proof.github_release_tag == "rust-v0.143.0"
+    assert proof.github_asset_digest == f"sha256:{cask_sha}"
+    assert proof.github_asset_sha256 == cask_sha
     assert proof.cask_version == "0.143.0"
     assert proof.cask_url == cask_url
     assert proof.acquisition_action == "staged"
@@ -512,6 +522,51 @@ def test_github_latest_stable_channel_rejects_prerelease(
 
     with pytest.raises(SystemExit, match="stable numeric tag"):
         _MOD._github_latest_stable_codex_channel_from_release(release)
+
+
+def test_official_stock_codex_remote_channel_uses_github_latest_stable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asset_sha = "d" * 64
+    asset_url = (
+        "https://github.com/openai/codex/releases/download/"
+        "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+    )
+    channel = _MOD._GitHubLatestStableCodexChannel(
+        tag_name="rust-v0.143.0",
+        version_slug="0.143.0",
+        selected_version="codex-cli 0.143.0",
+        release_name="0.143.0",
+        release_html_url="https://github.com/openai/codex/releases/tag/rust-v0.143.0",
+        published_at="2026-07-08T01:31:10Z",
+        asset_name="codex-aarch64-apple-darwin.tar.gz",
+        asset_url=asset_url,
+        asset_digest=f"sha256:{asset_sha}",
+        asset_sha256=asset_sha,
+        archive_executable="codex-aarch64-apple-darwin",
+    )
+    monkeypatch.setattr(_MOD, "_github_latest_stable_codex_channel", lambda: channel)
+    monkeypatch.setattr(
+        _MOD,
+        "_read_homebrew_codex_cask",
+        lambda: (_ for _ in ()).throw(AssertionError("Homebrew should not be read")),
+    )
+
+    remote = _MOD._official_stock_codex_remote_channel()
+
+    assert remote.policy_name == "official-openai-github-release"
+    assert remote.source_name == "github-latest-stable-release"
+    assert remote.cask_tap == "github-releases/latest"
+    assert remote.cask_version == "0.143.0"
+    assert remote.cask_url == asset_url
+    assert remote.cask_sha256 == asset_sha
+    assert remote.selected_version == "codex-cli 0.143.0"
+    assert remote.archive_executable == "codex-aarch64-apple-darwin"
+    assert remote.github_release_tag == "rust-v0.143.0"
+    assert remote.github_release_url == (
+        "https://github.com/openai/codex/releases/tag/rust-v0.143.0"
+    )
+    assert remote.github_asset_digest == f"sha256:{asset_sha}"
 
 
 def test_stock_codex_github_latest_stable_acquisition_proof_uses_asset_digest_and_live_route(
@@ -2032,17 +2087,19 @@ def test_stock_codex_compat_pkg_update_acquisition_proof_uses_installed_runtime(
         "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
     )
     cask_sha = "a" * 64
-    cask = {
-        "token": "codex",
-        "tap": "homebrew/cask",
-        "homepage": "https://github.com/openai/codex",
-        "url": cask_url,
-        "sha256": cask_sha,
-        "version": "0.143.0",
-        "artifacts": [
-            {"binary": ["codex-aarch64-apple-darwin", {"target": "codex"}]},
-        ],
-    }
+    channel = _MOD._GitHubLatestStableCodexChannel(
+        tag_name="rust-v0.143.0",
+        version_slug="0.143.0",
+        selected_version="codex-cli 0.143.0",
+        release_name="0.143.0",
+        release_html_url="https://github.com/openai/codex/releases/tag/rust-v0.143.0",
+        published_at="2026-07-08T01:31:10Z",
+        asset_name="codex-aarch64-apple-darwin.tar.gz",
+        asset_url=cask_url,
+        asset_digest=f"sha256:{cask_sha}",
+        asset_sha256=cask_sha,
+        archive_executable="codex-aarch64-apple-darwin",
+    )
     expected_artifact = {
         "archiveExecutable": "codex-aarch64-apple-darwin",
         "archiveFormat": "tar.gz",
@@ -2052,7 +2109,12 @@ def test_stock_codex_compat_pkg_update_acquisition_proof_uses_installed_runtime(
         "versionSlug": "0.143.0",
     }
     monkeypatch.setenv("HOME", str(host_home))
-    monkeypatch.setattr(_MOD, "_read_homebrew_codex_cask", lambda: cask)
+    monkeypatch.setattr(_MOD, "_github_latest_stable_codex_channel", lambda: channel)
+    monkeypatch.setattr(
+        _MOD,
+        "_read_homebrew_codex_cask",
+        lambda: (_ for _ in ()).throw(AssertionError("Homebrew should not be read")),
+    )
 
     package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
     package_path.parent.mkdir(parents=True)
@@ -2242,6 +2304,9 @@ def test_stock_codex_compat_pkg_update_acquisition_proof_uses_installed_runtime(
         proof.installed_runtime_root / "scripts" / "provision_stock_codex.py"
     )
     assert proof.policy_name == "official-openai-github-release"
+    assert proof.github_release_tag == "rust-v0.143.0"
+    assert proof.github_asset_digest == f"sha256:{cask_sha}"
+    assert proof.github_asset_sha256 == cask_sha
     assert proof.cask_version == "0.143.0"
     assert proof.cask_url == cask_url
     assert proof.acquisition_action == "staged"

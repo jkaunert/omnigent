@@ -666,6 +666,14 @@ class StockCodexUpdateAcquisitionProof:
     current_codex_version: str
     current_codex_sha256: str
     policy_name: str
+    github_release_tag: str
+    github_release_name: str
+    github_release_url: str
+    github_published_at: str
+    github_asset_name: str
+    github_asset_url: str
+    github_asset_digest: str
+    github_asset_sha256: str
     cask_token: str
     cask_tap: str
     cask_homepage: str
@@ -1313,6 +1321,14 @@ class StockCodexCompatPkgUpdateAcquisitionProof:
     current_codex_version: str
     current_codex_sha256: str
     policy_name: str
+    github_release_tag: str
+    github_release_name: str
+    github_release_url: str
+    github_published_at: str
+    github_asset_name: str
+    github_asset_url: str
+    github_asset_digest: str
+    github_asset_sha256: str
     cask_token: str
     cask_tap: str
     cask_homepage: str
@@ -1852,7 +1868,7 @@ class StockCodexCompatPkgCleanVmBootstrapProof:
 
 @dataclass(frozen=True)
 class _OfficialStockCodexRemoteChannel:
-    """Official Homebrew/OpenAI GitHub channel metadata for VM acquisition."""
+    """Official OpenAI GitHub channel metadata for VM acquisition."""
 
     policy_name: str
     cask_token: str
@@ -1863,6 +1879,10 @@ class _OfficialStockCodexRemoteChannel:
     cask_sha256: str
     selected_version: str
     archive_executable: str
+    source_name: str = "homebrew-cask"
+    github_release_tag: str | None = None
+    github_release_url: str | None = None
+    github_asset_digest: str | None = None
 
 
 class LiveProofTimeoutError(Exception):
@@ -3641,21 +3661,15 @@ def run_stock_codex_update_acquisition_proof(
     source_codex_realpath = source_codex_path.expanduser().resolve()
     source_digest = sha256_file(source_codex_realpath)
     source_version = codex_version(source_codex_realpath)
-    cask = _read_homebrew_codex_cask()
-    cask_url = _json_string(cask, "url")
-    cask_sha256 = _json_string(cask, "sha256").lower()
-    cask_version = _json_string(cask, "version")
-    cask_token = _json_string(cask, "token")
-    cask_tap = _json_string(cask, "tap")
-    cask_homepage = _json_string(cask, "homepage")
-    archive_executable = _homebrew_codex_binary_name(cask)
-    _validate_homebrew_codex_cask_metadata(
-        token=cask_token,
-        homepage=cask_homepage,
-        url=cask_url,
-        sha256=cask_sha256,
-    )
-    selected_version = f"codex-cli {cask_version}"
+    latest = _github_latest_stable_codex_channel()
+    cask_url = latest.asset_url
+    cask_sha256 = latest.asset_sha256
+    cask_version = latest.version_slug
+    cask_token = "codex"
+    cask_tap = "github-releases/latest"
+    cask_homepage = "https://github.com/openai/codex"
+    archive_executable = latest.archive_executable
+    selected_version = latest.selected_version
     repo_root = Path(__file__).resolve().parents[1]
     provisioner_script = repo_root / "scripts" / "provision_stock_codex.py"
     provisioner = _load_stock_codex_provisioner()
@@ -3992,6 +4006,14 @@ def run_stock_codex_update_acquisition_proof(
             current_codex_version=current_codex_version,
             current_codex_sha256=current_codex_sha,
             policy_name=policy_name,
+            github_release_tag=latest.tag_name,
+            github_release_name=latest.release_name,
+            github_release_url=latest.release_html_url,
+            github_published_at=latest.published_at,
+            github_asset_name=latest.asset_name,
+            github_asset_url=latest.asset_url,
+            github_asset_digest=latest.asset_digest,
+            github_asset_sha256=latest.asset_sha256,
             cask_token=cask_token,
             cask_tap=cask_tap,
             cask_homepage=cask_homepage,
@@ -4039,6 +4061,14 @@ def print_stock_codex_update_acquisition_proof(
     print(f"stock_codex_update_acquisition_current_path={proof.current_codex_path}")
     print(f"stock_codex_update_acquisition_current_version={proof.current_codex_version}")
     print(f"stock_codex_update_acquisition_current_sha256={proof.current_codex_sha256}")
+    print(f"stock_codex_update_acquisition_github_release_tag={proof.github_release_tag}")
+    print(f"stock_codex_update_acquisition_github_release_name={proof.github_release_name}")
+    print(f"stock_codex_update_acquisition_github_release_url={proof.github_release_url}")
+    print(f"stock_codex_update_acquisition_github_published_at={proof.github_published_at}")
+    print(f"stock_codex_update_acquisition_github_asset_name={proof.github_asset_name}")
+    print(f"stock_codex_update_acquisition_github_asset_url={proof.github_asset_url}")
+    print(f"stock_codex_update_acquisition_github_asset_digest={proof.github_asset_digest}")
+    print(f"stock_codex_update_acquisition_github_asset_sha256={proof.github_asset_sha256}")
     print(f"stock_codex_update_acquisition_cask_token={proof.cask_token}")
     print(f"stock_codex_update_acquisition_cask_tap={proof.cask_tap}")
     print(f"stock_codex_update_acquisition_cask_homepage={proof.cask_homepage}")
@@ -4109,8 +4139,9 @@ def print_stock_codex_update_acquisition_proof(
     )
     print(
         "ASSERTION: --plan-update --stage-update downloads the OpenAI GitHub "
-        "release archive selected from Homebrew metadata, verifies SHA-256, "
-        "extracts the declared executable, and stages a channel payload"
+        "latest stable release archive selected from GitHub release metadata, "
+        "verifies the release asset SHA-256, extracts the declared executable, "
+        "and stages a channel payload"
     )
     print(
         "ASSERTION: after acquisition, the same target is reusable without "
@@ -13484,31 +13515,22 @@ def _ssh_public_key_for_identity(*, ssh_keygen_path: str, identity: Path) -> str
 
 def _official_stock_codex_remote_channel() -> _OfficialStockCodexRemoteChannel:
     """Return validated official stock-Codex release metadata for remote acquisition."""
-    cask = _read_homebrew_codex_cask()
-    cask_url = _json_string(cask, "url")
-    cask_sha256 = _json_string(cask, "sha256").lower()
-    cask_version = _json_string(cask, "version")
-    cask_token = _json_string(cask, "token")
-    cask_tap = _json_string(cask, "tap")
-    cask_homepage = _json_string(cask, "homepage")
-    archive_executable = _homebrew_codex_binary_name(cask)
-    _validate_homebrew_codex_cask_metadata(
-        token=cask_token,
-        homepage=cask_homepage,
-        url=cask_url,
-        sha256=cask_sha256,
-    )
+    latest = _github_latest_stable_codex_channel()
     provisioner = _load_stock_codex_provisioner()
     return _OfficialStockCodexRemoteChannel(
         policy_name=provisioner.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY,
-        cask_token=cask_token,
-        cask_tap=cask_tap,
-        cask_homepage=cask_homepage,
-        cask_version=cask_version,
-        cask_url=cask_url,
-        cask_sha256=cask_sha256,
-        selected_version=f"codex-cli {cask_version}",
-        archive_executable=archive_executable,
+        cask_token="codex",
+        cask_tap="github-releases/latest",
+        cask_homepage="https://github.com/openai/codex",
+        cask_version=latest.version_slug,
+        cask_url=latest.asset_url,
+        cask_sha256=latest.asset_sha256,
+        selected_version=latest.selected_version,
+        archive_executable=latest.archive_executable,
+        source_name="github-latest-stable-release",
+        github_release_tag=latest.tag_name,
+        github_release_url=latest.release_html_url,
+        github_asset_digest=latest.asset_digest,
     )
 
 
@@ -16995,27 +17017,21 @@ def run_stock_codex_compat_pkg_clean_provision_proof(
 def run_stock_codex_compat_pkg_update_acquisition_proof(
     stock_codex_path: Path,
 ) -> StockCodexCompatPkgUpdateAcquisitionProof:
-    """Prove a pkg-installed runtime can acquire stock Codex from the stable channel."""
+    """Prove a pkg-installed runtime can acquire stock Codex from latest stable."""
     stock_codex_path = stock_codex_path.expanduser().resolve()
     assert_stock_codex_path(stock_codex_path, allow_fork_codex=False)
     stock_codex_realpath = stock_codex_path.resolve()
     stock_codex_version = codex_version(stock_codex_realpath)
     stock_codex_sha256 = sha256_file(stock_codex_realpath)
-    cask = _read_homebrew_codex_cask()
-    cask_url = _json_string(cask, "url")
-    cask_sha256 = _json_string(cask, "sha256").lower()
-    cask_version = _json_string(cask, "version")
-    cask_token = _json_string(cask, "token")
-    cask_tap = _json_string(cask, "tap")
-    cask_homepage = _json_string(cask, "homepage")
-    archive_executable = _homebrew_codex_binary_name(cask)
-    _validate_homebrew_codex_cask_metadata(
-        token=cask_token,
-        homepage=cask_homepage,
-        url=cask_url,
-        sha256=cask_sha256,
-    )
-    selected_version = f"codex-cli {cask_version}"
+    latest = _github_latest_stable_codex_channel()
+    cask_url = latest.asset_url
+    cask_sha256 = latest.asset_sha256
+    cask_version = latest.version_slug
+    cask_token = "codex"
+    cask_tap = "github-releases/latest"
+    cask_homepage = "https://github.com/openai/codex"
+    archive_executable = latest.archive_executable
+    selected_version = latest.selected_version
     provisioner = _load_stock_codex_provisioner()
     policy_name = provisioner.OFFICIAL_OPENAI_GITHUB_CHANNEL_POLICY
 
@@ -17471,6 +17487,14 @@ def run_stock_codex_compat_pkg_update_acquisition_proof(
             current_codex_version=current_codex_version,
             current_codex_sha256=current_codex_sha,
             policy_name=policy_name,
+            github_release_tag=latest.tag_name,
+            github_release_name=latest.release_name,
+            github_release_url=latest.release_html_url,
+            github_published_at=latest.published_at,
+            github_asset_name=latest.asset_name,
+            github_asset_url=latest.asset_url,
+            github_asset_digest=latest.asset_digest,
+            github_asset_sha256=latest.asset_sha256,
             cask_token=cask_token,
             cask_tap=cask_tap,
             cask_homepage=cask_homepage,
@@ -21119,6 +21143,38 @@ def print_stock_codex_compat_pkg_update_acquisition_proof(
         f"{proof.current_codex_sha256}"
     )
     print(f"stock_codex_compat_pkg_update_acquisition_policy_name={proof.policy_name}")
+    print(
+        "stock_codex_compat_pkg_update_acquisition_github_release_tag="
+        f"{proof.github_release_tag}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_github_release_name="
+        f"{proof.github_release_name}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_github_release_url="
+        f"{proof.github_release_url}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_github_published_at="
+        f"{proof.github_published_at}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_github_asset_name="
+        f"{proof.github_asset_name}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_github_asset_url="
+        f"{proof.github_asset_url}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_github_asset_digest="
+        f"{proof.github_asset_digest}"
+    )
+    print(
+        "stock_codex_compat_pkg_update_acquisition_github_asset_sha256="
+        f"{proof.github_asset_sha256}"
+    )
     print(f"stock_codex_compat_pkg_update_acquisition_cask_token={proof.cask_token}")
     print(f"stock_codex_compat_pkg_update_acquisition_cask_tap={proof.cask_tap}")
     print(f"stock_codex_compat_pkg_update_acquisition_cask_homepage={proof.cask_homepage}")
@@ -21206,9 +21262,9 @@ def print_stock_codex_compat_pkg_update_acquisition_proof(
     )
     print(
         "ASSERTION: remote acquisition requires explicit download opt-in, "
-        "verifies the Homebrew/OpenAI GitHub release archive SHA-256, stages "
-        "a channel payload, and records promotion plus rollback intent without "
-        "promoting persistent pointers"
+        "verifies the OpenAI GitHub latest stable release asset SHA-256, "
+        "stages a channel payload, and records promotion plus rollback intent "
+        "without promoting persistent pointers"
     )
     print(
         "ASSERTION: after acquisition, the same pkg-installed runtime reuses "
@@ -25753,9 +25809,9 @@ def parse_args() -> argparse.Namespace:
             "'stock-codex-update-doctor' proves official-policy update "
             "planning, dry-run no-mutation behavior, launcher promotion "
             "intent, rollback intent, and up-to-date promotion suppression. "
-            "'stock-codex-update-acquisition' proves official remote "
-            "archive acquisition through --plan-update --stage-update without "
-            "persistent pointer promotion. "
+            "'stock-codex-update-acquisition' proves latest non-prerelease "
+            "OpenAI GitHub release archive acquisition through --plan-update "
+            "--stage-update without persistent pointer promotion. "
             "'stock-codex-github-latest-stable-acquisition' proves latest "
             "non-prerelease GitHub release asset-digest acquisition plus a "
             "live graph route proof without waiting for Homebrew cask metadata. "
@@ -25827,8 +25883,9 @@ def parse_args() -> argparse.Namespace:
             "runtime can provision stock Codex into a clean user cache from "
             "a file-backed channel artifact. "
             "'stock-codex-compat-pkg-update-acquisition' proves the installed "
-            "runtime can acquire the stable official stock Codex release "
-            "through --plan-update --stage-update. "
+            "runtime can acquire the latest non-prerelease OpenAI GitHub "
+            "stock Codex release through --plan-update --stage-update, "
+            "without waiting for Homebrew cask metadata. "
             "'stock-codex-compat-pkg-update-promotion' proves the installed "
             "runtime can stage the stable official stock Codex release, "
             "promote a clean user launcher manifest, suppress promotion as "
