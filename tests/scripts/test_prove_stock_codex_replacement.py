@@ -4429,6 +4429,29 @@ def test_clean_vm_remote_acquisition_script_uses_url_backed_channel() -> None:
     assert "stock_codex_compat_pkg_clean_vm_update_agent_status=replacement-ready" in script
 
 
+def test_clean_vm_preflight_cleanup_requires_marker_and_proof_owned_paths() -> None:
+    command = _MOD._clean_vm_preflight_cleanup_command()
+
+    assert command.startswith("/bin/bash -lc ")
+    assert ".omnigent-stock-codex-compat-clean-user-ok" in command
+    assert "sudo -n true" in command
+    assert 'pkg_id="ai.omnigent.stock-codex-compat"' in command
+    assert "/Library/Application Support/Omnigent/stock-codex-compat" in command
+    assert "$HOME/.local/bin/omnigent-stock-codex-compat" in command
+    assert "$HOME/.local/omnigent/stock-codex-compat" in command
+    assert "$HOME/.local/omnigent/codex-stock" in command
+    assert "$HOME/.codex-omnigent-clean-user-canary" in command
+    assert "$HOME/.omnigent-stock-codex-compat-clean-vm-proof" in command
+    assert (
+        "$HOME/.omnigent-stock-codex-compat-clean-vm-remote-acquisition-proof"
+        in command
+    )
+    assert "adapter root remained after preflight cleanup" in command
+    assert "stock Codex cache root remained after preflight cleanup" in command
+    assert "sudo -n pkgutil --forget" in command
+    assert "stock_codex_compat_pkg_clean_vm_preflight_cleanup=completed" in command
+
+
 def test_stock_codex_compat_pkg_clean_vm_remote_acquisition_does_not_upload_stock_binary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -4563,6 +4586,143 @@ def test_stock_codex_compat_pkg_clean_vm_remote_acquisition_does_not_upload_stoc
     assert len(bash_commands) == 1
     assert "codex-aarch64-apple-darwin.tar.gz" in bash_commands[0]
     assert str(stock_codex) not in bash_commands[0]
+
+
+def test_stock_codex_compat_pkg_clean_vm_start_tart_preflights_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = _write_codex_binary(
+        tmp_path / "stock" / "codex",
+        version="codex-cli 0.142.5",
+    )
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+    remote_channel = _MOD._OfficialStockCodexRemoteChannel(
+        policy_name="official-openai-github-release",
+        cask_token="codex",
+        cask_tap="github-releases/latest",
+        cask_homepage="https://github.com/openai/codex",
+        cask_version="0.143.0",
+        cask_url=(
+            "https://github.com/openai/codex/releases/download/"
+            "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+        ),
+        cask_sha256="c" * 64,
+        selected_version="codex-cli 0.143.0",
+        archive_executable="codex-aarch64-apple-darwin",
+    )
+    uploads: list[tuple[Path, str]] = []
+    remote_commands: list[str] = []
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        if path is not None:
+            return None
+        return {
+            "ssh": "/usr/bin/ssh",
+            "scp": "/usr/bin/scp",
+            "tart": "/usr/bin/true",
+        }.get(name)
+
+    def fake_copy_clean_vm_file(
+        *,
+        scp_path: str,
+        ssh_target: str,
+        ssh_port: int,
+        ssh_identity: Path | None,
+        source: Path,
+        remote_destination: str,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del scp_path, ssh_target, ssh_port, ssh_identity, timeout
+        uploads.append((source, remote_destination))
+        return subprocess.CompletedProcess(["scp"], 0, stdout="", stderr="")
+
+    def fake_run_clean_vm_ssh_command(
+        remote_command: str,
+        *,
+        ssh_path: str,
+        ssh_target: str,
+        ssh_port: int,
+        ssh_identity: Path | None,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del ssh_path, ssh_target, ssh_port, ssh_identity, timeout
+        remote_commands.append(remote_command)
+        if "stock_codex_compat_pkg_clean_vm_preflight_cleanup=completed" in remote_command:
+            return subprocess.CompletedProcess(
+                ["ssh"],
+                0,
+                stdout="stock_codex_compat_pkg_clean_vm_preflight_cleanup=completed\n",
+                stderr="",
+            )
+        if remote_command.startswith("/usr/bin/mktemp"):
+            return subprocess.CompletedProcess(
+                ["ssh"],
+                0,
+                stdout="/tmp/omnigent-stock-codex-compat-clean-vm.test\n",
+                stderr="",
+            )
+        if remote_command.startswith("chmod "):
+            return subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr="")
+        if remote_command.startswith("/bin/bash "):
+            return subprocess.CompletedProcess(
+                ["ssh"],
+                0,
+                stdout=(
+                    "stock_codex_compat_pkg_clean_vm_remote_acquisition_status="
+                    "replacement-ready\n"
+                ),
+                stderr="",
+            )
+        if remote_command.startswith("rm -rf "):
+            return subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected remote command: {remote_command}")
+
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+    monkeypatch.setattr(
+        _MOD,
+        "_official_stock_codex_remote_channel",
+        lambda: remote_channel,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_resolve_clean_vm_ssh_target",
+        lambda **_kwargs: ("admin@192.0.2.10", "192.0.2.10", True, ()),
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_wait_for_clean_vm_ssh",
+        lambda **_kwargs: subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(_MOD, "_copy_clean_vm_file", fake_copy_clean_vm_file)
+    monkeypatch.setattr(_MOD, "_run_clean_vm_ssh_command", fake_run_clean_vm_ssh_command)
+
+    proof = _MOD.run_stock_codex_compat_pkg_clean_vm_remote_acquisition_proof(
+        stock_codex,
+        package_path=package_path,
+        clean_vm_ssh_target=None,
+        clean_vm_tart_name="omnigent-clean",
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_user="admin",
+        clean_vm_ssh_port=22,
+        clean_vm_start_tart=True,
+    )
+
+    assert proof.status == "replacement-ready"
+    assert proof.tart_started is True
+    assert proof.tart_stopped is True
+    assert proof.tart_ip == "192.0.2.10"
+    assert "stock_codex_compat_pkg_clean_vm_preflight_cleanup=completed" in (
+        remote_commands[0]
+    )
+    assert remote_commands[1].startswith("/usr/bin/mktemp")
+    assert [source.name for source, _destination in uploads] == [
+        "omnigent-stock-codex-compat.pkg",
+        "channel.json",
+        "clean_vm_proof.sh",
+    ]
 
 
 def test_stock_codex_compat_pkg_clean_vm_update_agent_loads_launchd_without_stock_binary(

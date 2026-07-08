@@ -13267,6 +13267,68 @@ def _wait_for_clean_vm_ssh(
     return last
 
 
+def _clean_vm_preflight_cleanup_command() -> str:
+    """Return a bounded cleanup command for repeatable disposable VM proofs."""
+    script = r'''
+set -euo pipefail
+pkg_id="ai.omnigent.stock-codex-compat"
+install_prefix="/Library/Application Support/Omnigent/stock-codex-compat"
+marker="$HOME/.omnigent-stock-codex-compat-clean-user-ok"
+launcher_path="$HOME/.local/bin/omnigent-stock-codex-compat"
+manifest_path="$HOME/.local/omnigent/launchers/stock-codex-compat.json"
+adapter_root="$HOME/.local/omnigent/stock-codex-compat"
+clean_cache_root="$HOME/.local/omnigent/codex-stock"
+clean_codex_home="$HOME/.codex-omnigent-clean-user-canary"
+proof_root_basic="$HOME/.omnigent-stock-codex-compat-clean-vm-proof"
+proof_root_remote="$HOME/.omnigent-stock-codex-compat-clean-vm-remote-acquisition-proof"
+launch_agent_label="ai.omnigent.stock-codex-compat.update"
+launch_agent_path="$HOME/Library/LaunchAgents/$launch_agent_label.plist"
+update_log_dir="$HOME/Library/Logs/Omnigent/stock-codex-compat"
+
+fail() {
+  printf 'stock_codex_compat_pkg_clean_vm_preflight_cleanup_error=%s\n' "$*" >&2
+  exit 70
+}
+
+[ -f "$marker" ] || fail "clean VM user home is not marked disposable: $marker"
+sudo -n true >/dev/null 2>&1 || fail "sudo requires interactive authentication"
+
+uid="$(id -u)"
+launchctl bootout "gui/$uid/$launch_agent_label" >/dev/null 2>&1 || true
+launchctl bootout "gui/$uid" "$launch_agent_path" >/dev/null 2>&1 || true
+rm -rf \
+  "$clean_codex_home" \
+  "$clean_cache_root" \
+  "$adapter_root" \
+  "$proof_root_basic" \
+  "$proof_root_remote" \
+  "$update_log_dir" || true
+rm -f "$launcher_path" "$manifest_path" "$launch_agent_path" || true
+rmdir "$HOME/Library/Logs/Omnigent" 2>/dev/null || true
+rmdir "$HOME/.local/omnigent/launchers" 2>/dev/null || true
+rmdir "$HOME/.local/omnigent" 2>/dev/null || true
+sudo -n rm -rf "$install_prefix" >/dev/null 2>&1 || true
+sudo -n pkgutil --forget "$pkg_id" >/dev/null 2>&1 || true
+
+[ ! -e "$launcher_path" ] || fail "launcher remained after preflight cleanup"
+[ ! -e "$manifest_path" ] || fail "launcher manifest remained after preflight cleanup"
+[ ! -e "$adapter_root" ] || fail "adapter root remained after preflight cleanup"
+[ ! -e "$clean_cache_root" ] || fail "stock Codex cache root remained after preflight cleanup"
+[ ! -e "$clean_codex_home" ] || fail "clean CODEX_HOME canary remained after preflight cleanup"
+[ ! -e "$proof_root_basic" ] || fail "basic proof root remained after preflight cleanup"
+[ ! -e "$proof_root_remote" ] || fail "remote proof root remained after preflight cleanup"
+[ ! -e "$launch_agent_path" ] || fail "update LaunchAgent remained after preflight cleanup"
+[ ! -e "$update_log_dir" ] || fail "update log directory remained after preflight cleanup"
+[ ! -e "$install_prefix" ] || fail "package payload remained after preflight cleanup"
+if pkgutil --pkg-info "$pkg_id" >/dev/null 2>&1; then
+  fail "package receipt remained after preflight cleanup"
+fi
+
+printf 'stock_codex_compat_pkg_clean_vm_preflight_cleanup=completed\n'
+'''
+    return f"/bin/bash -lc {shlex.quote(script)}"
+
+
 def _copy_clean_vm_file(
     *,
     scp_path: str,
@@ -15237,6 +15299,41 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     tart_started=tart_started,
                 )
             )
+        if tart_started:
+            preflight_cleanup = _run_clean_vm_ssh_command(
+                _clean_vm_preflight_cleanup_command(),
+                ssh_path=tool_paths["ssh"],
+                ssh_target=resolved_target,
+                ssh_port=clean_vm_ssh_port,
+                ssh_identity=clean_vm_ssh_identity,
+                timeout=120,
+            )
+            if preflight_cleanup.returncode != 0:
+                return finalize_clean_vm_proof(
+                    _blocked_stock_codex_compat_pkg_clean_vm_proof(
+                        tool_paths=tool_paths,
+                        missing_prerequisites=(
+                            "clean VM preflight cleanup did not pass",
+                        ),
+                        stock_codex_path=stock_codex_path,
+                        stock_codex_version=stock_codex_version,
+                        stock_codex_sha256=stock_codex_sha256,
+                        package_path=package_path,
+                        package_sha256=package_sha256,
+                        tart_name=clean_vm_tart_name,
+                        ssh_target=resolved_target,
+                        ssh_identity=clean_vm_ssh_identity,
+                        ssh_user=clean_vm_ssh_user,
+                        ssh_port=clean_vm_ssh_port,
+                        tart_ip=tart_ip,
+                        remote_status="preflight-cleanup-failed",
+                        remote_output_preview=_preview_text(
+                            preflight_cleanup.stdout + preflight_cleanup.stderr,
+                            limit=4000,
+                        ),
+                        tart_started=tart_started,
+                    )
+                )
         mktemp = _run_clean_vm_ssh_command(
             "/usr/bin/mktemp -d /tmp/omnigent-stock-codex-compat-clean-vm.XXXXXX",
             ssh_path=tool_paths["ssh"],
