@@ -1657,6 +1657,10 @@ class StockCodexCompatPkgCleanVmProof:
     live_auth_source: str | None = None
     live_auth_uploaded: bool | None = None
     live_model_turn_requested: bool | None = None
+    live_launcher_path: Path | None = None
+    live_selected_command_path: Path | None = None
+    live_codex_home: Path | None = None
+    live_working_directory: Path | None = None
     live_thread_id: str | None = None
     live_event_count: int | None = None
     live_agent_message_preview: str | None = None
@@ -7416,7 +7420,7 @@ def _preview_text(value: str, *, limit: int) -> str:
 
 def _parse_clean_vm_live_output_evidence(
     remote_output: str,
-) -> tuple[str, int, str] | None:
+) -> tuple[str, int, str, Path, Path, Path, Path] | None:
     """Extract live model-turn evidence emitted by the clean-VM proof script."""
     for line in remote_output.splitlines():
         if not line.startswith("{"):
@@ -7430,6 +7434,11 @@ def _parse_clean_vm_live_output_evidence(
         thread_id = payload.get("threadId")
         event_count = payload.get("eventCount")
         preview = payload.get("firstAgentMessagePreview")
+        command_surface = payload.get("commandSurface")
+        launcher_path = payload.get("launcherPath")
+        selected_command_path = payload.get("selectedCommandPath")
+        codex_home = payload.get("codexHome")
+        working_directory = payload.get("workingDirectory")
         if (
             isinstance(thread_id, str)
             and thread_id
@@ -7438,8 +7447,25 @@ def _parse_clean_vm_live_output_evidence(
             and isinstance(preview, str)
             and preview.startswith("Routing: orchestrator-led")
             and "STOCK_CODEX_COMPAT_LIVE_OK" in preview
+            and command_surface == "installed-compat-launcher"
+            and isinstance(launcher_path, str)
+            and launcher_path
+            and isinstance(selected_command_path, str)
+            and selected_command_path == launcher_path
+            and isinstance(codex_home, str)
+            and codex_home
+            and isinstance(working_directory, str)
+            and working_directory
         ):
-            return thread_id, event_count, preview
+            return (
+                thread_id,
+                event_count,
+                preview,
+                Path(launcher_path),
+                Path(selected_command_path),
+                Path(codex_home),
+                Path(working_directory),
+            )
     return None
 
 
@@ -12772,13 +12798,31 @@ if [ -n "$live_auth_json" ]; then
     cat "$live_stderr_path" >&2 || true
     fail "installed launcher live model turn failed: exit-$live_status"
   fi
-  uvx --from "$user_runtime_root" python - "$live_output_path" <<'PY'
+  uvx --from "$user_runtime_root" python - \
+    "$live_output_path" \
+    "$selected" \
+    "$launcher_path" \
+    "$live_codex_home" \
+    "$user_runtime_root" <<'PY'
 import json
 import sys
 from pathlib import Path
 
+(
+    live_output_path,
+    selected_command_path,
+    launcher_path,
+    live_codex_home,
+    user_runtime_root,
+) = sys.argv[1:]
+if selected_command_path != launcher_path:
+    raise SystemExit(
+        "installed launcher live proof selected the wrong command: "
+        f"{selected_command_path} != {launcher_path}"
+    )
+
 events = []
-for index, line in enumerate(Path(sys.argv[1]).read_text(encoding="utf-8").splitlines(), 1):
+for index, line in enumerate(Path(live_output_path).read_text(encoding="utf-8").splitlines(), 1):
     if not line.strip():
         continue
     try:
@@ -12812,9 +12856,14 @@ if "STOCK_CODEX_COMPAT_LIVE_OK" not in first_agent_message:
 if not first_agent_message.startswith("Routing: orchestrator-led"):
     raise SystemExit(f"installed launcher route prefix missing: {first_agent_message!r}")
 print(json.dumps({
+    "codexHome": live_codex_home,
+    "commandSurface": "installed-compat-launcher",
     "eventCount": len(events),
     "firstAgentMessagePreview": first_agent_message[:200],
+    "launcherPath": launcher_path,
+    "selectedCommandPath": selected_command_path,
     "threadId": thread_id,
+    "workingDirectory": user_runtime_root,
 }, sort_keys=True))
 PY
   printf 'stock_codex_compat_pkg_clean_vm_live_status=replacement-ready\n'
@@ -13325,11 +13374,19 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
             live_thread_id = None
             live_event_count = None
             live_agent_message_preview = None
+            live_launcher_path = None
+            live_selected_command_path = None
+            live_codex_home = None
+            live_working_directory = None
             if live_output_evidence is not None:
                 (
                     live_thread_id,
                     live_event_count,
                     live_agent_message_preview,
+                    live_launcher_path,
+                    live_selected_command_path,
+                    live_codex_home,
+                    live_working_directory,
                 ) = live_output_evidence
             return finalize_clean_vm_proof(
                 StockCodexCompatPkgCleanVmProof(
@@ -13355,6 +13412,10 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     live_thread_id=live_thread_id,
                     live_event_count=live_event_count,
                     live_agent_message_preview=live_agent_message_preview,
+                    live_launcher_path=live_launcher_path,
+                    live_selected_command_path=live_selected_command_path,
+                    live_codex_home=live_codex_home,
+                    live_working_directory=live_working_directory,
                 )
             )
     finally:
@@ -17312,6 +17373,22 @@ def print_stock_codex_compat_pkg_clean_vm_live_proof(
     print(
         "stock_codex_compat_pkg_clean_vm_live_model_turn_requested="
         f"{proof.live_model_turn_requested}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_live_launcher_path="
+        f"{proof.live_launcher_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_live_selected_command_path="
+        f"{proof.live_selected_command_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_live_codex_home="
+        f"{proof.live_codex_home}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_live_working_directory="
+        f"{proof.live_working_directory}"
     )
     print(f"stock_codex_compat_pkg_clean_vm_live_thread_id={proof.live_thread_id}")
     print(f"stock_codex_compat_pkg_clean_vm_live_event_count={proof.live_event_count}")

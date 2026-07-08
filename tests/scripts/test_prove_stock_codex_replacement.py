@@ -3928,14 +3928,31 @@ def test_stock_codex_compat_pkg_clean_vm_live_uploads_auth_but_not_stock_binary(
         if remote_command.startswith("chmod "):
             return subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr="")
         if remote_command.startswith("/bin/bash "):
+            live_evidence = {
+                "codexHome": (
+                    "/Users/admin/.omnigent-stock-codex-compat-clean-vm-remote-"
+                    "acquisition-proof/live-codex-home"
+                ),
+                "commandSurface": "installed-compat-launcher",
+                "eventCount": 7,
+                "firstAgentMessagePreview": (
+                    "Routing: orchestrator-led\n\nSTOCK_CODEX_COMPAT_LIVE_OK"
+                ),
+                "launcherPath": "/Users/admin/.local/bin/omnigent-stock-codex-compat",
+                "selectedCommandPath": (
+                    "/Users/admin/.local/bin/omnigent-stock-codex-compat"
+                ),
+                "threadId": "019f-live-proof",
+                "workingDirectory": (
+                    "/Users/admin/.local/omnigent/stock-codex-compat/runtime"
+                ),
+            }
             return subprocess.CompletedProcess(
                 ["ssh"],
                 0,
                 stdout=(
-                    '{"eventCount": 7, '
-                    '"firstAgentMessagePreview": "Routing: orchestrator-led\\n\\n'
-                    'STOCK_CODEX_COMPAT_LIVE_OK", '
-                    '"threadId": "019f-live-proof"}\n'
+                    json.dumps(live_evidence, sort_keys=True)
+                    + "\n"
                     "stock_codex_compat_pkg_clean_vm_live_status="
                     "replacement-ready\n"
                 ),
@@ -3987,6 +4004,17 @@ def test_stock_codex_compat_pkg_clean_vm_live_uploads_auth_but_not_stock_binary(
     assert proof.live_auth_source == "stock-default-home"
     assert proof.live_auth_uploaded is True
     assert proof.live_model_turn_requested is True
+    assert proof.live_launcher_path == Path(
+        "/Users/admin/.local/bin/omnigent-stock-codex-compat"
+    )
+    assert proof.live_selected_command_path == proof.live_launcher_path
+    assert proof.live_codex_home == Path(
+        "/Users/admin/.omnigent-stock-codex-compat-clean-vm-remote-acquisition-proof"
+        "/live-codex-home"
+    )
+    assert proof.live_working_directory == Path(
+        "/Users/admin/.local/omnigent/stock-codex-compat/runtime"
+    )
     assert proof.live_thread_id == "019f-live-proof"
     assert proof.live_event_count == 7
     assert proof.live_agent_message_preview.startswith("Routing: orchestrator-led")
@@ -4002,6 +4030,30 @@ def test_stock_codex_compat_pkg_clean_vm_live_uploads_auth_but_not_stock_binary(
     assert len(bash_commands) == 1
     assert bash_commands[0].endswith("/auth.json")
     assert str(stock_codex) not in bash_commands[0]
+
+
+def test_clean_vm_live_output_evidence_requires_installed_launcher_surface() -> None:
+    output = (
+        json.dumps(
+            {
+                "codexHome": "/Users/admin/proof/live-codex-home",
+                "commandSurface": "raw-stock-codex",
+                "eventCount": 7,
+                "firstAgentMessagePreview": (
+                    "Routing: orchestrator-led\n\nSTOCK_CODEX_COMPAT_LIVE_OK"
+                ),
+                "launcherPath": "/Users/admin/.local/bin/omnigent-stock-codex-compat",
+                "selectedCommandPath": "/Users/admin/.local/bin/omnigent-stock-codex-compat",
+                "threadId": "019f-live-proof",
+                "workingDirectory": "/Users/admin/.local/omnigent/stock-codex-compat/runtime",
+            },
+            sort_keys=True,
+        )
+        + "\n"
+        + "stock_codex_compat_pkg_clean_vm_live_status=replacement-ready\n"
+    )
+
+    assert _MOD._parse_clean_vm_live_output_evidence(output) is None
 
 
 def test_clean_vm_ssh_command_avoids_persistent_known_hosts() -> None:

@@ -318,8 +318,9 @@ The next gates should split by product mode:
   and forgets the package receipt. The live clean-VM launcher gate is also green:
   `stock-codex-compat-pkg-clean-vm-live` uploads only proof-scoped stock auth,
   runs the installed `~/.local/bin/omnigent-stock-codex-compat` launcher with
-  the in-VM provisioned stock Codex, records thread
-  `019f3f6a-6247-7c10-a26d-e93a936872db`, and preserves the deterministic
+  the in-VM provisioned stock Codex, records parsed selected-launcher,
+  `CODEX_HOME`, working-directory, and thread
+  `019f3fd9-093f-7550-8474-3c67eb5fe6c9` evidence, and preserves the deterministic
   `Routing: orchestrator-led` route evidence before
   `STOCK_CODEX_COMPAT_LIVE_OK`. The production stock-Codex channel policy gate
   is green for official-source validation, clean-cache reuse before network
