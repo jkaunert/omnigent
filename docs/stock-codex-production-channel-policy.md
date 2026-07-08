@@ -109,3 +109,12 @@ installed-root shape, then runs the installed runtime's bundled
 `runtime/scripts/provision_stock_codex.py` under a clean temporary `HOME`. It
 proves the same stable official remote acquisition contract from packaged
 runtime code rather than from the development checkout.
+
+The disposable clean-VM gates prove the same channel boundary through the
+production-shaped install path. `stock-codex-compat-pkg-clean-vm-remote-acquisition`
+copies only the signed/notarized package, a URL-backed channel manifest, and the
+remote proof script into the VM, then installs into the VM's real `/Library` and
+downloads/verifies the official OpenAI GitHub archive there. The live extension
+`stock-codex-compat-pkg-clean-vm-live` adds only proof-scoped copied stock auth,
+does not upload the host stock Codex binary, and runs a real model turn through
+the installed compatibility launcher after in-VM acquisition.

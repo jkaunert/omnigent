@@ -308,28 +308,29 @@ The next gates should split by product mode:
 - for `stock-codex-compat`, the signed/notarized package gate is green with
   Developer ID Installer signing, Apple notarization, stapling, stapler
   validation, and Gatekeeper acceptance, and it can now persist the artifact via
-  `--pkg-output-path`. The package-manager installer lifecycle gate now has a
-  prebuilt-artifact consumer via `--pkg-path`; that path validates package
-  structure, signature, staple, and Gatekeeper evidence before requiring admin
-  installer privileges. It is still live-blocked in this agent process by macOS
-  admin requirements for `/usr/sbin/installer`, so it needs an
-  admin-authenticated root run to close real install, receipt, doctor, cleanup,
-  and detach evidence. The production stock-Codex channel policy gate is green
-  for official-source validation, clean-cache reuse before network access,
-  fail-closed non-official URL rejection, and resolver selection.
-  The update doctor gate is green for fail-closed policy requirement, dry-run
-  no-mutation behavior, preverified target detection, launcher promotion intent,
-  target-ready promotion material, rollback intent, and up-to-date promotion
-  suppression. The update acquisition gates are green for both the source
-  checkout and the pkg-installed runtime: explicit stable-channel remote
-  download, SHA verification, safe archive extraction, staged-payload reuse,
-  and no-host-cache leakage are proven. Remaining production choices are the
-  admin-authenticated package-manager lifecycle consumer run, updater
-  scheduling, persistent launcher pointer promotion, alpha/pre-release channel
-  policy, independent archive signature policy, and broader UI/device bridge
-  coverage such as screenshot, snapshot, gesture, or device execution if product
-  scope requires them. Raw unwrapped stock Codex Electron/CLI route parity
-  remains blocked;
+  `--pkg-output-path`. The package-manager lifecycle is now green through the
+  disposable Tart VM path: the signed/notarized package installs into the VM's
+  real `/Library`, bootstraps the user runtime, provisions stock Codex from the
+  official OpenAI GitHub release channel inside the VM without uploading the
+  host stock binary, classifies clean auth, rolls back user and package state,
+  and forgets the package receipt. The live clean-VM launcher gate is also green:
+  `stock-codex-compat-pkg-clean-vm-live` uploads only proof-scoped stock auth,
+  runs the installed `~/.local/bin/omnigent-stock-codex-compat` launcher with
+  the in-VM provisioned stock Codex, records thread
+  `019f3f6a-6247-7c10-a26d-e93a936872db`, and preserves the deterministic
+  `Routing: orchestrator-led` route evidence before
+  `STOCK_CODEX_COMPAT_LIVE_OK`. The production stock-Codex channel policy gate
+  is green for official-source validation, clean-cache reuse before network
+  access, fail-closed non-official URL rejection, resolver selection,
+  explicit-download remote acquisition, SHA verification, safe archive
+  extraction, staged-payload reuse, and no-host-cache leakage from both source
+  checkout and packaged-runtime paths. Remaining production choices are
+  automated first-boot setup from a raw public image or new machine, browser or
+  device auth onboarding UX, updater scheduling, persistent launcher pointer
+  promotion, alpha/pre-release channel policy, independent archive signature
+  policy, and broader UI/device bridge coverage such as screenshot, snapshot,
+  gesture, or device execution if product scope requires them. Raw unwrapped
+  stock Codex Electron/CLI route parity remains blocked;
 - decide whether automated browser/device login UX, token freshness validation,
   or cross-machine credential packaging is product scope; or
 - broaden the Apple workflow smoke to release/readiness/review only if product

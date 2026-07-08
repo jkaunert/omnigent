@@ -1634,6 +1634,13 @@ class StockCodexCompatPkgCleanVmProof:
     archive_executable: str | None = None
     channel_policy: str | None = None
     host_stock_codex_uploaded: bool | None = None
+    live_auth_path: Path | None = None
+    live_auth_source: str | None = None
+    live_auth_uploaded: bool | None = None
+    live_model_turn_requested: bool | None = None
+    live_thread_id: str | None = None
+    live_event_count: int | None = None
+    live_agent_message_preview: str | None = None
 
 
 @dataclass(frozen=True)
@@ -7388,6 +7395,35 @@ def _preview_text(value: str, *, limit: int) -> str:
     return f"{value[:limit]}...[truncated]"
 
 
+def _parse_clean_vm_live_output_evidence(
+    remote_output: str,
+) -> tuple[str, int, str] | None:
+    """Extract live model-turn evidence emitted by the clean-VM proof script."""
+    for line in remote_output.splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        thread_id = payload.get("threadId")
+        event_count = payload.get("eventCount")
+        preview = payload.get("firstAgentMessagePreview")
+        if (
+            isinstance(thread_id, str)
+            and thread_id
+            and isinstance(event_count, int)
+            and event_count > 0
+            and isinstance(preview, str)
+            and preview.startswith("Routing: orchestrator-led")
+            and "STOCK_CODEX_COMPAT_LIVE_OK" in preview
+        ):
+            return thread_id, event_count, preview
+    return None
+
+
 def print_stock_codex_compat_live_proof(proof: StockCodexCompatLiveProof) -> None:
     """Emit operator evidence for a successful stock Codex live compatibility proof."""
     print("stock_codex_compat_live_rehearsal=selected")
@@ -12476,6 +12512,7 @@ expected_channel_sha="$4"
 expected_stock_version="$5"
 expected_channel_url="$6"
 channel_policy="$7"
+live_auth_json="${8:-}"
 pkg_id="ai.omnigent.stock-codex-compat"
 install_prefix="/Library/Application Support/Omnigent/stock-codex-compat"
 runtime_root="$install_prefix/runtime"
@@ -12483,6 +12520,7 @@ marker="$HOME/.omnigent-stock-codex-compat-clean-user-ok"
 proof_root="$HOME/.omnigent-stock-codex-compat-clean-vm-remote-acquisition-proof"
 clean_tmp="$proof_root/tmp"
 clean_codex_home="$HOME/.codex-omnigent-clean-user-canary"
+live_codex_home="$proof_root/live-codex-home"
 clean_cache_root="$HOME/.local/omnigent/codex-stock"
 launcher_path="$HOME/.local/bin/omnigent-stock-codex-compat"
 manifest_path="$HOME/.local/omnigent/launchers/stock-codex-compat.json"
@@ -12520,6 +12558,9 @@ sudo -n true >/dev/null 2>&1 || fail "sudo requires interactive authentication"
 [ -f "$marker" ] || fail "clean VM user home is not marked disposable: $marker"
 [ -f "$pkg_path" ] || fail "missing uploaded package: $pkg_path"
 [ -f "$channel_manifest" ] || fail "missing uploaded channel manifest: $channel_manifest"
+if [ -n "$live_auth_json" ]; then
+  [ -f "$live_auth_json" ] || fail "missing uploaded live auth json: $live_auth_json"
+fi
 grep -q '"url"' "$channel_manifest" || fail "remote acquisition channel manifest lacks url"
 if grep -q '"path"' "$channel_manifest"; then
   fail "remote acquisition channel manifest must not contain path-backed artifacts"
@@ -12684,6 +12725,83 @@ case "$probe_output" in
   *) fail "launcher probe sentinel missing" ;;
 esac
 
+if [ -n "$live_auth_json" ]; then
+  mkdir -p "$live_codex_home"
+  cp "$live_auth_json" "$live_codex_home/auth.json"
+  chmod 600 "$live_codex_home/auth.json"
+  live_output_path="$proof_root/live-output.jsonl"
+  live_stderr_path="$proof_root/live-stderr.txt"
+  live_prompt="$(
+    printf '%s' \
+      'No-tool clean VM installed launcher live proof for a SwiftUI workflow. ' \
+      'Do not inspect files, do not run commands, and do not explain. ' \
+      'Reply exactly STOCK_CODEX_COMPAT_LIVE_OK.'
+  )"
+  set +e
+  CODEX_HOME="$live_codex_home" \
+    OMNIGENT_STOCK_CODEX_PATH="$provisioned_codex" \
+    "$selected" exec \
+      --json \
+      --dangerously-bypass-hook-trust \
+      --skip-git-repo-check \
+      --sandbox read-only \
+      -C "$user_runtime_root" \
+      "$live_prompt" >"$live_output_path" 2>"$live_stderr_path"
+  live_status=$?
+  set -e
+  if [ "$live_status" -ne 0 ]; then
+    cat "$live_stderr_path" >&2 || true
+    fail "installed launcher live model turn failed: exit-$live_status"
+  fi
+  uvx --from "$user_runtime_root" python - "$live_output_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+events = []
+for index, line in enumerate(Path(sys.argv[1]).read_text(encoding="utf-8").splitlines(), 1):
+    if not line.strip():
+        continue
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"live JSONL line {index} is invalid JSON: {line}") from exc
+    if not isinstance(event, dict):
+        raise SystemExit(f"live JSONL line {index} is not an object: {line}")
+    events.append(event)
+if not events:
+    raise SystemExit("installed launcher live model turn emitted no JSON events")
+thread_id = ""
+first_agent_message = ""
+for event in events:
+    if event.get("type") == "thread.started" and not thread_id:
+        raw_thread_id = event.get("thread_id")
+        if isinstance(raw_thread_id, str):
+            thread_id = raw_thread_id
+    if event.get("type") != "item.completed":
+        continue
+    item = event.get("item")
+    if not isinstance(item, dict) or item.get("type") != "agent_message":
+        continue
+    text = item.get("text")
+    if isinstance(text, str):
+        first_agent_message = text
+if not thread_id:
+    raise SystemExit("installed launcher live model turn did not start a thread")
+if "STOCK_CODEX_COMPAT_LIVE_OK" not in first_agent_message:
+    raise SystemExit(f"installed launcher live sentinel missing: {first_agent_message!r}")
+if not first_agent_message.startswith("Routing: orchestrator-led"):
+    raise SystemExit(f"installed launcher route prefix missing: {first_agent_message!r}")
+print(json.dumps({
+    "eventCount": len(events),
+    "firstAgentMessagePreview": first_agent_message[:200],
+    "threadId": thread_id,
+}, sort_keys=True))
+PY
+  printf 'stock_codex_compat_pkg_clean_vm_live_status=replacement-ready\n'
+  printf 'stock_codex_compat_pkg_clean_vm_live_codex_home=%s\n' "$live_codex_home"
+fi
+
 uvx --from "$user_runtime_root" python - <<'PY'
 import json
 from omnigent import codex_native
@@ -12737,6 +12855,8 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
     clean_vm_ssh_port: int,
     clean_vm_start_tart: bool,
     remote_channel: _OfficialStockCodexRemoteChannel | None = None,
+    live_auth_path: Path | None = None,
+    live_auth_source: str | None = None,
 ) -> StockCodexCompatPkgCleanVmProof:
     """Run signed-pkg lifecycle inside a disposable clean macOS VM over SSH."""
     stock_codex_path = stock_codex_path.expanduser().resolve()
@@ -12756,7 +12876,11 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
             return proof
         return replace(
             proof,
-            proof_variant="official-remote-channel-acquisition",
+            proof_variant=(
+                "official-remote-channel-live-model"
+                if live_auth_path is not None
+                else "official-remote-channel-acquisition"
+            ),
             cask_token=remote_channel.cask_token,
             cask_tap=remote_channel.cask_tap,
             cask_homepage=remote_channel.cask_homepage,
@@ -12766,6 +12890,10 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
             archive_executable=remote_channel.archive_executable,
             channel_policy=remote_channel.policy_name,
             host_stock_codex_uploaded=False,
+            live_auth_path=live_auth_path,
+            live_auth_source=live_auth_source,
+            live_auth_uploaded=live_auth_path is not None,
+            live_model_turn_requested=live_auth_path is not None,
         )
 
     missing: list[str] = []
@@ -12789,6 +12917,10 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
         clean_vm_ssh_identity = clean_vm_ssh_identity.expanduser().resolve()
         if not clean_vm_ssh_identity.is_file():
             missing.append(f"missing clean VM SSH identity: {clean_vm_ssh_identity}")
+    if live_auth_path is not None:
+        live_auth_path = live_auth_path.expanduser().resolve()
+        if not live_auth_path.is_file():
+            missing.append(f"missing live Codex auth source: {live_auth_path}")
     try:
         resolved_target, tart_ip, tart_started, target_missing = (
             _resolve_clean_vm_ssh_target(
@@ -12991,15 +13123,20 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                         }
                     ],
                 }
-                upload_plan = (
+                remote_script_destination = f"{remote_work_dir}/clean_vm_proof.sh"
+                upload_plan_items: list[tuple[Path, str]] = [
                     (package_path, f"{remote_work_dir}/omnigent-stock-codex-compat.pkg"),
                     (channel_manifest, f"{remote_work_dir}/channel.json"),
-                    (script_path, f"{remote_work_dir}/clean_vm_proof.sh"),
-                )
-                chmod_targets = (f"{remote_work_dir}/clean_vm_proof.sh",)
-                remote_command_args = (
+                    (script_path, remote_script_destination),
+                ]
+                remote_auth_destination = f"{remote_work_dir}/auth.json"
+                if live_auth_path is not None:
+                    upload_plan_items.append((live_auth_path, remote_auth_destination))
+                upload_plan = tuple(upload_plan_items)
+                chmod_targets = (remote_script_destination,)
+                remote_command_parts = [
                     "/bin/bash",
-                    f"{remote_work_dir}/clean_vm_proof.sh",
+                    remote_script_destination,
                     f"{remote_work_dir}/omnigent-stock-codex-compat.pkg",
                     f"{remote_work_dir}/channel.json",
                     package_sha256,
@@ -13007,11 +13144,19 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     remote_channel.selected_version,
                     remote_channel.cask_url,
                     remote_channel.policy_name,
-                )
-                success_sentinel = (
-                    "stock_codex_compat_pkg_clean_vm_remote_acquisition_status="
-                    "replacement-ready"
-                )
+                ]
+                if live_auth_path is not None:
+                    remote_command_parts.append(remote_auth_destination)
+                remote_command_args = tuple(remote_command_parts)
+                if live_auth_path is None:
+                    success_sentinel = (
+                        "stock_codex_compat_pkg_clean_vm_remote_acquisition_status="
+                        "replacement-ready"
+                    )
+                else:
+                    success_sentinel = (
+                        "stock_codex_compat_pkg_clean_vm_live_status=replacement-ready"
+                    )
             channel_manifest.write_text(
                 json.dumps(channel_payload, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
@@ -13126,6 +13271,47 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                         tart_started=tart_started,
                     )
                 )
+            live_output_evidence = None
+            if live_auth_path is not None:
+                live_output_evidence = _parse_clean_vm_live_output_evidence(
+                    remote_output
+                )
+                if live_output_evidence is None:
+                    return finalize_clean_vm_proof(
+                        _blocked_stock_codex_compat_pkg_clean_vm_proof(
+                            tool_paths=tool_paths,
+                            missing_prerequisites=(
+                                "clean VM live proof omitted parseable thread evidence",
+                            ),
+                            stock_codex_path=stock_codex_path,
+                            stock_codex_version=stock_codex_version,
+                            stock_codex_sha256=stock_codex_sha256,
+                            package_path=package_path,
+                            package_sha256=package_sha256,
+                            tart_name=clean_vm_tart_name,
+                            ssh_target=resolved_target,
+                            ssh_identity=clean_vm_ssh_identity,
+                            ssh_user=clean_vm_ssh_user,
+                            ssh_port=clean_vm_ssh_port,
+                            tart_ip=tart_ip,
+                            remote_work_dir=remote_work_dir,
+                            remote_status="live-evidence-missing",
+                            remote_output_preview=_preview_text(
+                                remote_output,
+                                limit=12000,
+                            ),
+                            tart_started=tart_started,
+                        )
+                    )
+            live_thread_id = None
+            live_event_count = None
+            live_agent_message_preview = None
+            if live_output_evidence is not None:
+                (
+                    live_thread_id,
+                    live_event_count,
+                    live_agent_message_preview,
+                ) = live_output_evidence
             return finalize_clean_vm_proof(
                 StockCodexCompatPkgCleanVmProof(
                     status="replacement-ready",
@@ -13147,6 +13333,9 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     remote_output_preview=_preview_text(remote_output, limit=4000),
                     tart_started=tart_started,
                     tart_stopped=tart_stopped,
+                    live_thread_id=live_thread_id,
+                    live_event_count=live_event_count,
+                    live_agent_message_preview=live_agent_message_preview,
                 )
             )
     finally:
@@ -13193,6 +13382,41 @@ def run_stock_codex_compat_pkg_clean_vm_remote_acquisition_proof(
         clean_vm_ssh_port=clean_vm_ssh_port,
         clean_vm_start_tart=clean_vm_start_tart,
         remote_channel=_official_stock_codex_remote_channel(),
+    )
+
+
+def run_stock_codex_compat_pkg_clean_vm_live_proof(
+    stock_codex_path: Path,
+    *,
+    package_path: Path | None,
+    clean_vm_ssh_target: str | None,
+    clean_vm_tart_name: str | None,
+    clean_vm_ssh_identity: Path | None,
+    clean_vm_ssh_user: str | None,
+    clean_vm_ssh_port: int,
+    clean_vm_start_tart: bool,
+) -> StockCodexCompatPkgCleanVmProof:
+    """Run a real model turn from the clean-VM installed compatibility launcher."""
+    auth_path, auth_source = _stock_replacement_auth_source()
+    if not codex_native._codex_auth_json_has_available_credential(auth_path):
+        raise SystemExit(
+            "Current real Codex auth source is not available; cannot run clean VM "
+            "installed-launcher live proof.\n"
+            f"auth_path={auth_path}\n"
+            f"auth_source={auth_source}"
+        )
+    return run_stock_codex_compat_pkg_clean_vm_proof(
+        stock_codex_path,
+        package_path=package_path,
+        clean_vm_ssh_target=clean_vm_ssh_target,
+        clean_vm_tart_name=clean_vm_tart_name,
+        clean_vm_ssh_identity=clean_vm_ssh_identity,
+        clean_vm_ssh_user=clean_vm_ssh_user,
+        clean_vm_ssh_port=clean_vm_ssh_port,
+        clean_vm_start_tart=clean_vm_start_tart,
+        remote_channel=_official_stock_codex_remote_channel(),
+        live_auth_path=auth_path,
+        live_auth_source=auth_source,
     )
 
 
@@ -16813,6 +17037,82 @@ def print_stock_codex_compat_pkg_clean_vm_remote_acquisition_proof(
         "host stock Codex binary, enforces the official channel policy, "
         "classifies clean auth, rolls back user state, and removes package "
         "payload plus receipt"
+    )
+
+
+def print_stock_codex_compat_pkg_clean_vm_live_proof(
+    proof: StockCodexCompatPkgCleanVmProof,
+) -> None:
+    """Emit operator evidence for the clean VM installed-launcher live proof."""
+    print("stock_codex_compat_pkg_clean_vm_live_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_clean_vm_live_surface="
+        "signed-pkg-clean-vm-installed-launcher-live-model-turn"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_live_status={proof.status}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_live_missing_prerequisites="
+        f"{json.dumps(list(proof.missing_prerequisites), sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_live_tool_paths="
+        f"{json.dumps(proof.tool_paths, sort_keys=True)}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_live_package_path={proof.package_path}")
+    print(f"stock_codex_compat_pkg_clean_vm_live_package_sha256={proof.package_sha256}")
+    print(f"stock_codex_compat_pkg_clean_vm_live_cask_version={proof.cask_version}")
+    print(f"stock_codex_compat_pkg_clean_vm_live_cask_url={proof.cask_url}")
+    print(f"stock_codex_compat_pkg_clean_vm_live_cask_sha256={proof.cask_sha256}")
+    print(f"stock_codex_compat_pkg_clean_vm_live_channel_policy={proof.channel_policy}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_live_host_stock_codex_uploaded="
+        f"{proof.host_stock_codex_uploaded}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_live_auth_path={proof.live_auth_path}")
+    print(f"stock_codex_compat_pkg_clean_vm_live_auth_source={proof.live_auth_source}")
+    print(f"stock_codex_compat_pkg_clean_vm_live_auth_uploaded={proof.live_auth_uploaded}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_live_model_turn_requested="
+        f"{proof.live_model_turn_requested}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_live_thread_id={proof.live_thread_id}")
+    print(f"stock_codex_compat_pkg_clean_vm_live_event_count={proof.live_event_count}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_live_agent_message_preview="
+        f"{proof.live_agent_message_preview!r}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_live_tart_name={proof.tart_name}")
+    print(f"stock_codex_compat_pkg_clean_vm_live_ssh_target={proof.ssh_target}")
+    print(f"stock_codex_compat_pkg_clean_vm_live_ssh_identity={proof.ssh_identity}")
+    print(f"stock_codex_compat_pkg_clean_vm_live_ssh_user={proof.ssh_user}")
+    print(f"stock_codex_compat_pkg_clean_vm_live_ssh_port={proof.ssh_port}")
+    print(f"stock_codex_compat_pkg_clean_vm_live_tart_ip={proof.tart_ip}")
+    print(f"stock_codex_compat_pkg_clean_vm_live_remote_work_dir={proof.remote_work_dir}")
+    print(f"stock_codex_compat_pkg_clean_vm_live_remote_status={proof.remote_status}")
+    print(f"stock_codex_compat_pkg_clean_vm_live_tart_started={proof.tart_started}")
+    print(f"stock_codex_compat_pkg_clean_vm_live_tart_stopped={proof.tart_stopped}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_live_remote_output="
+        f"{proof.remote_output_preview!r}"
+    )
+    if proof.status == "blocked":
+        print(
+            "ASSERTION: clean VM installed-launcher live validation is blocked "
+            "by missing stock auth, official-channel metadata, disposable VM "
+            "SSH/Tart prerequisites, package artifact, noninteractive sudo, "
+            "VM uvx, operator marker, or clean VM state"
+        )
+        return
+    print(
+        "ASSERTION: the signed/notarized package can install into a disposable "
+        "VM, acquire stock Codex from the official channel inside that VM, "
+        "bootstrap the compatibility launcher, and run a real model turn "
+        "through the installed launcher"
+    )
+    print(
+        "ASSERTION: the live clean-VM proof uses proof-scoped copied stock auth, "
+        "does not upload the host stock Codex binary, preserves deterministic "
+        "route evidence before the model sentinel, and removes user/package state"
     )
 
 
@@ -21394,6 +21694,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-pkg-external-clean-user",
             "stock-codex-compat-pkg-clean-vm",
             "stock-codex-compat-pkg-clean-vm-remote-acquisition",
+            "stock-codex-compat-pkg-clean-vm-live",
             "stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
             "stock-codex-compat-wrapper-xcodebuild-bridge-test-adapter",
             "stock-codex-compat-wrapper-relay-tool",
@@ -21567,6 +21868,11 @@ def parse_args() -> argparse.Namespace:
             "disposable VM, then proves the packaged runtime downloads, "
             "verifies, extracts, bootstraps, rolls back, and cleans up stock "
             "Codex inside the VM without a host-copied Codex binary. "
+            "'stock-codex-compat-pkg-clean-vm-live' extends that clean-VM "
+            "remote acquisition path by uploading proof-scoped stock auth, "
+            "running a real model turn through the VM-installed compatibility "
+            "launcher, and verifying deterministic route evidence before the "
+            "live sentinel. "
             "'stock-codex-compat-wrapper-xcodebuild-bridge-adapter' proves "
             "that XcodeBuildMCP simulator build/run can execute through the "
             "same wrapper-owned file bridge while stock Codex stays in "
@@ -22431,6 +22737,43 @@ def main() -> int:
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_stock_codex_compat_pkg_clean_vm_remote_acquisition_proof(
             run_stock_codex_compat_pkg_clean_vm_remote_acquisition_proof(
+                codex_path,
+                package_path=args.pkg_path,
+                clean_vm_ssh_target=args.clean_vm_ssh_target,
+                clean_vm_tart_name=args.clean_vm_tart_name,
+                clean_vm_ssh_identity=args.clean_vm_ssh_identity,
+                clean_vm_ssh_user=args.clean_vm_ssh_user,
+                clean_vm_ssh_port=args.clean_vm_ssh_port,
+                clean_vm_start_tart=args.clean_vm_start_tart,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-clean-vm-live":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-live does not use --apple-bundle; "
+                "omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-live cannot allow a Codex-fork "
+                "binary."
+            )
+        if args.pkg_output_path is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-live consumes --pkg-path; produce "
+                "persistent packages with stock-codex-compat-pkg-signed-notarized."
+            )
+        if args.pkg_path is None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-live requires --pkg-path from "
+                "stock-codex-compat-pkg-signed-notarized."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_pkg_clean_vm_live_proof(
+            run_stock_codex_compat_pkg_clean_vm_live_proof(
                 codex_path,
                 package_path=args.pkg_path,
                 clean_vm_ssh_target=args.clean_vm_ssh_target,
