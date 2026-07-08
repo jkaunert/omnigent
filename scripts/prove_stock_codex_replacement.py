@@ -1354,10 +1354,29 @@ class StockCodexCompatPkgCleanAuthProof:
     installed_prefix: Path
     installed_runtime_root: Path
     provisioner_script_path: Path
+    installer_script_path: Path
     clean_home: Path
+    clean_bin_dir: Path
     clean_cache_root: Path
     provisioned_codex_path: Path
     provisioned_version: str
+    launcher_path: Path
+    manifest_path: Path
+    selected_command_path: Path
+    launcher_version_output: str
+    launcher_probe_output: str
+    launcher_manifest_repo_root: Path
+    adapter_package_dir: Path
+    adapter_package_action: str
+    adapter_bin: Path
+    adapter_manifest: Path
+    adapter_bridge_dir: Path
+    adapter_tool_names: tuple[str, ...]
+    install_action: str
+    doctor_install_allowed: bool
+    doctor_existing_target_state: str
+    doctor_target_selected_on_path: bool
+    doctor_mutates_filesystem: bool
     real_auth_path: Path
     real_auth_source: str
     real_auth_available: bool
@@ -15658,17 +15677,42 @@ def run_stock_codex_compat_pkg_clean_auth_proof(
         )
         installed_prefix = install_root / package_proof.install_prefix.relative_to("/")
         provisioner_script_path = installed_runtime_root / "scripts" / "provision_stock_codex.py"
+        installer_script_path = (
+            installed_runtime_root / "scripts" / "install_stock_codex_compat_launcher.py"
+        )
         if not provisioner_script_path.is_file():
             raise SystemExit(
                 "Pkg-installed runtime is missing the stock Codex provisioner.\n"
                 f"expected={provisioner_script_path}"
             )
+        if not installer_script_path.is_file():
+            raise SystemExit(
+                "Pkg-installed runtime is missing the compatibility launcher installer.\n"
+                f"expected={installer_script_path}"
+            )
+        uvx_raw = shutil.which("uvx")
+        if not uvx_raw:
+            raise SystemExit("Could not find uvx on PATH for pkg clean-auth proof.")
+        uvx_path = Path(uvx_raw).expanduser().resolve()
+        if not uvx_path.is_file() or not os.access(uvx_path, os.X_OK):
+            raise SystemExit(f"uvx binary is not executable: {uvx_path}")
 
         clean_home = root / "home"
         clean_tmp = root / "tmp"
         clean_home.mkdir(mode=0o700)
         clean_tmp.mkdir(mode=0o700)
+        clean_bin_dir = clean_home / ".local" / "bin"
         clean_cache_root = clean_home / ".local" / "omnigent" / "codex-stock"
+        launcher_path = clean_bin_dir / "omnigent-stock-codex-compat"
+        manifest_path = (
+            clean_home / ".local" / "omnigent" / "launchers" / "stock-codex-compat.json"
+        )
+        adapter_package_dir = (
+            clean_home / ".local" / "omnigent" / "stock-codex-compat" / "adapter-package"
+        )
+        adapter_bridge_dir = (
+            clean_home / ".local" / "omnigent" / "stock-codex-compat" / "adapter-bridge"
+        )
 
         channel_root = root / "stock-codex-channel"
         channel_artifacts = channel_root / "artifacts"
@@ -15706,6 +15750,10 @@ def run_stock_codex_compat_pkg_clean_auth_proof(
             {
                 "HOME": str(clean_home),
                 "TMPDIR": str(clean_tmp),
+                "PATH": (
+                    f"{clean_bin_dir}{os.pathsep}{uvx_path.parent}{os.pathsep}"
+                    f"{os.environ.get('PATH', '')}"
+                ),
                 "PYTHONPATH": os.pathsep.join(python_path_entries),
             }
         )
@@ -15762,6 +15810,177 @@ def run_stock_codex_compat_pkg_clean_auth_proof(
             raise SystemExit(
                 "Clean-auth proof provisioned Codex outside the clean cache root.\n"
                 f"cache_root={clean_cache_root}\ncodex_path={provisioned_codex_path}"
+            )
+
+        adapter_payload = _run_stock_codex_compat_installer_cli_json(
+            ["--install-adapter-package"],
+            env=provision_env,
+            repo_root=installed_runtime_root,
+            script_path=installer_script_path,
+        )
+        adapter_package_action = _json_string(adapter_payload, "action")
+        adapter_payload_package_dir = Path(
+            _json_string(adapter_payload, "adapterPackageDir")
+        ).expanduser()
+        adapter_bin = Path(_json_string(adapter_payload, "adapterBin")).expanduser()
+        adapter_manifest = Path(
+            _json_string(adapter_payload, "adapterManifest")
+        ).expanduser()
+        adapter_tool_names_raw = adapter_payload.get("adapterToolNames")
+        if (
+            not isinstance(adapter_tool_names_raw, list)
+            or not all(isinstance(name, str) and name for name in adapter_tool_names_raw)
+        ):
+            raise SystemExit(
+                "Clean-auth proof adapter package omitted tool names.\n"
+                f"payload={adapter_payload!r}"
+            )
+        adapter_tool_names = tuple(adapter_tool_names_raw)
+        if adapter_package_action != "adapter-package-installed":
+            raise SystemExit(
+                "Clean-auth proof did not install the default adapter package.\n"
+                f"payload={adapter_payload!r}"
+            )
+        if adapter_payload_package_dir.resolve() != adapter_package_dir.resolve():
+            raise SystemExit(
+                "Clean-auth proof installed the adapter package in the wrong location.\n"
+                f"expected={adapter_package_dir}\nactual={adapter_payload_package_dir}"
+            )
+        if adapter_bin.resolve() != (adapter_package_dir / "bin").resolve():
+            raise SystemExit(
+                "Clean-auth proof installed the adapter bin in the wrong location.\n"
+                f"expected={adapter_package_dir / 'bin'}\nactual={adapter_bin}"
+            )
+        if adapter_manifest.resolve() != (
+            adapter_package_dir / "adapter-manifest.json"
+        ).resolve():
+            raise SystemExit(
+                "Clean-auth proof installed the adapter manifest in the wrong location.\n"
+                f"expected={adapter_package_dir / 'adapter-manifest.json'}\n"
+                f"actual={adapter_manifest}"
+            )
+        if not adapter_bin.is_dir() or not adapter_manifest.is_file():
+            raise SystemExit(
+                "Clean-auth proof adapter package is incomplete.\n"
+                f"adapter_bin={adapter_bin}\nadapter_manifest={adapter_manifest}"
+            )
+        if adapter_tool_names != (APPLE_DOCS_CLI_TOOL,):
+            raise SystemExit(
+                "Clean-auth proof installed unexpected adapter tools.\n"
+                f"expected={(APPLE_DOCS_CLI_TOOL,)!r}\nactual={adapter_tool_names!r}"
+            )
+        install_payload = _run_stock_codex_compat_installer_cli_json(
+            [
+                "--install",
+                "--pinned-codex-path",
+                str(provisioned_codex_path),
+                "--repo-root",
+                str(installed_runtime_root),
+                "--uvx-path",
+                str(uvx_path),
+                "--require-path-selected",
+            ],
+            env=provision_env,
+            repo_root=installed_runtime_root,
+            script_path=installer_script_path,
+        )
+        selected = shutil.which(
+            "omnigent-stock-codex-compat",
+            path=provision_env["PATH"],
+        )
+        if selected is None:
+            raise SystemExit("Clean-auth proof did not select compatibility command.")
+        selected_command_path = Path(selected).expanduser().resolve()
+        if selected_command_path != launcher_path.resolve():
+            raise SystemExit(
+                "Clean-auth proof selected the wrong compatibility command.\n"
+                f"expected={launcher_path.resolve()}\nactual={selected_command_path}"
+            )
+        version = subprocess.run(
+            [str(selected_command_path), "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=provision_env,
+            timeout=10,
+        )
+        launcher_version_output = (version.stdout or version.stderr).strip()
+        if version.returncode != 0 or launcher_version_output != stock_codex_version:
+            raise SystemExit(
+                "Clean-auth proof launcher version delegation failed.\n"
+                f"expected={stock_codex_version!r}\nactual={launcher_version_output!r}\n"
+                f"exit={version.returncode}"
+            )
+        probe = subprocess.run(
+            [str(selected_command_path), "--omnigent-stock-codex-compat-launcher-probe"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=provision_env,
+            timeout=10,
+        )
+        launcher_probe_output = ((probe.stdout or "") + (probe.stderr or "")).strip()
+        if (
+            probe.returncode != 0
+            or "OMNIGENT_STOCK_CODEX_COMPAT_LAUNCHER_OK" not in launcher_probe_output
+        ):
+            raise SystemExit(
+                "Clean-auth proof launcher probe failed.\n"
+                f"exit={probe.returncode}\noutput={launcher_probe_output}"
+            )
+        if str(installed_runtime_root) not in launcher_probe_output:
+            raise SystemExit(
+                "Clean-auth proof launcher probe did not delegate to installed runtime.\n"
+                f"expected_runtime={installed_runtime_root}\noutput={launcher_probe_output}"
+            )
+        if str(provisioned_codex_path) not in launcher_probe_output:
+            raise SystemExit(
+                "Clean-auth proof launcher probe did not pin the clean-provisioned Codex.\n"
+                f"expected_codex={provisioned_codex_path}\noutput={launcher_probe_output}"
+            )
+        launcher_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        launcher_repo_root_raw = launcher_manifest.get("repoRoot")
+        if not isinstance(launcher_repo_root_raw, str) or not launcher_repo_root_raw:
+            raise SystemExit(
+                f"Clean-auth launcher manifest omitted repoRoot: {launcher_manifest!r}"
+            )
+        launcher_manifest_repo_root = Path(launcher_repo_root_raw).expanduser().resolve()
+        if launcher_manifest_repo_root != installed_runtime_root:
+            raise SystemExit(
+                "Clean-auth launcher manifest points at the wrong runtime.\n"
+                f"expected={installed_runtime_root}\nactual={launcher_manifest_repo_root}"
+            )
+        doctor_payload = _run_stock_codex_compat_installer_cli_json(
+            [
+                "--doctor",
+                "--pinned-codex-path",
+                str(provisioned_codex_path),
+                "--repo-root",
+                str(installed_runtime_root),
+                "--uvx-path",
+                str(uvx_path),
+                "--require-path-selected",
+                "--force",
+            ],
+            env=provision_env,
+            repo_root=installed_runtime_root,
+            script_path=installer_script_path,
+        )
+        if doctor_payload.get("installAllowed") is not True:
+            raise SystemExit(
+                f"Clean-auth launcher doctor did not allow update: {doctor_payload!r}"
+            )
+        if doctor_payload.get("existingTargetState") != "managed":
+            raise SystemExit(
+                f"Clean-auth launcher doctor missed managed target: {doctor_payload!r}"
+            )
+        if doctor_payload.get("targetSelectedOnPath") is not True:
+            raise SystemExit(
+                f"Clean-auth launcher doctor did not see PATH selection: {doctor_payload!r}"
+            )
+        if doctor_payload.get("mutatesFilesystem") is not False:
+            raise SystemExit(
+                f"Clean-auth launcher doctor unexpectedly mutates: {doctor_payload!r}"
             )
 
         clean_codex_home = root / "codex-home-clean"
@@ -15847,7 +16066,7 @@ def run_stock_codex_compat_pkg_clean_auth_proof(
             )
         onboarding_command = (
             f"CODEX_HOME={shlex.quote(str(clean_codex_home))} "
-            f"{shlex.quote(str(provisioned_codex_path))} login"
+            f"{shlex.quote(str(selected_command_path))} login"
         )
 
         return StockCodexCompatPkgCleanAuthProof(
@@ -15862,10 +16081,29 @@ def run_stock_codex_compat_pkg_clean_auth_proof(
             installed_prefix=installed_prefix,
             installed_runtime_root=installed_runtime_root,
             provisioner_script_path=provisioner_script_path,
+            installer_script_path=installer_script_path,
             clean_home=clean_home,
+            clean_bin_dir=clean_bin_dir,
             clean_cache_root=clean_cache_root,
             provisioned_codex_path=provisioned_codex_path,
             provisioned_version=provisioned_version,
+            launcher_path=launcher_path,
+            manifest_path=manifest_path,
+            selected_command_path=selected_command_path,
+            launcher_version_output=launcher_version_output,
+            launcher_probe_output=launcher_probe_output,
+            launcher_manifest_repo_root=launcher_manifest_repo_root,
+            adapter_package_dir=adapter_package_dir,
+            adapter_package_action=adapter_package_action,
+            adapter_bin=adapter_bin,
+            adapter_manifest=adapter_manifest,
+            adapter_bridge_dir=adapter_bridge_dir,
+            adapter_tool_names=adapter_tool_names,
+            install_action=str(install_payload["action"]),
+            doctor_install_allowed=bool(doctor_payload["installAllowed"]),
+            doctor_existing_target_state=str(doctor_payload["existingTargetState"]),
+            doctor_target_selected_on_path=bool(doctor_payload["targetSelectedOnPath"]),
+            doctor_mutates_filesystem=bool(doctor_payload["mutatesFilesystem"]),
             real_auth_path=real_auth_path,
             real_auth_source=real_auth_source,
             real_auth_available=real_auth_available,
@@ -17575,7 +17813,12 @@ def print_stock_codex_compat_pkg_clean_auth_proof(
         "stock_codex_compat_pkg_clean_auth_provisioner_script="
         f"{proof.provisioner_script_path}"
     )
+    print(
+        "stock_codex_compat_pkg_clean_auth_installer_script="
+        f"{proof.installer_script_path}"
+    )
     print(f"stock_codex_compat_pkg_clean_auth_home={proof.clean_home}")
+    print(f"stock_codex_compat_pkg_clean_auth_bin_dir={proof.clean_bin_dir}")
     print(f"stock_codex_compat_pkg_clean_auth_cache_root={proof.clean_cache_root}")
     print(
         "stock_codex_compat_pkg_clean_auth_provisioned_codex_path="
@@ -17584,6 +17827,59 @@ def print_stock_codex_compat_pkg_clean_auth_proof(
     print(
         "stock_codex_compat_pkg_clean_auth_provisioned_version="
         f"{proof.provisioned_version}"
+    )
+    print(f"stock_codex_compat_pkg_clean_auth_launcher_path={proof.launcher_path}")
+    print(f"stock_codex_compat_pkg_clean_auth_manifest_path={proof.manifest_path}")
+    print(
+        "stock_codex_compat_pkg_clean_auth_selected_command_path="
+        f"{proof.selected_command_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_launcher_version_output="
+        f"{proof.launcher_version_output}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_launcher_probe_output="
+        f"{_preview_text(proof.launcher_probe_output, limit=1000)!r}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_launcher_manifest_repo_root="
+        f"{proof.launcher_manifest_repo_root}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_adapter_package_dir="
+        f"{proof.adapter_package_dir}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_adapter_package_action="
+        f"{proof.adapter_package_action}"
+    )
+    print(f"stock_codex_compat_pkg_clean_auth_adapter_bin={proof.adapter_bin}")
+    print(f"stock_codex_compat_pkg_clean_auth_adapter_manifest={proof.adapter_manifest}")
+    print(
+        "stock_codex_compat_pkg_clean_auth_adapter_bridge_dir="
+        f"{proof.adapter_bridge_dir}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_adapter_tools="
+        f"{','.join(proof.adapter_tool_names)}"
+    )
+    print(f"stock_codex_compat_pkg_clean_auth_install_action={proof.install_action}")
+    print(
+        "stock_codex_compat_pkg_clean_auth_doctor_install_allowed="
+        f"{proof.doctor_install_allowed}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_doctor_existing_target_state="
+        f"{proof.doctor_existing_target_state}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_doctor_target_selected_on_path="
+        f"{proof.doctor_target_selected_on_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_auth_doctor_mutates_filesystem="
+        f"{proof.doctor_mutates_filesystem}"
     )
     print(f"stock_codex_compat_pkg_clean_auth_real_auth_path={proof.real_auth_path}")
     print(f"stock_codex_compat_pkg_clean_auth_real_auth_source={proof.real_auth_source}")
@@ -17632,6 +17928,11 @@ def print_stock_codex_compat_pkg_clean_auth_proof(
     print(
         "ASSERTION: the pkg-installed runtime classifies a clean CODEX_HOME "
         "as needs-auth while using the clean-provisioned stock Codex binary"
+    )
+    print(
+        "ASSERTION: the pkg-installed runtime installs and selects the "
+        "compatibility launcher, then points guided login at that launcher "
+        "instead of the raw stock Codex binary"
     )
     print(
         "ASSERTION: the pkg-installed runtime recognizes both the current real "

@@ -284,12 +284,14 @@ The next gates should split by product mode:
   runtime as green: `stock-codex-compat-pkg-clean-auth-onboarding` stages the
   package payload under a temporary installed root, provisions pinned stock
   Codex `0.142.5` into the clean user's cache from the installed runtime, then
-  runs the installed runtime's auth classifier with
-  `PYTHONPATH=<installed-runtime>`; it verifies the current real stock auth
-  source is available, a clean `CODEX_HOME` reports `needs-auth`, a synthetic
-  populated `auth.json` reports available, the classifier uses the
-  clean-provisioned stock Codex path, and classifier output does not leak
-  synthetic credential material;
+  installs and selects the compatibility launcher before running the installed
+  runtime's auth classifier with `PYTHONPATH=<installed-runtime>`; it verifies
+  the current real stock auth source is available, a clean `CODEX_HOME` reports
+  `needs-auth`, a synthetic populated `auth.json` reports available, the
+  classifier uses the clean-provisioned stock Codex path, classifier output does
+  not leak synthetic credential material, and guided login targets
+  `~/.local/bin/omnigent-stock-codex-compat` instead of the raw stock Codex
+  binary;
 - for `stock-codex-compat`, treat pkg-installed runtime stable stock-Codex
   acquisition as green: `stock-codex-compat-pkg-update-acquisition` builds and
   stages the compatibility `.pkg` under a temporary installed-root shape, runs

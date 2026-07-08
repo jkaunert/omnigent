@@ -2383,10 +2383,36 @@ def test_stock_codex_compat_pkg_clean_auth_proof_uses_installed_runtime(
     assert proof.provisioner_script_path == (
         proof.installed_runtime_root / "scripts" / "provision_stock_codex.py"
     )
+    assert proof.installer_script_path == (
+        proof.installed_runtime_root / "scripts" / "install_stock_codex_compat_launcher.py"
+    )
+    assert proof.clean_bin_dir == proof.clean_home / ".local" / "bin"
     assert proof.clean_cache_root == (
         proof.clean_home / ".local" / "omnigent" / "codex-stock"
     )
     assert proof.provisioned_codex_path == proof.clean_cache_root / "0.142.2" / "codex"
+    assert proof.launcher_path == proof.clean_bin_dir / "omnigent-stock-codex-compat"
+    assert proof.manifest_path == (
+        proof.clean_home / ".local" / "omnigent" / "launchers" / "stock-codex-compat.json"
+    )
+    assert proof.selected_command_path == proof.launcher_path
+    assert proof.launcher_version_output == "codex-cli 0.142.2"
+    assert "OMNIGENT_STOCK_CODEX_COMPAT_LAUNCHER_OK" in proof.launcher_probe_output
+    assert str(proof.installed_runtime_root) in proof.launcher_probe_output
+    assert str(proof.provisioned_codex_path) in proof.launcher_probe_output
+    assert proof.launcher_manifest_repo_root == proof.installed_runtime_root
+    assert proof.adapter_package_action == "adapter-package-installed"
+    assert proof.adapter_bin == proof.adapter_package_dir / "bin"
+    assert proof.adapter_manifest == proof.adapter_package_dir / "adapter-manifest.json"
+    assert proof.adapter_bridge_dir == (
+        proof.clean_home / ".local" / "omnigent" / "stock-codex-compat" / "adapter-bridge"
+    )
+    assert proof.adapter_tool_names == ("fetch_apple_docs",)
+    assert proof.install_action == "installed"
+    assert proof.doctor_install_allowed is True
+    assert proof.doctor_existing_target_state == "managed"
+    assert proof.doctor_target_selected_on_path is True
+    assert proof.doctor_mutates_filesystem is False
     assert proof.real_auth_path == real_auth_path
     assert proof.real_auth_source == "explicit-CODEX_HOME"
     assert proof.real_auth_available is True
@@ -2400,7 +2426,8 @@ def test_stock_codex_compat_pkg_clean_auth_proof_uses_installed_runtime(
     assert proof.synthetic_available_reason is None
     assert proof.credential_material_leaked is False
     assert str(proof.clean_codex_home) in proof.onboarding_command
-    assert str(proof.provisioned_codex_path) in proof.onboarding_command
+    assert str(proof.launcher_path) in proof.onboarding_command
+    assert str(proof.provisioned_codex_path) not in proof.onboarding_command
 
 
 def test_stock_codex_compat_pkg_signed_notarized_blocks_when_prereqs_missing(
