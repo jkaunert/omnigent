@@ -356,7 +356,16 @@ The next gates should split by product mode:
   `stock-codex-compat-pkg-clean-vm-release` aggregate the checklist gate for a
   package candidate, requiring remote acquisition, auth onboarding, auth
   persistence, update-agent, and live installed-launcher proof statuses to pass
-  against one signed/notarized package and one official channel selection.
+  against one signed/notarized package and one official channel selection. It
+  can also emit a JSON release evidence artifact with package/channel hashes,
+  per-step statuses, Tart start/stop counts, host-stock-upload status, and
+  live/auth thread IDs so release review does not depend on terminal log
+  scraping. The current local evidence artifact
+  `omnigent-stock-codex-compat-github-latest.release-evidence.json` is green on
+  package SHA-256
+  `cfff83af6fd1dfc59ea1ed4928befe53929462eabd096e5c54d6171379be7ccc`,
+  official channel `0.143.0`, Tart `5/5`, and
+  `hostStockCodexUploadedAny=False`.
   The production stock-Codex channel policy gate
   is green for official-source validation, clean-cache reuse before network
   access, fail-closed non-official URL rejection, resolver selection,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -35,6 +36,47 @@ def _write_file(path: Path, text: str = "") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def _release_ready_stdout() -> str:
+    return "\n".join(
+        [
+            "ignored=noise",
+            "stock_codex_compat_pkg_clean_vm_release_status=replacement-ready",
+            "stock_codex_compat_pkg_clean_vm_release_missing_prerequisites=[]",
+            "stock_codex_compat_pkg_clean_vm_release_package_path=/tmp/compat.pkg",
+            "stock_codex_compat_pkg_clean_vm_release_package_sha256=pkg-sha",
+            "stock_codex_compat_pkg_clean_vm_release_stock_codex_version=0.143.0",
+            "stock_codex_compat_pkg_clean_vm_release_stock_codex_sha256=codex-sha",
+            "stock_codex_compat_pkg_clean_vm_release_cask_version=0.143.0",
+            "stock_codex_compat_pkg_clean_vm_release_cask_url=https://example.test/codex.tgz",
+            "stock_codex_compat_pkg_clean_vm_release_cask_sha256=cask-sha",
+            "stock_codex_compat_pkg_clean_vm_release_channel_policy=official-openai-github-release",
+            "stock_codex_compat_pkg_clean_vm_release_tart_name=omnigent-clean",
+            "stock_codex_compat_pkg_clean_vm_release_tart_started_count=5",
+            "stock_codex_compat_pkg_clean_vm_release_tart_stopped_count=5",
+            (
+                "stock_codex_compat_pkg_clean_vm_release_step_order="
+                '["remote-acquisition","auth-onboarding","auth-persistence",'
+                '"update-agent","live"]'
+            ),
+            (
+                "stock_codex_compat_pkg_clean_vm_release_step_statuses="
+                '{"auth-onboarding":"replacement-ready",'
+                '"auth-persistence":"replacement-ready",'
+                '"live":"replacement-ready",'
+                '"remote-acquisition":"replacement-ready",'
+                '"update-agent":"replacement-ready"}'
+            ),
+            "stock_codex_compat_pkg_clean_vm_release_step_missing_prerequisites={}",
+            "stock_codex_compat_pkg_clean_vm_release_blocked_step=None",
+            "stock_codex_compat_pkg_clean_vm_release_host_stock_codex_uploaded_any=False",
+            (
+                "stock_codex_compat_pkg_clean_vm_release_step_details="
+                '{"live":{"threadId":"thread-live","hostStockCodexUploaded":false}}'
+            ),
+        ]
+    )
 
 
 def test_release_candidate_wrapper_builds_tart_command(tmp_path: Path) -> None:
@@ -204,3 +246,210 @@ def test_release_candidate_wrapper_returns_underlying_exit_code(
     assert exit_code == 17
     assert calls
     assert calls[0][1] is False
+
+
+def test_release_candidate_wrapper_writes_machine_readable_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    proof_script = _write_file(tmp_path / "scripts" / "prove.py")
+    pkg_path = _write_file(tmp_path / "artifacts" / "compat.pkg")
+    evidence_path = tmp_path / "artifacts" / "release-evidence.json"
+    stdout = _release_ready_stdout()
+    calls: list[dict[str, Any]] = []
+
+    def fake_run(command: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
+        calls.append({"command": command, "kwargs": kwargs})
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="stderr line\n")
+
+    monkeypatch.setattr(_MOD.subprocess, "run", fake_run)
+
+    exit_code = _MOD.main(
+        [
+            "--python",
+            "/opt/python",
+            "--proof-script",
+            str(proof_script),
+            "--pkg-path",
+            str(pkg_path),
+            "--clean-vm-tart-name",
+            "omnigent-clean",
+            "--evidence-output",
+            str(evidence_path),
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls
+    assert calls[0]["kwargs"] == {"check": False, "capture_output": True, "text": True}
+    captured = capsys.readouterr()
+    assert "stock_codex_compat_pkg_clean_vm_release_status=replacement-ready" in captured.out
+    assert "stderr line" in captured.err
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["kind"] == _MOD.EVIDENCE_KIND
+    assert evidence["schemaVersion"] == _MOD.EVIDENCE_SCHEMA_VERSION
+    assert evidence["proof"] == "stock-codex-compat-pkg-clean-vm-release"
+    assert evidence["exitCode"] == 0
+    assert evidence["underlyingExitCode"] == 0
+    assert evidence["releaseCriteriaFailures"] == []
+    assert evidence["status"] == "replacement-ready"
+    assert evidence["missingPrerequisites"] == []
+    assert evidence["packageSha256"] == "pkg-sha"
+    assert evidence["stockCodexVersion"] == "0.143.0"
+    assert evidence["stockCodexSha256"] == "codex-sha"
+    assert evidence["caskVersion"] == "0.143.0"
+    assert evidence["caskUrl"] == "https://example.test/codex.tgz"
+    assert evidence["caskSha256"] == "cask-sha"
+    assert evidence["channelPolicy"] == "official-openai-github-release"
+    assert evidence["stepOrder"] == [
+        "remote-acquisition",
+        "auth-onboarding",
+        "auth-persistence",
+        "update-agent",
+        "live",
+    ]
+    assert evidence["stepStatuses"]["live"] == "replacement-ready"
+    assert evidence["stepMissingPrerequisites"] == {}
+    assert evidence["blockedStep"] is None
+    assert evidence["tartStartedCount"] == 5
+    assert evidence["tartStoppedCount"] == 5
+    assert evidence["hostStockCodexUploadedAny"] is False
+    assert evidence["stepDetails"]["live"]["threadId"] == "thread-live"
+    assert evidence["stdoutLineCount"] == stdout.count("\n") + 1
+    assert evidence["stderrLineCount"] == 1
+    assert evidence["fields"]["package_path"] == "/tmp/compat.pkg"
+
+
+def test_release_candidate_wrapper_refuses_to_overwrite_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    proof_script = _write_file(tmp_path / "scripts" / "prove.py")
+    pkg_path = _write_file(tmp_path / "artifacts" / "compat.pkg")
+    evidence_path = _write_file(tmp_path / "artifacts" / "release-evidence.json", "{}")
+
+    def fail_run(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        raise AssertionError("subprocess.run should not be called")
+
+    monkeypatch.setattr(_MOD.subprocess, "run", fail_run)
+
+    with pytest.raises(SystemExit, match="evidence output already exists"):
+        _MOD.main(
+            [
+                "--proof-script",
+                str(proof_script),
+                "--pkg-path",
+                str(pkg_path),
+                "--clean-vm-tart-name",
+                "omnigent-clean",
+                "--evidence-output",
+                str(evidence_path),
+            ]
+        )
+
+
+def test_release_candidate_wrapper_force_overwrites_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    proof_script = _write_file(tmp_path / "scripts" / "prove.py")
+    pkg_path = _write_file(tmp_path / "artifacts" / "compat.pkg")
+    evidence_path = _write_file(tmp_path / "artifacts" / "release-evidence.json", "{}")
+
+    def fake_run(_command: tuple[str, ...], **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            returncode=0,
+            stdout=_release_ready_stdout(),
+            stderr="",
+        )
+
+    monkeypatch.setattr(_MOD.subprocess, "run", fake_run)
+
+    exit_code = _MOD.main(
+        [
+            "--proof-script",
+            str(proof_script),
+            "--pkg-path",
+            str(pkg_path),
+            "--clean-vm-tart-name",
+            "omnigent-clean",
+            "--evidence-output",
+            str(evidence_path),
+            "--force-evidence-output",
+        ]
+    )
+
+    assert exit_code == 0
+    assert json.loads(evidence_path.read_text(encoding="utf-8"))["status"] == (
+        "replacement-ready"
+    )
+
+
+def test_release_candidate_wrapper_fails_closed_on_blocked_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    proof_script = _write_file(tmp_path / "scripts" / "prove.py")
+    pkg_path = _write_file(tmp_path / "artifacts" / "compat.pkg")
+    evidence_path = tmp_path / "artifacts" / "blocked-release-evidence.json"
+    blocked_stdout = _release_ready_stdout().replace(
+        "stock_codex_compat_pkg_clean_vm_release_status=replacement-ready",
+        "stock_codex_compat_pkg_clean_vm_release_status=blocked",
+    )
+
+    def fake_run(_command: tuple[str, ...], **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=0, stdout=blocked_stdout, stderr="")
+
+    monkeypatch.setattr(_MOD.subprocess, "run", fake_run)
+
+    exit_code = _MOD.main(
+        [
+            "--proof-script",
+            str(proof_script),
+            "--pkg-path",
+            str(pkg_path),
+            "--clean-vm-tart-name",
+            "omnigent-clean",
+            "--evidence-output",
+            str(evidence_path),
+        ]
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "release-candidate criteria" in captured.err
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["exitCode"] == 1
+    assert evidence["underlyingExitCode"] == 0
+    assert evidence["releaseCriteriaFailures"] == ["status='blocked'"]
+    assert evidence["status"] == "blocked"
+
+
+def test_release_candidate_wrapper_rejects_print_command_with_evidence_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    proof_script = _write_file(tmp_path / "scripts" / "prove.py")
+    pkg_path = _write_file(tmp_path / "artifacts" / "compat.pkg")
+
+    def fail_run(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        raise AssertionError("subprocess.run should not be called")
+
+    monkeypatch.setattr(_MOD.subprocess, "run", fail_run)
+
+    with pytest.raises(SystemExit, match="cannot be combined"):
+        _MOD.main(
+            [
+                "--proof-script",
+                str(proof_script),
+                "--pkg-path",
+                str(pkg_path),
+                "--clean-vm-tart-name",
+                "omnigent-clean",
+                "--print-command",
+                "--evidence-output",
+                str(tmp_path / "release-evidence.json"),
+            ]
+        )

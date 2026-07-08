@@ -4,14 +4,20 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import subprocess
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 PROOF_NAME = "stock-codex-compat-pkg-clean-vm-release"
+EVIDENCE_KIND = "omnigent-stock-codex-compat-release-candidate-evidence"
+EVIDENCE_SCHEMA_VERSION = 1
+PROOF_OUTPUT_PREFIX = "stock_codex_compat_pkg_clean_vm_release_"
 ENV_PKG_PATH = "OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_PKG_PATH"
 ENV_CODEX_PATH = "OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_CODEX_PATH"
 ENV_TART_NAME = "OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_TART_NAME"
@@ -19,6 +25,44 @@ ENV_SSH_TARGET = "OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_TARGET"
 ENV_SSH_USER = "OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_USER"
 ENV_SSH_IDENTITY = "OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_IDENTITY"
 ENV_SSH_PORT = "OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_PORT"
+ENV_EVIDENCE_OUTPUT = "OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_EVIDENCE_OUTPUT"
+
+EVIDENCE_FIELD_MAP = {
+    "status": "status",
+    "missing_prerequisites": "missingPrerequisites",
+    "package_path": "packagePath",
+    "package_sha256": "packageSha256",
+    "stock_codex_path": "stockCodexPath",
+    "stock_codex_version": "stockCodexVersion",
+    "stock_codex_sha256": "stockCodexSha256",
+    "cask_version": "caskVersion",
+    "cask_url": "caskUrl",
+    "cask_sha256": "caskSha256",
+    "channel_policy": "channelPolicy",
+    "tart_name": "tartName",
+    "ssh_target": "sshTarget",
+    "ssh_identity": "sshIdentity",
+    "ssh_user": "sshUser",
+    "ssh_port": "sshPort",
+    "auth_path": "authPath",
+    "auth_source": "authSource",
+    "auth_available": "authAvailable",
+    "step_order": "stepOrder",
+    "step_statuses": "stepStatuses",
+    "step_missing_prerequisites": "stepMissingPrerequisites",
+    "blocked_step": "blockedStep",
+    "tart_started_count": "tartStartedCount",
+    "tart_stopped_count": "tartStoppedCount",
+    "host_stock_codex_uploaded_any": "hostStockCodexUploadedAny",
+    "step_details": "stepDetails",
+}
+EXPECTED_RELEASE_STEPS = (
+    "remote-acquisition",
+    "auth-onboarding",
+    "auth-persistence",
+    "update-agent",
+    "live",
+)
 
 
 def _env_path(name: str) -> Path | None:
@@ -123,6 +167,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Print the expanded underlying proof command without running it.",
     )
+    parser.add_argument(
+        "--evidence-output",
+        type=Path,
+        default=_env_path(ENV_EVIDENCE_OUTPUT),
+        help=(
+            "Optional JSON release evidence path. Defaults to "
+            f"{ENV_EVIDENCE_OUTPUT}. Refuses to overwrite unless "
+            "--force-evidence-output is also passed."
+        ),
+    )
+    parser.add_argument(
+        "--force-evidence-output",
+        action="store_true",
+        help="Overwrite an existing --evidence-output artifact.",
+    )
     return parser.parse_args(argv)
 
 
@@ -179,14 +238,180 @@ def build_command(args: argparse.Namespace) -> tuple[str, ...]:
     return tuple(command)
 
 
+def parse_proof_value(raw_value: str) -> Any:
+    value = raw_value.strip()
+    if value in {"True", "False"}:
+        return value == "True"
+    if value in {"None", "null"}:
+        return None
+    if value and (value[0] in "[{\"" or value in {"true", "false"}):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return raw_value
+    if value.lstrip("-").isdigit():
+        try:
+            return int(value)
+        except ValueError:
+            return raw_value
+    return raw_value
+
+
+def parse_release_evidence(stdout: str) -> dict[str, Any]:
+    evidence_fields: dict[str, Any] = {}
+    for line in stdout.splitlines():
+        if not line.startswith(PROOF_OUTPUT_PREFIX) or "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        evidence_fields[key.removeprefix(PROOF_OUTPUT_PREFIX)] = parse_proof_value(
+            raw_value
+        )
+    return evidence_fields
+
+
+def build_evidence_artifact(
+    *,
+    command: Sequence[str],
+    completed: subprocess.CompletedProcess[str],
+    stdout: str,
+    stderr: str,
+) -> dict[str, Any]:
+    fields = parse_release_evidence(stdout)
+    artifact: dict[str, Any] = {
+        "kind": EVIDENCE_KIND,
+        "schemaVersion": EVIDENCE_SCHEMA_VERSION,
+        "createdAt": datetime.now(UTC).isoformat(),
+        "proof": PROOF_NAME,
+        "command": list(command),
+        "exitCode": completed.returncode,
+        "underlyingExitCode": completed.returncode,
+        "releaseCriteriaFailures": [],
+        "stdoutLineCount": len(stdout.splitlines()),
+        "stderrLineCount": len(stderr.splitlines()),
+        "fields": fields,
+    }
+    for proof_key, artifact_key in EVIDENCE_FIELD_MAP.items():
+        if proof_key in fields:
+            artifact[artifact_key] = fields[proof_key]
+    return artifact
+
+
+def write_evidence_artifact(
+    path: Path,
+    evidence: dict[str, Any],
+    *,
+    force: bool,
+) -> None:
+    output_path = path.expanduser().resolve()
+    if output_path.exists() and not force:
+        raise SystemExit(
+            f"evidence output already exists: {output_path}; pass "
+            "--force-evidence-output to replace it."
+        )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def release_criteria_failures(evidence: dict[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if evidence.get("status") != "replacement-ready":
+        failures.append(f"status={evidence.get('status')!r}")
+
+    step_order = evidence.get("stepOrder")
+    if step_order != list(EXPECTED_RELEASE_STEPS):
+        failures.append(f"stepOrder={step_order!r}")
+
+    step_statuses = evidence.get("stepStatuses")
+    if not isinstance(step_statuses, dict):
+        failures.append("stepStatuses is missing or not an object")
+    else:
+        for step_name in EXPECTED_RELEASE_STEPS:
+            if step_statuses.get(step_name) != "replacement-ready":
+                failures.append(f"stepStatuses[{step_name}]={step_statuses.get(step_name)!r}")
+
+    step_missing = evidence.get("stepMissingPrerequisites")
+    if not isinstance(step_missing, dict):
+        failures.append("stepMissingPrerequisites is missing or not an object")
+    else:
+        blocked_steps = {
+            step_name: missing
+            for step_name, missing in step_missing.items()
+            if missing
+        }
+        if blocked_steps:
+            failures.append(f"stepMissingPrerequisites={blocked_steps!r}")
+
+    if evidence.get("blockedStep") is not None:
+        failures.append(f"blockedStep={evidence.get('blockedStep')!r}")
+    if evidence.get("hostStockCodexUploadedAny") is not False:
+        failures.append(
+            f"hostStockCodexUploadedAny={evidence.get('hostStockCodexUploadedAny')!r}"
+        )
+
+    tart_started = evidence.get("tartStartedCount")
+    tart_stopped = evidence.get("tartStoppedCount")
+    if tart_started != tart_stopped:
+        failures.append(f"tart counts differ: started={tart_started!r} stopped={tart_stopped!r}")
+    if evidence.get("tartName") and tart_started != len(EXPECTED_RELEASE_STEPS):
+        failures.append(f"tartStartedCount={tart_started!r}")
+
+    for required_key in (
+        "packageSha256",
+        "stockCodexSha256",
+        "caskVersion",
+        "caskUrl",
+        "caskSha256",
+        "channelPolicy",
+        "stepDetails",
+    ):
+        if required_key not in evidence:
+            failures.append(f"{required_key} is missing")
+    return failures
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     command = build_command(args)
+    if args.print_command and args.evidence_output is not None:
+        raise SystemExit("--print-command cannot be combined with --evidence-output.")
     if args.print_command:
         print(" ".join(shlex.quote(part) for part in command))
         return 0
-    completed = subprocess.run(command, check=False)
-    return completed.returncode
+    if args.evidence_output is None:
+        completed = subprocess.run(command, check=False)
+        return completed.returncode
+    evidence_output = args.evidence_output.expanduser().resolve()
+    if evidence_output.exists() and not args.force_evidence_output:
+        raise SystemExit(
+            f"evidence output already exists: {evidence_output}; pass "
+            "--force-evidence-output to replace it."
+        )
+    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+    if stdout:
+        sys.stdout.write(stdout)
+    if stderr:
+        sys.stderr.write(stderr)
+    evidence = build_evidence_artifact(
+        command=command,
+        completed=completed,
+        stdout=stdout,
+        stderr=stderr,
+    )
+    failures = [] if completed.returncode != 0 else release_criteria_failures(evidence)
+    wrapper_exit_code = completed.returncode if completed.returncode != 0 else int(bool(failures))
+    evidence["exitCode"] = wrapper_exit_code
+    evidence["releaseCriteriaFailures"] = failures
+    write_evidence_artifact(evidence_output, evidence, force=args.force_evidence_output)
+    if failures:
+        print("release evidence did not satisfy release-candidate criteria:", file=sys.stderr)
+        for failure in failures:
+            print(f"- {failure}", file=sys.stderr)
+    return wrapper_exit_code
 
 
 if __name__ == "__main__":

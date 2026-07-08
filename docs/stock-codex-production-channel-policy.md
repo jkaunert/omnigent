@@ -128,4 +128,9 @@ extensions against one package and one channel selection, fail-fast, so release
 validation does not rely on manually stitching those gates together. Release
 operators should enter that aggregate through
 `scripts/prove_stock_codex_compat_release_candidate.py`, which is the checklist
-gate for stock-Codex compatibility package release candidates.
+gate for stock-Codex compatibility package release candidates. Release review
+should run that wrapper with `--evidence-output` and archive the generated JSON
+next to the `.pkg`; the artifact records package and official-channel SHA-256
+values, aggregate and per-step statuses, Tart start/stop counts, host-stock
+upload status, and live/auth thread IDs without relying on terminal log
+scraping.

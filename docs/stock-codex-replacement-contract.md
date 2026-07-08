@@ -545,7 +545,10 @@ over the remote-acquisition, auth-onboarding, auth-persistence, update-agent,
 and live installed-launcher gates. The package release-candidate gate is the
 wrapper command `scripts/prove_stock_codex_compat_release_candidate.py`, which
 expands to that aggregate and keeps the release checklist from depending on a
-hand-reconstructed long proof invocation.
+hand-reconstructed long proof invocation. When passed `--evidence-output`, the
+wrapper also writes a release evidence JSON artifact with the package/channel
+SHA-256 values, aggregate status, per-step statuses, Tart start/stop counts,
+host-stock-upload result, and live/auth thread details.
 Persistent app-bundle installation, LaunchServices/Dock/Finder default
 behavior, launchd enablement policy, pre-release stock-Codex channel adoption,
 automated browser/device login UX, Keychain-managed credential UX, and broader
@@ -1022,25 +1025,51 @@ uvx --from . python scripts/prove_stock_codex_compat_release_candidate.py \
   --pkg-path /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-proof-artifacts/omnigent-stock-codex-compat-github-latest.pkg \
   --codex-path ~/.local/omnigent/codex-stock/0.142.5/codex \
   --clean-vm-tart-name omnigent-clean-bootstrap-proof \
-  --clean-vm-ssh-identity ~/.ssh/mba_github_ssh_key
+  --clean-vm-ssh-identity ~/.ssh/mba_github_ssh_key \
+  --evidence-output /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-proof-artifacts/omnigent-stock-codex-compat-github-latest.release-evidence.json
 ```
 
 For release review without starting the VM, append `--print-command` to inspect
-the exact underlying aggregate command. Operator defaults can also be supplied
+the exact underlying aggregate command. `--print-command` is intentionally
+incompatible with `--evidence-output` because no proof ran and no release
+evidence should be written. Evidence artifacts are overwrite-protected by
+default; pass `--force-evidence-output` only when intentionally replacing a
+known artifact from the same candidate. Operator defaults can also be supplied
 through `OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_PKG_PATH`,
 `OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_CODEX_PATH`,
 `OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_TART_NAME`,
 `OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_USER`,
 `OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_IDENTITY`, and
-`OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_PORT`.
+`OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_PORT`. The optional evidence path can
+be supplied through `OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_EVIDENCE_OUTPUT`.
+When evidence output is enabled, the wrapper treats the parsed aggregate markers
+as the release decision and exits nonzero if the artifact does not satisfy the
+release-candidate criteria below, even if the underlying proof process exits
+zero. The evidence artifact records `exitCode` as the wrapper decision,
+`underlyingExitCode` as the child proof process exit, and
+`releaseCriteriaFailures` when parsed evidence is not release-ready.
 
 A stock-Codex compatibility package is release-candidate eligible only when
 this wrapper exits zero and the underlying aggregate reports
 `stock_codex_compat_pkg_clean_vm_release_status=replacement-ready`, all five
 step statuses as `replacement-ready`, `blocked_step=None`,
 `host_stock_codex_uploaded_any=False`, and matching Tart started/stopped counts.
-Passing any one underlying clean-VM gate alone is not enough for release
+Release review should archive the wrapper evidence JSON alongside the `.pkg`;
+passing any one underlying clean-VM gate alone is not enough for release
 candidate status.
+
+Current local release-candidate evidence:
+`/Users/joshuakaunert/Developer/HarnessEngineering/omnigent-proof-artifacts/omnigent-stock-codex-compat-github-latest.release-evidence.json`
+recorded `status=replacement-ready`, package SHA-256
+`cfff83af6fd1dfc59ea1ed4928befe53929462eabd096e5c54d6171379be7ccc`,
+stock Codex reference `codex-cli 0.142.5`, official channel version `0.143.0`
+with archive SHA-256
+`7df2384f037519dff7dbf4252e60913a5c1c7fdb66c1467c9125b2b2d3594a86`,
+all five step statuses as `replacement-ready`, `blockedStep=None`,
+`tartStartedCount=5`, `tartStoppedCount=5`,
+`hostStockCodexUploadedAny=False`, auth-persistence thread
+`019f43f5-278f-7ce0-920e-5dafc07f0ea7`, and live thread
+`019f43f8-9fa3-7f11-a43f-67918fda135c`.
 
 Underlying clean-VM package release aggregate:
 
