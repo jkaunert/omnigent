@@ -1855,6 +1855,40 @@ class StockCodexCompatPkgCleanVmProof:
 
 
 @dataclass(frozen=True)
+class StockCodexCompatPkgCleanVmReleaseProof:
+    """Composite release proof for the signed-pkg clean-VM gates."""
+
+    status: str
+    missing_prerequisites: tuple[str, ...]
+    tool_paths: dict[str, str | None]
+    stock_codex_path: Path | None
+    stock_codex_version: str | None
+    stock_codex_sha256: str | None
+    package_path: Path | None
+    package_sha256: str | None
+    tart_name: str | None
+    ssh_target: str | None
+    ssh_identity: Path | None
+    ssh_user: str | None
+    ssh_port: int | None
+    auth_path: Path | None
+    auth_source: str | None
+    auth_available: bool
+    cask_version: str | None
+    cask_url: str | None
+    cask_sha256: str | None
+    channel_policy: str | None
+    step_order: tuple[str, ...]
+    step_statuses: dict[str, str]
+    blocked_step: str | None
+    step_missing_prerequisites: dict[str, tuple[str, ...]]
+    proofs: tuple[StockCodexCompatPkgCleanVmProof, ...]
+    tart_started_count: int
+    tart_stopped_count: int
+    host_stock_codex_uploaded_any: bool | None
+
+
+@dataclass(frozen=True)
 class StockCodexCompatPkgCleanVmBootstrapProof:
     """Proof result for preparing a raw Tart VM clone for clean-VM package gates."""
 
@@ -16125,6 +16159,303 @@ def run_stock_codex_compat_pkg_clean_vm_update_agent_proof(
     )
 
 
+CLEAN_VM_RELEASE_STEP_ORDER = (
+    "remote-acquisition",
+    "auth-onboarding",
+    "auth-persistence",
+    "update-agent",
+    "live",
+)
+
+
+def _blocked_stock_codex_compat_pkg_clean_vm_release_proof(
+    *,
+    tool_paths: dict[str, str | None],
+    missing_prerequisites: tuple[str, ...],
+    stock_codex_path: Path | None,
+    stock_codex_version: str | None,
+    stock_codex_sha256: str | None,
+    package_path: Path | None,
+    package_sha256: str | None,
+    tart_name: str | None,
+    ssh_target: str | None,
+    ssh_identity: Path | None,
+    ssh_user: str | None,
+    ssh_port: int | None,
+    auth_path: Path | None = None,
+    auth_source: str | None = None,
+    auth_available: bool = False,
+    remote_channel: _OfficialStockCodexRemoteChannel | None = None,
+    proofs: tuple[StockCodexCompatPkgCleanVmProof, ...] = (),
+    blocked_step: str | None = None,
+) -> StockCodexCompatPkgCleanVmReleaseProof:
+    """Return a blocked composite clean-VM release proof."""
+    proof_steps = tuple(zip(CLEAN_VM_RELEASE_STEP_ORDER, proofs, strict=False))
+    step_statuses = {step_name: proof.status for step_name, proof in proof_steps}
+    step_missing = {
+        step_name: proof.missing_prerequisites
+        for step_name, proof in proof_steps
+        if proof.missing_prerequisites
+    }
+    return StockCodexCompatPkgCleanVmReleaseProof(
+        status="blocked",
+        missing_prerequisites=missing_prerequisites,
+        tool_paths=tool_paths,
+        stock_codex_path=stock_codex_path,
+        stock_codex_version=stock_codex_version,
+        stock_codex_sha256=stock_codex_sha256,
+        package_path=package_path,
+        package_sha256=package_sha256,
+        tart_name=tart_name,
+        ssh_target=ssh_target,
+        ssh_identity=ssh_identity,
+        ssh_user=ssh_user,
+        ssh_port=ssh_port,
+        auth_path=auth_path,
+        auth_source=auth_source,
+        auth_available=auth_available,
+        cask_version=remote_channel.cask_version if remote_channel else None,
+        cask_url=remote_channel.cask_url if remote_channel else None,
+        cask_sha256=remote_channel.cask_sha256 if remote_channel else None,
+        channel_policy=remote_channel.policy_name if remote_channel else None,
+        step_order=CLEAN_VM_RELEASE_STEP_ORDER,
+        step_statuses=step_statuses,
+        blocked_step=blocked_step,
+        step_missing_prerequisites=step_missing,
+        proofs=proofs,
+        tart_started_count=sum(1 for proof in proofs if proof.tart_started),
+        tart_stopped_count=sum(1 for proof in proofs if proof.tart_stopped),
+        host_stock_codex_uploaded_any=(
+            any(proof.host_stock_codex_uploaded is True for proof in proofs)
+            if proofs
+            else None
+        ),
+    )
+
+
+def run_stock_codex_compat_pkg_clean_vm_release_proof(
+    stock_codex_path: Path,
+    *,
+    package_path: Path | None,
+    clean_vm_ssh_target: str | None,
+    clean_vm_tart_name: str | None,
+    clean_vm_ssh_identity: Path | None,
+    clean_vm_ssh_user: str | None,
+    clean_vm_ssh_port: int,
+    clean_vm_start_tart: bool,
+) -> StockCodexCompatPkgCleanVmReleaseProof:
+    """Run the release-scoped clean-VM package proof aggregate."""
+    stock_codex_path = stock_codex_path.expanduser().resolve()
+    assert_stock_codex_path(stock_codex_path, allow_fork_codex=False)
+    stock_codex_version = codex_version(stock_codex_path)
+    stock_codex_sha256 = sha256_file(stock_codex_path)
+    tool_paths = {
+        "ssh": shutil.which("ssh"),
+        "scp": shutil.which("scp"),
+        "tart": shutil.which("tart"),
+    }
+    resolved_package_path = package_path.expanduser().resolve() if package_path else None
+    package_sha256: str | None = None
+    missing: list[str] = []
+    if resolved_package_path is None:
+        missing.append(
+            "stock-codex-compat-pkg-clean-vm-release requires --pkg-path from "
+            "stock-codex-compat-pkg-signed-notarized"
+        )
+    elif resolved_package_path.is_file():
+        package_sha256 = sha256_file(resolved_package_path)
+    else:
+        missing.append(f"missing prebuilt compatibility pkg: {resolved_package_path}")
+    resolved_identity = (
+        clean_vm_ssh_identity.expanduser().resolve()
+        if clean_vm_ssh_identity is not None
+        else None
+    )
+    if resolved_identity is not None and not resolved_identity.is_file():
+        missing.append(f"missing clean VM SSH identity: {resolved_identity}")
+    auth_path, auth_source = _stock_replacement_auth_source()
+    auth_path = auth_path.expanduser().resolve()
+    auth_available = codex_native._codex_auth_json_has_available_credential(auth_path)
+    if not auth_available:
+        missing.append(
+            "current real Codex auth source is not available; clean VM release "
+            f"gate requires live/auth-persistence auth: {auth_path}"
+        )
+    remote_channel: _OfficialStockCodexRemoteChannel | None = None
+    if not missing:
+        remote_channel = _official_stock_codex_remote_channel()
+    if missing:
+        return _blocked_stock_codex_compat_pkg_clean_vm_release_proof(
+            tool_paths=tool_paths,
+            missing_prerequisites=tuple(missing),
+            stock_codex_path=stock_codex_path,
+            stock_codex_version=stock_codex_version,
+            stock_codex_sha256=stock_codex_sha256,
+            package_path=resolved_package_path,
+            package_sha256=package_sha256,
+            tart_name=clean_vm_tart_name,
+            ssh_target=clean_vm_ssh_target,
+            ssh_identity=resolved_identity,
+            ssh_user=clean_vm_ssh_user,
+            ssh_port=clean_vm_ssh_port,
+            auth_path=auth_path,
+            auth_source=auth_source,
+            auth_available=auth_available,
+        )
+    assert resolved_package_path is not None
+    assert package_sha256 is not None
+    assert remote_channel is not None
+
+    proofs: list[StockCodexCompatPkgCleanVmProof] = []
+
+    def run_step(
+        step_name: str,
+        **mode_kwargs: object,
+    ) -> StockCodexCompatPkgCleanVmReleaseProof | None:
+        step_proof = run_stock_codex_compat_pkg_clean_vm_proof(
+            stock_codex_path,
+            package_path=resolved_package_path,
+            clean_vm_ssh_target=clean_vm_ssh_target,
+            clean_vm_tart_name=clean_vm_tart_name,
+            clean_vm_ssh_identity=resolved_identity,
+            clean_vm_ssh_user=clean_vm_ssh_user,
+            clean_vm_ssh_port=clean_vm_ssh_port,
+            clean_vm_start_tart=clean_vm_start_tart,
+            remote_channel=remote_channel,
+            **mode_kwargs,
+        )
+        proofs.append(step_proof)
+        if step_proof.status != "replacement-ready":
+            return _blocked_stock_codex_compat_pkg_clean_vm_release_proof(
+                tool_paths=tool_paths,
+                missing_prerequisites=(
+                    f"clean VM release step failed: {step_name}",
+                    *step_proof.missing_prerequisites,
+                ),
+                stock_codex_path=stock_codex_path,
+                stock_codex_version=stock_codex_version,
+                stock_codex_sha256=stock_codex_sha256,
+                package_path=resolved_package_path,
+                package_sha256=package_sha256,
+                tart_name=clean_vm_tart_name,
+                ssh_target=clean_vm_ssh_target,
+                ssh_identity=resolved_identity,
+                ssh_user=clean_vm_ssh_user,
+                ssh_port=clean_vm_ssh_port,
+                auth_path=auth_path,
+                auth_source=auth_source,
+                auth_available=auth_available,
+                remote_channel=remote_channel,
+                proofs=tuple(proofs),
+                blocked_step=step_name,
+            )
+        if clean_vm_start_tart and not step_proof.tart_started:
+            return _blocked_stock_codex_compat_pkg_clean_vm_release_proof(
+                tool_paths=tool_paths,
+                missing_prerequisites=(
+                    f"clean VM release step did not start Tart VM: {step_name}",
+                ),
+                stock_codex_path=stock_codex_path,
+                stock_codex_version=stock_codex_version,
+                stock_codex_sha256=stock_codex_sha256,
+                package_path=resolved_package_path,
+                package_sha256=package_sha256,
+                tart_name=clean_vm_tart_name,
+                ssh_target=clean_vm_ssh_target,
+                ssh_identity=resolved_identity,
+                ssh_user=clean_vm_ssh_user,
+                ssh_port=clean_vm_ssh_port,
+                auth_path=auth_path,
+                auth_source=auth_source,
+                auth_available=auth_available,
+                remote_channel=remote_channel,
+                proofs=tuple(proofs),
+                blocked_step=step_name,
+            )
+        if step_proof.tart_started and not step_proof.tart_stopped:
+            return _blocked_stock_codex_compat_pkg_clean_vm_release_proof(
+                tool_paths=tool_paths,
+                missing_prerequisites=(
+                    f"clean VM release step did not stop Tart VM: {step_name}",
+                ),
+                stock_codex_path=stock_codex_path,
+                stock_codex_version=stock_codex_version,
+                stock_codex_sha256=stock_codex_sha256,
+                package_path=resolved_package_path,
+                package_sha256=package_sha256,
+                tart_name=clean_vm_tart_name,
+                ssh_target=clean_vm_ssh_target,
+                ssh_identity=resolved_identity,
+                ssh_user=clean_vm_ssh_user,
+                ssh_port=clean_vm_ssh_port,
+                auth_path=auth_path,
+                auth_source=auth_source,
+                auth_available=auth_available,
+                remote_channel=remote_channel,
+                proofs=tuple(proofs),
+                blocked_step=step_name,
+            )
+        return None
+
+    for step_name, mode_kwargs in (
+        ("remote-acquisition", {}),
+        ("auth-onboarding", {"auth_onboarding": True}),
+        (
+            "auth-persistence",
+            {
+                "auth_persistence": True,
+                "auth_persistence_auth_path": auth_path,
+                "auth_persistence_auth_source": auth_source,
+            },
+        ),
+        ("update-agent", {"update_agent": True}),
+        ("live", {"live_auth_path": auth_path, "live_auth_source": auth_source}),
+    ):
+        blocked = run_step(step_name, **mode_kwargs)
+        if blocked is not None:
+            return blocked
+
+    step_statuses = dict(
+        zip(
+            CLEAN_VM_RELEASE_STEP_ORDER,
+            (proof.status for proof in proofs),
+            strict=True,
+        )
+    )
+    return StockCodexCompatPkgCleanVmReleaseProof(
+        status="replacement-ready",
+        missing_prerequisites=(),
+        tool_paths=tool_paths,
+        stock_codex_path=stock_codex_path,
+        stock_codex_version=stock_codex_version,
+        stock_codex_sha256=stock_codex_sha256,
+        package_path=resolved_package_path,
+        package_sha256=package_sha256,
+        tart_name=clean_vm_tart_name,
+        ssh_target=clean_vm_ssh_target,
+        ssh_identity=resolved_identity,
+        ssh_user=clean_vm_ssh_user,
+        ssh_port=clean_vm_ssh_port,
+        auth_path=auth_path,
+        auth_source=auth_source,
+        auth_available=auth_available,
+        cask_version=remote_channel.cask_version,
+        cask_url=remote_channel.cask_url,
+        cask_sha256=remote_channel.cask_sha256,
+        channel_policy=remote_channel.policy_name,
+        step_order=CLEAN_VM_RELEASE_STEP_ORDER,
+        step_statuses=step_statuses,
+        blocked_step=None,
+        step_missing_prerequisites={},
+        proofs=tuple(proofs),
+        tart_started_count=sum(1 for proof in proofs if proof.tart_started),
+        tart_stopped_count=sum(1 for proof in proofs if proof.tart_stopped),
+        host_stock_codex_uploaded_any=any(
+            proof.host_stock_codex_uploaded is True for proof in proofs
+        ),
+    )
+
+
 def _expand_stock_codex_compat_pkg(package_path: Path, expand_dir: Path) -> Path:
     """Expand a flat compatibility pkg and return the expanded payload root."""
     pkgutil = shutil.which("pkgutil")
@@ -21087,6 +21418,133 @@ def print_stock_codex_compat_pkg_clean_vm_live_proof(
     )
 
 
+def print_stock_codex_compat_pkg_clean_vm_release_proof(
+    proof: StockCodexCompatPkgCleanVmReleaseProof,
+) -> None:
+    """Emit operator evidence for the composite clean-VM release proof."""
+    print("stock_codex_compat_pkg_clean_vm_release_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_clean_vm_release_surface="
+        "signed-pkg-clean-vm-release-aggregate"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_release_status={proof.status}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_release_missing_prerequisites="
+        f"{json.dumps(list(proof.missing_prerequisites), sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_release_tool_paths="
+        f"{json.dumps(proof.tool_paths, sort_keys=True)}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_release_stock_codex_path={proof.stock_codex_path}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_release_stock_codex_version="
+        f"{proof.stock_codex_version}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_release_stock_codex_sha256="
+        f"{proof.stock_codex_sha256}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_release_package_path={proof.package_path}")
+    print(f"stock_codex_compat_pkg_clean_vm_release_package_sha256={proof.package_sha256}")
+    print(f"stock_codex_compat_pkg_clean_vm_release_cask_version={proof.cask_version}")
+    print(f"stock_codex_compat_pkg_clean_vm_release_cask_url={proof.cask_url}")
+    print(f"stock_codex_compat_pkg_clean_vm_release_cask_sha256={proof.cask_sha256}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_release_channel_policy="
+        f"{proof.channel_policy}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_release_tart_name={proof.tart_name}")
+    print(f"stock_codex_compat_pkg_clean_vm_release_ssh_target={proof.ssh_target}")
+    print(f"stock_codex_compat_pkg_clean_vm_release_ssh_identity={proof.ssh_identity}")
+    print(f"stock_codex_compat_pkg_clean_vm_release_ssh_user={proof.ssh_user}")
+    print(f"stock_codex_compat_pkg_clean_vm_release_ssh_port={proof.ssh_port}")
+    print(f"stock_codex_compat_pkg_clean_vm_release_auth_path={proof.auth_path}")
+    print(f"stock_codex_compat_pkg_clean_vm_release_auth_source={proof.auth_source}")
+    print(f"stock_codex_compat_pkg_clean_vm_release_auth_available={proof.auth_available}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_release_step_order="
+        f"{json.dumps(list(proof.step_order))}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_release_step_statuses="
+        f"{json.dumps(proof.step_statuses, sort_keys=True)}"
+    )
+    step_missing_json = json.dumps(
+        {k: list(v) for k, v in proof.step_missing_prerequisites.items()},
+        sort_keys=True,
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_release_step_missing_prerequisites="
+        f"{step_missing_json}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_release_blocked_step={proof.blocked_step}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_release_tart_started_count="
+        f"{proof.tart_started_count}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_release_tart_stopped_count="
+        f"{proof.tart_stopped_count}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_release_host_stock_codex_uploaded_any="
+        f"{proof.host_stock_codex_uploaded_any}"
+    )
+    step_details: dict[str, dict[str, object | None]] = {}
+    for step_name, step_proof in zip(proof.step_order, proof.proofs, strict=False):
+        step_details[step_name] = {
+            "status": step_proof.status,
+            "remoteStatus": step_proof.remote_status,
+            "tartStarted": step_proof.tart_started,
+            "tartStopped": step_proof.tart_stopped,
+            "hostStockCodexUploaded": step_proof.host_stock_codex_uploaded,
+            "authUploaded": (
+                step_proof.live_auth_uploaded
+                if step_name == "live"
+                else step_proof.auth_persistence_auth_uploaded
+                if step_name == "auth-persistence"
+                else step_proof.auth_onboarding_auth_uploaded
+                if step_name == "auth-onboarding"
+                else None
+            ),
+            "threadId": (
+                step_proof.live_thread_id
+                if step_name == "live"
+                else step_proof.auth_persistence_thread_id
+                if step_name == "auth-persistence"
+                else None
+            ),
+            "scheduledAction": (
+                step_proof.update_agent_scheduled_action
+                if step_name == "update-agent"
+                else None
+            ),
+        }
+    print(
+        "stock_codex_compat_pkg_clean_vm_release_step_details="
+        f"{json.dumps(step_details, sort_keys=True)}"
+    )
+    if proof.status == "blocked":
+        print(
+            "ASSERTION: the composite clean-VM release gate is blocked before "
+            "all package-consuming gates passed; inspect blocked_step and "
+            "step_missing_prerequisites for the failing boundary"
+        )
+        return
+    print(
+        "ASSERTION: one signed/notarized compatibility package passed the "
+        "remote-acquisition, auth-onboarding, auth-persistence, update-agent, "
+        "and live installed-launcher clean-VM gates"
+    )
+    print(
+        "ASSERTION: the aggregate used the official OpenAI GitHub release "
+        "channel, did not upload the host stock Codex binary in any step, "
+        "and each Tart-started step stopped the disposable VM before the next "
+        "step began"
+    )
+
+
 def print_stock_codex_compat_pkg_clean_provision_proof(
     proof: StockCodexCompatPkgCleanProvisionProof,
 ) -> None:
@@ -25940,6 +26398,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-pkg-clean-vm-auth-persistence",
             "stock-codex-compat-pkg-clean-vm-update-agent",
             "stock-codex-compat-pkg-clean-vm-live",
+            "stock-codex-compat-pkg-clean-vm-release",
             "stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
             "stock-codex-compat-wrapper-xcodebuild-bridge-test-adapter",
             "stock-codex-compat-wrapper-relay-tool",
@@ -26148,6 +26607,11 @@ def parse_args() -> argparse.Namespace:
             "running a real model turn through the VM-installed compatibility "
             "launcher, and verifying deterministic route evidence before the "
             "live sentinel. "
+            "'stock-codex-compat-pkg-clean-vm-release' composes the "
+            "remote-acquisition, auth-onboarding, auth-persistence, "
+            "update-agent, and live installed-launcher clean-VM gates against "
+            "one signed/notarized package and fails fast on the first boundary "
+            "that is not replacement-ready. "
             "'stock-codex-compat-wrapper-xcodebuild-bridge-adapter' proves "
             "that XcodeBuildMCP simulator build/run can execute through the "
             "same wrapper-owned file bridge while stock Codex stays in "
@@ -27253,6 +27717,44 @@ def main() -> int:
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_stock_codex_compat_pkg_clean_vm_live_proof(
             run_stock_codex_compat_pkg_clean_vm_live_proof(
+                codex_path,
+                package_path=args.pkg_path,
+                clean_vm_ssh_target=args.clean_vm_ssh_target,
+                clean_vm_tart_name=args.clean_vm_tart_name,
+                clean_vm_ssh_identity=args.clean_vm_ssh_identity,
+                clean_vm_ssh_user=args.clean_vm_ssh_user,
+                clean_vm_ssh_port=args.clean_vm_ssh_port,
+                clean_vm_start_tart=args.clean_vm_start_tart,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-clean-vm-release":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-release does not use "
+                "--apple-bundle; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-release cannot allow a "
+                "Codex-fork binary."
+            )
+        if args.pkg_output_path is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-release consumes --pkg-path; "
+                "produce persistent packages with "
+                "stock-codex-compat-pkg-signed-notarized."
+            )
+        if args.pkg_path is None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-release requires --pkg-path "
+                "from stock-codex-compat-pkg-signed-notarized."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_pkg_clean_vm_release_proof(
+            run_stock_codex_compat_pkg_clean_vm_release_proof(
                 codex_path,
                 package_path=args.pkg_path,
                 clean_vm_ssh_target=args.clean_vm_ssh_target,

@@ -4725,6 +4725,530 @@ def test_stock_codex_compat_pkg_clean_vm_start_tart_preflights_cleanup(
     ]
 
 
+def test_stock_codex_compat_pkg_clean_vm_release_runs_steps_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stock_codex = _write_codex_binary(
+        tmp_path / "stock" / "codex",
+        version="codex-cli 0.142.5",
+    )
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+    auth_path = tmp_path / "auth" / "auth.json"
+    auth_path.parent.mkdir()
+    auth_path.write_text('{"tokens": {"refresh_token": "redacted-fixture"}}\n')
+    identity = tmp_path / "id_ed25519"
+    identity.write_text("identity\n")
+    remote_channel = _MOD._OfficialStockCodexRemoteChannel(
+        policy_name="official-openai-github-release",
+        cask_token="codex",
+        cask_tap="github-releases/latest",
+        cask_homepage="https://github.com/openai/codex",
+        cask_version="0.143.0",
+        cask_url=(
+            "https://github.com/openai/codex/releases/download/"
+            "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+        ),
+        cask_sha256="c" * 64,
+        selected_version="codex-cli 0.143.0",
+        archive_executable="codex-aarch64-apple-darwin",
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        if path is not None:
+            return None
+        return {
+            "ssh": "/usr/bin/ssh",
+            "scp": "/usr/bin/scp",
+            "tart": "/usr/local/bin/tart",
+        }.get(name)
+
+    def fake_clean_vm_proof(
+        stock_codex_path: Path,
+        *,
+        package_path: Path | None,
+        clean_vm_ssh_target: str | None,
+        clean_vm_tart_name: str | None,
+        clean_vm_ssh_identity: Path | None,
+        clean_vm_ssh_user: str | None,
+        clean_vm_ssh_port: int,
+        clean_vm_start_tart: bool,
+        remote_channel: object | None = None,
+        live_auth_path: Path | None = None,
+        live_auth_source: str | None = None,
+        update_agent: bool = False,
+        auth_onboarding: bool = False,
+        auth_persistence: bool = False,
+        auth_persistence_auth_path: Path | None = None,
+        auth_persistence_auth_source: str | None = None,
+    ) -> object:
+        if auth_onboarding:
+            step_name = "auth-onboarding"
+        elif auth_persistence:
+            step_name = "auth-persistence"
+        elif update_agent:
+            step_name = "update-agent"
+        elif live_auth_path is not None:
+            step_name = "live"
+        else:
+            step_name = "remote-acquisition"
+        calls.append(
+            {
+                "step": step_name,
+                "package_path": package_path,
+                "clean_vm_start_tart": clean_vm_start_tart,
+                "remote_channel": remote_channel,
+                "live_auth_path": live_auth_path,
+                "live_auth_source": live_auth_source,
+                "auth_persistence_auth_path": auth_persistence_auth_path,
+                "auth_persistence_auth_source": auth_persistence_auth_source,
+            }
+        )
+        return _MOD.StockCodexCompatPkgCleanVmProof(
+            status="replacement-ready",
+            missing_prerequisites=(),
+            tool_paths={"ssh": "/usr/bin/ssh", "scp": "/usr/bin/scp"},
+            stock_codex_path=stock_codex_path,
+            stock_codex_version="codex-cli 0.142.5",
+            stock_codex_sha256=_MOD.sha256_file(stock_codex_path),
+            package_path=package_path,
+            package_sha256=_MOD.sha256_file(package_path),
+            tart_name=clean_vm_tart_name,
+            ssh_target=clean_vm_ssh_target,
+            ssh_identity=clean_vm_ssh_identity,
+            ssh_user=clean_vm_ssh_user,
+            ssh_port=clean_vm_ssh_port,
+            tart_ip="192.0.2.10",
+            remote_work_dir=f"/tmp/{step_name}",
+            remote_status="replacement-ready",
+            remote_output_preview=step_name,
+            tart_started=clean_vm_start_tart,
+            tart_stopped=clean_vm_start_tart,
+            proof_variant=f"official-remote-channel-{step_name}",
+            cask_version=remote_channel.cask_version,
+            cask_url=remote_channel.cask_url,
+            cask_sha256=remote_channel.cask_sha256,
+            channel_policy=remote_channel.policy_name,
+            host_stock_codex_uploaded=False,
+            live_auth_path=live_auth_path,
+            live_auth_source=live_auth_source,
+            live_auth_uploaded=live_auth_path is not None,
+            live_thread_id="019f-release-live" if step_name == "live" else None,
+            update_agent_requested=update_agent,
+            update_agent_scheduled_action=(
+                "up-to-date" if step_name == "update-agent" else None
+            ),
+            auth_onboarding_requested=auth_onboarding,
+            auth_onboarding_auth_uploaded=False if auth_onboarding else None,
+            auth_persistence_requested=auth_persistence,
+            auth_persistence_auth_source=auth_persistence_auth_source,
+            auth_persistence_auth_uploaded=auth_persistence,
+            auth_persistence_thread_id=(
+                "019f-release-auth-persistence"
+                if step_name == "auth-persistence"
+                else None
+            ),
+    )
+
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+    monkeypatch.setattr(_MOD, "_official_stock_codex_remote_channel", lambda: remote_channel)
+    monkeypatch.setattr(
+        _MOD,
+        "_stock_replacement_auth_source",
+        lambda: (auth_path, "stock-default-home"),
+    )
+    monkeypatch.setattr(
+        _MOD.codex_native,
+        "_codex_auth_json_has_available_credential",
+        lambda _path: True,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_clean_vm_proof",
+        fake_clean_vm_proof,
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_clean_vm_release_proof(
+        stock_codex,
+        package_path=package_path,
+        clean_vm_ssh_target=None,
+        clean_vm_tart_name="omnigent-clean",
+        clean_vm_ssh_identity=identity,
+        clean_vm_ssh_user="admin",
+        clean_vm_ssh_port=22,
+        clean_vm_start_tart=True,
+    )
+
+    assert proof.status == "replacement-ready"
+    assert proof.blocked_step is None
+    assert proof.step_order == _MOD.CLEAN_VM_RELEASE_STEP_ORDER
+    assert proof.step_statuses == {
+        "remote-acquisition": "replacement-ready",
+        "auth-onboarding": "replacement-ready",
+        "auth-persistence": "replacement-ready",
+        "update-agent": "replacement-ready",
+        "live": "replacement-ready",
+    }
+    assert proof.package_path == package_path.resolve()
+    assert proof.package_sha256 == _MOD.sha256_file(package_path)
+    assert proof.auth_path == auth_path.resolve()
+    assert proof.auth_source == "stock-default-home"
+    assert proof.cask_version == "0.143.0"
+    assert proof.tart_started_count == 5
+    assert proof.tart_stopped_count == 5
+    assert proof.host_stock_codex_uploaded_any is False
+    assert [call["step"] for call in calls] == list(_MOD.CLEAN_VM_RELEASE_STEP_ORDER)
+    assert all(call["package_path"] == package_path.resolve() for call in calls)
+    assert all(call["clean_vm_start_tart"] is True for call in calls)
+    assert all(call["remote_channel"] is remote_channel for call in calls)
+    assert calls[2]["auth_persistence_auth_path"] == auth_path.resolve()
+    assert calls[2]["auth_persistence_auth_source"] == "stock-default-home"
+    assert calls[4]["live_auth_path"] == auth_path.resolve()
+    assert calls[4]["live_auth_source"] == "stock-default-home"
+
+    _MOD.print_stock_codex_compat_pkg_clean_vm_release_proof(proof)
+    output = capsys.readouterr().out
+    assert "stock_codex_compat_pkg_clean_vm_release_status=replacement-ready" in output
+    assert '"live": "replacement-ready"' in output
+    assert "stock_codex_compat_pkg_clean_vm_release_tart_stopped_count=5" in output
+
+
+def test_stock_codex_compat_pkg_clean_vm_release_fails_fast_on_blocked_step(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = _write_codex_binary(tmp_path / "stock" / "codex")
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+    auth_path = tmp_path / "auth" / "auth.json"
+    auth_path.parent.mkdir()
+    auth_path.write_text('{"tokens": {"refresh_token": "redacted-fixture"}}\n')
+    remote_channel = _MOD._OfficialStockCodexRemoteChannel(
+        policy_name="official-openai-github-release",
+        cask_token="codex",
+        cask_tap="github-releases/latest",
+        cask_homepage="https://github.com/openai/codex",
+        cask_version="0.143.0",
+        cask_url=(
+            "https://github.com/openai/codex/releases/download/"
+            "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+        ),
+        cask_sha256="c" * 64,
+        selected_version="codex-cli 0.143.0",
+        archive_executable="codex-aarch64-apple-darwin",
+    )
+    calls: list[str] = []
+
+    def fake_clean_vm_proof(
+        stock_codex_path: Path,
+        *,
+        package_path: Path | None,
+        clean_vm_ssh_target: str | None,
+        clean_vm_tart_name: str | None,
+        clean_vm_ssh_identity: Path | None,
+        clean_vm_ssh_user: str | None,
+        clean_vm_ssh_port: int,
+        clean_vm_start_tart: bool,
+        remote_channel: object | None = None,
+        auth_onboarding: bool = False,
+        **_kwargs: object,
+    ) -> object:
+        del remote_channel
+        step_name = "auth-onboarding" if auth_onboarding else "remote-acquisition"
+        calls.append(step_name)
+        status = "blocked" if auth_onboarding else "replacement-ready"
+        missing = (
+            ("clean VM auth-onboarding proof omitted parseable evidence",)
+            if auth_onboarding
+            else ()
+        )
+        return _MOD.StockCodexCompatPkgCleanVmProof(
+            status=status,
+            missing_prerequisites=missing,
+            tool_paths={"ssh": "/usr/bin/ssh", "scp": "/usr/bin/scp"},
+            stock_codex_path=stock_codex_path,
+            stock_codex_version="codex-cli 0.142.2",
+            stock_codex_sha256=_MOD.sha256_file(stock_codex_path),
+            package_path=package_path,
+            package_sha256=_MOD.sha256_file(package_path),
+            tart_name=clean_vm_tart_name,
+            ssh_target=clean_vm_ssh_target,
+            ssh_identity=clean_vm_ssh_identity,
+            ssh_user=clean_vm_ssh_user,
+            ssh_port=clean_vm_ssh_port,
+            tart_ip="192.0.2.10",
+            remote_work_dir=f"/tmp/{step_name}",
+            remote_status=status,
+            remote_output_preview=step_name,
+            tart_started=clean_vm_start_tart,
+            tart_stopped=clean_vm_start_tart,
+            proof_variant=f"official-remote-channel-{step_name}",
+            host_stock_codex_uploaded=False,
+        )
+
+    monkeypatch.setattr(
+        _MOD.shutil,
+        "which",
+        lambda name, path=None: f"/usr/bin/{name}" if path is None else None,
+    )
+    monkeypatch.setattr(_MOD, "_official_stock_codex_remote_channel", lambda: remote_channel)
+    monkeypatch.setattr(
+        _MOD,
+        "_stock_replacement_auth_source",
+        lambda: (auth_path, "stock-default-home"),
+    )
+    monkeypatch.setattr(
+        _MOD.codex_native,
+        "_codex_auth_json_has_available_credential",
+        lambda _path: True,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_clean_vm_proof",
+        fake_clean_vm_proof,
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_clean_vm_release_proof(
+        stock_codex,
+        package_path=package_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_tart_name=None,
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_user=None,
+        clean_vm_ssh_port=22,
+        clean_vm_start_tart=False,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.blocked_step == "auth-onboarding"
+    assert calls == ["remote-acquisition", "auth-onboarding"]
+    assert "auth-persistence" not in proof.step_statuses
+    assert proof.step_statuses == {
+        "remote-acquisition": "replacement-ready",
+        "auth-onboarding": "blocked",
+    }
+    assert "clean VM release step failed: auth-onboarding" in proof.missing_prerequisites
+    assert proof.step_missing_prerequisites == {
+        "auth-onboarding": (
+            "clean VM auth-onboarding proof omitted parseable evidence",
+        )
+    }
+
+
+def test_stock_codex_compat_pkg_clean_vm_release_blocks_if_tart_step_does_not_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = _write_codex_binary(tmp_path / "stock" / "codex")
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+    auth_path = tmp_path / "auth" / "auth.json"
+    auth_path.parent.mkdir()
+    auth_path.write_text('{"tokens": {"refresh_token": "redacted-fixture"}}\n')
+    remote_channel = _MOD._OfficialStockCodexRemoteChannel(
+        policy_name="official-openai-github-release",
+        cask_token="codex",
+        cask_tap="github-releases/latest",
+        cask_homepage="https://github.com/openai/codex",
+        cask_version="0.143.0",
+        cask_url=(
+            "https://github.com/openai/codex/releases/download/"
+            "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+        ),
+        cask_sha256="c" * 64,
+        selected_version="codex-cli 0.143.0",
+        archive_executable="codex-aarch64-apple-darwin",
+    )
+    calls = 0
+
+    def fake_clean_vm_proof(
+        stock_codex_path: Path,
+        *,
+        package_path: Path | None,
+        clean_vm_tart_name: str | None,
+        clean_vm_ssh_port: int,
+        clean_vm_start_tart: bool,
+        **_kwargs: object,
+    ) -> object:
+        nonlocal calls
+        calls += 1
+        return _MOD.StockCodexCompatPkgCleanVmProof(
+            status="replacement-ready",
+            missing_prerequisites=(),
+            tool_paths={"ssh": "/usr/bin/ssh", "scp": "/usr/bin/scp"},
+            stock_codex_path=stock_codex_path,
+            stock_codex_version="codex-cli 0.142.2",
+            stock_codex_sha256=_MOD.sha256_file(stock_codex_path),
+            package_path=package_path,
+            package_sha256=_MOD.sha256_file(package_path),
+            tart_name=clean_vm_tart_name,
+            ssh_target=None,
+            ssh_identity=None,
+            ssh_user="admin",
+            ssh_port=clean_vm_ssh_port,
+            tart_ip="192.0.2.10",
+            remote_work_dir="/tmp/remote-acquisition",
+            remote_status="replacement-ready",
+            remote_output_preview="remote-acquisition",
+            tart_started=clean_vm_start_tart,
+            tart_stopped=False,
+            proof_variant="official-remote-channel-acquisition",
+            host_stock_codex_uploaded=False,
+        )
+
+    monkeypatch.setattr(
+        _MOD.shutil,
+        "which",
+        lambda name, path=None: f"/usr/bin/{name}" if path is None else None,
+    )
+    monkeypatch.setattr(_MOD, "_official_stock_codex_remote_channel", lambda: remote_channel)
+    monkeypatch.setattr(
+        _MOD,
+        "_stock_replacement_auth_source",
+        lambda: (auth_path, "stock-default-home"),
+    )
+    monkeypatch.setattr(
+        _MOD.codex_native,
+        "_codex_auth_json_has_available_credential",
+        lambda _path: True,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_clean_vm_proof",
+        fake_clean_vm_proof,
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_clean_vm_release_proof(
+        stock_codex,
+        package_path=package_path,
+        clean_vm_ssh_target=None,
+        clean_vm_tart_name="omnigent-clean",
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_user="admin",
+        clean_vm_ssh_port=22,
+        clean_vm_start_tart=True,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.blocked_step == "remote-acquisition"
+    assert calls == 1
+    assert proof.tart_started_count == 1
+    assert proof.tart_stopped_count == 0
+    assert "clean VM release step did not stop Tart VM: remote-acquisition" in (
+        proof.missing_prerequisites
+    )
+
+
+def test_stock_codex_compat_pkg_clean_vm_release_blocks_if_tart_step_does_not_start(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = _write_codex_binary(tmp_path / "stock" / "codex")
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+    auth_path = tmp_path / "auth" / "auth.json"
+    auth_path.parent.mkdir()
+    auth_path.write_text('{"tokens": {"refresh_token": "redacted-fixture"}}\n')
+    remote_channel = _MOD._OfficialStockCodexRemoteChannel(
+        policy_name="official-openai-github-release",
+        cask_token="codex",
+        cask_tap="github-releases/latest",
+        cask_homepage="https://github.com/openai/codex",
+        cask_version="0.143.0",
+        cask_url=(
+            "https://github.com/openai/codex/releases/download/"
+            "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+        ),
+        cask_sha256="c" * 64,
+        selected_version="codex-cli 0.143.0",
+        archive_executable="codex-aarch64-apple-darwin",
+    )
+    calls = 0
+
+    def fake_clean_vm_proof(
+        stock_codex_path: Path,
+        *,
+        package_path: Path | None,
+        clean_vm_tart_name: str | None,
+        clean_vm_ssh_port: int,
+        **_kwargs: object,
+    ) -> object:
+        nonlocal calls
+        calls += 1
+        return _MOD.StockCodexCompatPkgCleanVmProof(
+            status="replacement-ready",
+            missing_prerequisites=(),
+            tool_paths={"ssh": "/usr/bin/ssh", "scp": "/usr/bin/scp"},
+            stock_codex_path=stock_codex_path,
+            stock_codex_version="codex-cli 0.142.2",
+            stock_codex_sha256=_MOD.sha256_file(stock_codex_path),
+            package_path=package_path,
+            package_sha256=_MOD.sha256_file(package_path),
+            tart_name=clean_vm_tart_name,
+            ssh_target=None,
+            ssh_identity=None,
+            ssh_user="admin",
+            ssh_port=clean_vm_ssh_port,
+            tart_ip=None,
+            remote_work_dir="/tmp/remote-acquisition",
+            remote_status="replacement-ready",
+            remote_output_preview="remote-acquisition",
+            tart_started=False,
+            tart_stopped=False,
+            proof_variant="official-remote-channel-acquisition",
+            host_stock_codex_uploaded=False,
+        )
+
+    monkeypatch.setattr(
+        _MOD.shutil,
+        "which",
+        lambda name, path=None: f"/usr/bin/{name}" if path is None else None,
+    )
+    monkeypatch.setattr(_MOD, "_official_stock_codex_remote_channel", lambda: remote_channel)
+    monkeypatch.setattr(
+        _MOD,
+        "_stock_replacement_auth_source",
+        lambda: (auth_path, "stock-default-home"),
+    )
+    monkeypatch.setattr(
+        _MOD.codex_native,
+        "_codex_auth_json_has_available_credential",
+        lambda _path: True,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_clean_vm_proof",
+        fake_clean_vm_proof,
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_clean_vm_release_proof(
+        stock_codex,
+        package_path=package_path,
+        clean_vm_ssh_target=None,
+        clean_vm_tart_name="omnigent-clean",
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_user="admin",
+        clean_vm_ssh_port=22,
+        clean_vm_start_tart=True,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.blocked_step == "remote-acquisition"
+    assert calls == 1
+    assert proof.tart_started_count == 0
+    assert proof.tart_stopped_count == 0
+    assert "clean VM release step did not start Tart VM: remote-acquisition" in (
+        proof.missing_prerequisites
+    )
+
+
 def test_stock_codex_compat_pkg_clean_vm_update_agent_loads_launchd_without_stock_binary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -490,6 +490,23 @@ does not broaden the claim to arbitrary non-disposable VMs, browser/device auth
 automation, Keychain-managed credentials, pre-release adoption, or long-term
 account refresh semantics.
 
+2026-07-08 clean-VM release aggregate note:
+`stock-codex-compat-pkg-clean-vm-release` composes the five package-consuming
+clean-VM release gates against one signed/notarized package artifact:
+remote acquisition, guided auth onboarding, proof-scoped post-login auth
+persistence, update-agent launchd execution, and live installed-launcher model
+turn. The aggregate resolves one official OpenAI GitHub release channel target
+for the full run, requires an available stock auth source up front because two
+steps need proof-scoped copied auth, then runs the existing gates in a fixed
+fail-fast order. If any step is not `replacement-ready`, if a managed Tart run
+does not start the disposable VM, or if a Tart-started step reports success but
+does not stop it, the aggregate reports `blocked_step` and does not run later
+steps. This is a release-scoped confidence check over already-scoped gates; it
+does not add browser/device auth
+automation, Keychain-managed credentials, pre-release adoption, LaunchDaemon
+policy, independent archive signature verification, non-disposable machine
+mutation, or raw unwrapped stock-Codex route parity.
+
 2026-07-08 raw Tart clean-VM bootstrap note:
 `stock-codex-compat-pkg-clean-vm-bootstrap` closes the raw-image setup gap for
 the Tart-backed clean-machine proofs. The gate refuses to overwrite an existing
@@ -523,7 +540,9 @@ onboarding from the pkg-installed runtime, clean-VM guided auth onboarding from
 the installed compatibility launcher, clean-VM proof-scoped post-login auth
 persistence from the same guided `CODEX_HOME`, signed/notarized `.pkg`
 distribution, and marker-gated repeatable cleanup for Tart-started
-package-consuming clean-VM proofs.
+package-consuming clean-VM proofs, plus a fail-fast clean-VM release aggregate
+over the remote-acquisition, auth-onboarding, auth-persistence, update-agent,
+and live installed-launcher gates.
 Persistent app-bundle installation, LaunchServices/Dock/Finder default
 behavior, launchd enablement policy, pre-release stock-Codex channel adoption,
 automated browser/device login UX, Keychain-managed credential UX, and broader
@@ -992,6 +1011,32 @@ loads it with `launchctl bootstrap`, forces one run with `launchctl kickstart`,
 parses the scheduled updater JSON from the LaunchAgent stdout log, unloads with
 `launchctl bootout`, and removes proof-owned package/user state. It does not
 decide LaunchDaemon policy, automate browser auth, or adopt pre-release channels.
+
+Clean-VM package release aggregate:
+
+```bash
+uvx --from . python scripts/prove_stock_codex_replacement.py \
+  --proof stock-codex-compat-pkg-clean-vm-release \
+  --codex-path ~/.local/omnigent/codex-stock/0.142.5/codex \
+  --pkg-path /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-proof-artifacts/omnigent-stock-codex-compat-github-latest.pkg \
+  --clean-vm-tart-name omnigent-clean-bootstrap-proof \
+  --clean-vm-ssh-user admin \
+  --clean-vm-ssh-identity ~/.ssh/mba_github_ssh_key \
+  --clean-vm-start-tart
+```
+
+`stock-codex-compat-pkg-clean-vm-release` is the release-scoped composition
+gate. It uses one signed/notarized package path and one official OpenAI GitHub
+release channel selection, then runs remote acquisition, auth onboarding, auth
+persistence, update-agent, and live installed-launcher gates in fixed order. It
+fails fast on the first non-`replacement-ready` step and records
+`blocked_step`, step statuses, missing prerequisites, auth source, package SHA,
+channel SHA, Tart start/stop counts, and whether any step uploaded a host stock
+Codex binary. When `--clean-vm-start-tart` is used, each underlying step gets
+the marker-gated preflight cleanup and must start and stop the VM before the
+next step. This is the preferred release confidence command for the current
+signed package track; it is not a new browser auth, Keychain, LaunchDaemon,
+pre-release, or raw-stock-entrypoint parity claim.
 
 Clean Codex-auth onboarding boundary:
 
