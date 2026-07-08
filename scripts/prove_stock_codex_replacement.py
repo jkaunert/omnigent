@@ -1734,6 +1734,22 @@ class StockCodexCompatPkgCleanVmProof:
     auth_onboarding_command: str | None = None
     auth_onboarding_command_executed: bool | None = None
     auth_onboarding_auth_uploaded: bool | None = None
+    auth_persistence_requested: bool | None = None
+    auth_persistence_auth_source: str | None = None
+    auth_persistence_auth_uploaded: bool | None = None
+    auth_persistence_launcher_path: Path | None = None
+    auth_persistence_selected_command_path: Path | None = None
+    auth_persistence_codex_home: Path | None = None
+    auth_persistence_auth_path: Path | None = None
+    auth_persistence_working_directory: Path | None = None
+    auth_persistence_pre_unavailable_reason: str | None = None
+    auth_persistence_post_unavailable_reason: str | None = None
+    auth_persistence_login_command_executed: bool | None = None
+    auth_persistence_browser_login_automated: bool | None = None
+    auth_persistence_auth_persisted_after_live: bool | None = None
+    auth_persistence_thread_id: str | None = None
+    auth_persistence_event_count: int | None = None
+    auth_persistence_agent_message_preview: str | None = None
 
 
 @dataclass(frozen=True)
@@ -7693,6 +7709,96 @@ def _parse_clean_vm_auth_onboarding_output_evidence(
     return None
 
 
+def _parse_clean_vm_auth_persistence_output_evidence(
+    remote_output: str,
+) -> (
+    tuple[Path, Path, Path, Path, Path, str, str | None, bool, bool, bool, str, int, str]
+    | None
+):
+    """Extract persisted-auth live evidence emitted by the clean-VM script."""
+    for line in remote_output.splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("kind") != "omnigent-clean-vm-auth-persistence-evidence":
+            continue
+        command_surface = payload.get("commandSurface")
+        launcher_path = payload.get("launcherPath")
+        selected_command_path = payload.get("selectedCommandPath")
+        codex_home = payload.get("codexHome")
+        auth_path = payload.get("authPath")
+        working_directory = payload.get("workingDirectory")
+        pre_reason = payload.get("preUnavailableReason")
+        post_reason = payload.get("postUnavailableReason")
+        auth_uploaded = payload.get("authUploaded")
+        login_command_executed = payload.get("loginCommandExecuted")
+        browser_login_automated = payload.get("browserLoginAutomated")
+        auth_persisted_after_live = payload.get("authPersistedAfterLive")
+        thread_id = payload.get("threadId")
+        event_count = payload.get("eventCount")
+        preview = payload.get("firstAgentMessagePreview")
+        if not (
+            command_surface == "installed-compat-launcher"
+            and isinstance(launcher_path, str)
+            and launcher_path
+            and isinstance(selected_command_path, str)
+            and selected_command_path == launcher_path
+            and isinstance(codex_home, str)
+            and codex_home
+            and isinstance(auth_path, str)
+            and auth_path
+            and isinstance(working_directory, str)
+            and working_directory
+            and pre_reason == "needs-auth"
+            and post_reason is None
+            and auth_uploaded is True
+            and login_command_executed is False
+            and browser_login_automated is False
+            and auth_persisted_after_live is True
+            and isinstance(thread_id, str)
+            and thread_id
+            and isinstance(event_count, int)
+            and event_count > 0
+            and isinstance(preview, str)
+            and preview.startswith("Routing: orchestrator-led")
+            and "STOCK_CODEX_COMPAT_AUTH_PERSISTENCE_OK" in preview
+        ):
+            continue
+        parsed_launcher_path = Path(launcher_path)
+        parsed_codex_home = Path(codex_home)
+        parsed_auth_path = Path(auth_path)
+        if parsed_launcher_path.name != "omnigent-stock-codex-compat":
+            continue
+        if (
+            parsed_launcher_path.parent.name != "bin"
+            or parsed_launcher_path.parent.parent.name != ".local"
+        ):
+            continue
+        if parsed_auth_path != parsed_codex_home / "auth.json":
+            continue
+        return (
+            parsed_launcher_path,
+            Path(selected_command_path),
+            parsed_codex_home,
+            parsed_auth_path,
+            Path(working_directory),
+            pre_reason,
+            post_reason,
+            login_command_executed,
+            browser_login_automated,
+            auth_persisted_after_live,
+            thread_id,
+            event_count,
+            preview,
+        )
+    return None
+
+
 def print_stock_codex_compat_live_proof(proof: StockCodexCompatLiveProof) -> None:
     """Emit operator evidence for a successful stock Codex live compatibility proof."""
     print("stock_codex_compat_live_rehearsal=selected")
@@ -12984,6 +13090,9 @@ fi
 if [ "$proof_mode" = "auth-onboarding" ] && [ -n "$live_auth_json" ]; then
   fail "auth onboarding proof must not receive uploaded auth json"
 fi
+if [ "$proof_mode" = "auth-persistence" ] && [ -z "$live_auth_json" ]; then
+  fail "auth persistence proof requires proof-scoped auth json"
+fi
 grep -q '"url"' "$channel_manifest" || fail "remote acquisition channel manifest lacks url"
 if grep -q '"path"' "$channel_manifest"; then
   fail "remote acquisition channel manifest must not contain path-backed artifacts"
@@ -13197,6 +13306,201 @@ PY
     "$launcher_path"
   printf '%s=%s\n' \
     'stock_codex_compat_pkg_clean_vm_auth_onboarding_codex_home' \
+    "$auth_onboarding_codex_home"
+fi
+
+if [ "$proof_mode" = "auth-persistence" ]; then
+  mkdir -p "$auth_onboarding_codex_home"
+  auth_persistence_pre_path="$proof_root/auth-persistence-pre.json"
+  auth_persistence_post_path="$proof_root/auth-persistence-post.json"
+  auth_persistence_live_output_path="$proof_root/auth-persistence-live-output.jsonl"
+  auth_persistence_live_stderr_path="$proof_root/auth-persistence-live-stderr.txt"
+  CODEX_HOME="$auth_onboarding_codex_home" \
+    OMNIGENT_STOCK_CODEX_PATH="$provisioned_codex" \
+    uvx --from "$user_runtime_root" python - \
+      "$auth_onboarding_codex_home" \
+      "$auth_persistence_pre_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+from omnigent import codex_native
+
+codex_home = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+source = codex_native._resolve_codex_auth_source()
+reason = codex_native._codex_auth_unavailable_reason()
+payload = {"authPath": str(source.auth_path), "unavailableReason": reason}
+output_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+if source.auth_path != codex_home / "auth.json":
+    raise SystemExit(
+        f"auth persistence resolved wrong pre-login path: {source.auth_path} != "
+        f"{codex_home / 'auth.json'}"
+    )
+if reason != "needs-auth":
+    raise SystemExit(f"expected needs-auth before persisted auth, got {reason!r}")
+PY
+  cp "$live_auth_json" "$auth_onboarding_codex_home/auth.json"
+  chmod 600 "$auth_onboarding_codex_home/auth.json"
+  CODEX_HOME="$auth_onboarding_codex_home" \
+    OMNIGENT_STOCK_CODEX_PATH="$provisioned_codex" \
+    uvx --from "$user_runtime_root" python - \
+      "$auth_onboarding_codex_home" \
+      "$auth_persistence_post_path" <<'PY'
+import json
+import stat
+import sys
+from pathlib import Path
+
+from omnigent import codex_native
+
+codex_home = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+source = codex_native._resolve_codex_auth_source()
+reason = codex_native._codex_auth_unavailable_reason()
+auth_path = codex_home / "auth.json"
+mode = stat.S_IMODE(auth_path.stat().st_mode)
+payload = {
+    "authPath": str(source.auth_path),
+    "authMode": oct(mode),
+    "authSize": auth_path.stat().st_size,
+    "unavailableReason": reason,
+}
+output_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+if source.auth_path != auth_path:
+    raise SystemExit(
+        f"auth persistence resolved wrong post-login path: {source.auth_path} != "
+        f"{auth_path}"
+    )
+if reason is not None:
+    raise SystemExit(f"expected available persisted auth, got {reason!r}")
+if mode != 0o600:
+    raise SystemExit(f"expected persisted auth mode 0o600, got {oct(mode)}")
+if auth_path.stat().st_size <= 0:
+    raise SystemExit("persisted auth file is empty")
+PY
+  auth_persistence_prompt="$(
+    printf '%s' \
+      'No-tool clean VM installed launcher persisted-auth proof for a SwiftUI workflow. ' \
+      'Do not inspect files, do not run commands, and do not explain. ' \
+      'Reply exactly STOCK_CODEX_COMPAT_AUTH_PERSISTENCE_OK.'
+  )"
+  set +e
+  CODEX_HOME="$auth_onboarding_codex_home" \
+    OMNIGENT_STOCK_CODEX_PATH="$provisioned_codex" \
+    "$selected" exec \
+      --json \
+      --dangerously-bypass-hook-trust \
+      --skip-git-repo-check \
+      --sandbox read-only \
+      -C "$user_runtime_root" \
+      "$auth_persistence_prompt" >"$auth_persistence_live_output_path" \
+      2>"$auth_persistence_live_stderr_path"
+  auth_persistence_status=$?
+  set -e
+  if [ "$auth_persistence_status" -ne 0 ]; then
+    cat "$auth_persistence_live_stderr_path" >&2 || true
+    fail "installed launcher auth-persistence live model turn failed: \
+exit-$auth_persistence_status"
+  fi
+  CODEX_HOME="$auth_onboarding_codex_home" \
+    OMNIGENT_STOCK_CODEX_PATH="$provisioned_codex" \
+    uvx --from "$user_runtime_root" python - \
+      "$auth_persistence_pre_path" \
+      "$auth_persistence_post_path" \
+      "$auth_persistence_live_output_path" \
+      "$selected" \
+      "$launcher_path" \
+      "$auth_onboarding_codex_home" \
+      "$user_runtime_root" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+(
+    pre_path,
+    post_path,
+    live_output_path,
+    selected_command_path,
+    launcher_path,
+    codex_home,
+    user_runtime_root,
+) = sys.argv[1:]
+pre = json.loads(Path(pre_path).read_text(encoding="utf-8"))
+post = json.loads(Path(post_path).read_text(encoding="utf-8"))
+codex_home_path = Path(codex_home)
+auth_path = codex_home_path / "auth.json"
+if selected_command_path != launcher_path:
+    raise SystemExit(
+        "installed launcher auth-persistence proof selected the wrong command: "
+        f"{selected_command_path} != {launcher_path}"
+    )
+if pre.get("unavailableReason") != "needs-auth":
+    raise SystemExit(f"pre-login auth state was not needs-auth: {pre!r}")
+if post.get("unavailableReason") is not None:
+    raise SystemExit(f"post-login persisted auth was not available: {post!r}")
+if Path(str(post.get("authPath"))) != auth_path:
+    raise SystemExit(f"post-login auth path mismatch: {post!r}")
+events = []
+for index, line in enumerate(Path(live_output_path).read_text(encoding="utf-8").splitlines(), 1):
+    if not line.strip():
+        continue
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"auth-persistence JSONL line {index} is invalid JSON: {line}") from exc
+    if not isinstance(event, dict):
+        raise SystemExit(f"auth-persistence JSONL line {index} is not an object: {line}")
+    events.append(event)
+if not events:
+    raise SystemExit("installed launcher auth-persistence model turn emitted no JSON events")
+thread_id = ""
+first_agent_message = ""
+for event in events:
+    if event.get("type") == "thread.started" and not thread_id:
+        raw_thread_id = event.get("thread_id")
+        if isinstance(raw_thread_id, str):
+            thread_id = raw_thread_id
+    if event.get("type") != "item.completed":
+        continue
+    item = event.get("item")
+    if not isinstance(item, dict) or item.get("type") != "agent_message":
+        continue
+    text = item.get("text")
+    if isinstance(text, str):
+        first_agent_message = text
+if not thread_id:
+    raise SystemExit("installed launcher auth-persistence model turn did not start a thread")
+if "STOCK_CODEX_COMPAT_AUTH_PERSISTENCE_OK" not in first_agent_message:
+    raise SystemExit(
+        f"auth-persistence sentinel missing: {first_agent_message!r}"
+    )
+if not first_agent_message.startswith("Routing: orchestrator-led"):
+    raise SystemExit(
+        f"auth-persistence route prefix missing: {first_agent_message!r}"
+    )
+print(json.dumps({
+    "authPath": str(auth_path),
+    "authPersistedAfterLive": auth_path.exists() and auth_path.stat().st_size > 0,
+    "authUploaded": True,
+    "browserLoginAutomated": False,
+    "codexHome": str(codex_home_path),
+    "commandSurface": "installed-compat-launcher",
+    "eventCount": len(events),
+    "firstAgentMessagePreview": first_agent_message[:200],
+    "kind": "omnigent-clean-vm-auth-persistence-evidence",
+    "launcherPath": launcher_path,
+    "loginCommandExecuted": False,
+    "postUnavailableReason": post.get("unavailableReason"),
+    "preUnavailableReason": pre.get("unavailableReason"),
+    "selectedCommandPath": selected_command_path,
+    "threadId": thread_id,
+    "workingDirectory": user_runtime_root,
+}, sort_keys=True))
+PY
+  printf 'stock_codex_compat_pkg_clean_vm_auth_persistence_status=replacement-ready\n'
+  printf '%s=%s\n' \
+    'stock_codex_compat_pkg_clean_vm_auth_persistence_codex_home' \
     "$auth_onboarding_codex_home"
 fi
 
@@ -14022,6 +14326,9 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
     live_auth_source: str | None = None,
     update_agent: bool = False,
     auth_onboarding: bool = False,
+    auth_persistence: bool = False,
+    auth_persistence_auth_path: Path | None = None,
+    auth_persistence_auth_source: str | None = None,
 ) -> StockCodexCompatPkgCleanVmProof:
     """Run signed-pkg lifecycle inside a disposable clean macOS VM over SSH."""
     stock_codex_path = stock_codex_path.expanduser().resolve()
@@ -14048,6 +14355,8 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                 if update_agent
                 else "official-remote-channel-auth-onboarding"
                 if auth_onboarding
+                else "official-remote-channel-auth-persistence"
+                if auth_persistence
                 else "official-remote-channel-acquisition"
             ),
             cask_token=remote_channel.cask_token,
@@ -14065,12 +14374,21 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
             live_model_turn_requested=live_auth_path is not None,
             update_agent_requested=update_agent,
             auth_onboarding_requested=auth_onboarding,
+            auth_persistence_requested=auth_persistence,
+            auth_persistence_auth_source=auth_persistence_auth_source,
+            auth_persistence_auth_uploaded=auth_persistence_auth_path is not None,
         )
 
-    if sum((live_auth_path is not None, update_agent, auth_onboarding)) > 1:
+    if sum((live_auth_path is not None, update_agent, auth_onboarding, auth_persistence)) > 1:
         raise SystemExit(
             "stock-codex-compat-pkg-clean-vm proof modes are mutually exclusive: "
-            "choose only one of live model, update-agent, or auth-onboarding."
+            "choose only one of live model, update-agent, auth-onboarding, or "
+            "auth-persistence."
+        )
+    if auth_persistence and auth_persistence_auth_path is None:
+        raise SystemExit(
+            "stock-codex-compat-pkg-clean-vm-auth-persistence requires a "
+            "proof-scoped auth source."
         )
 
     missing: list[str] = []
@@ -14098,6 +14416,13 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
         live_auth_path = live_auth_path.expanduser().resolve()
         if not live_auth_path.is_file():
             missing.append(f"missing live Codex auth source: {live_auth_path}")
+    if auth_persistence_auth_path is not None:
+        auth_persistence_auth_path = auth_persistence_auth_path.expanduser().resolve()
+        if not auth_persistence_auth_path.is_file():
+            missing.append(
+                f"missing auth-persistence Codex auth source: "
+                f"{auth_persistence_auth_path}"
+            )
     try:
         resolved_target, tart_ip, tart_started, target_missing = (
             _resolve_clean_vm_ssh_target(
@@ -14307,8 +14632,9 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     (script_path, remote_script_destination),
                 ]
                 remote_auth_destination = f"{remote_work_dir}/auth.json"
-                if live_auth_path is not None:
-                    upload_plan_items.append((live_auth_path, remote_auth_destination))
+                proof_auth_path = live_auth_path or auth_persistence_auth_path
+                if proof_auth_path is not None:
+                    upload_plan_items.append((proof_auth_path, remote_auth_destination))
                 upload_plan = tuple(upload_plan_items)
                 chmod_targets = (remote_script_destination,)
                 remote_command_parts = [
@@ -14322,16 +14648,20 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     remote_channel.cask_url,
                     remote_channel.policy_name,
                 ]
-                if live_auth_path is not None:
+                if proof_auth_path is not None:
                     remote_command_parts.append(remote_auth_destination)
                 if update_agent:
-                    if live_auth_path is None:
+                    if proof_auth_path is None:
                         remote_command_parts.append("")
                     remote_command_parts.append("update-agent")
                 if auth_onboarding:
-                    if live_auth_path is None:
+                    if proof_auth_path is None:
                         remote_command_parts.append("")
                     remote_command_parts.append("auth-onboarding")
+                if auth_persistence:
+                    if proof_auth_path is None:
+                        remote_command_parts.append("")
+                    remote_command_parts.append("auth-persistence")
                 remote_command_args = tuple(remote_command_parts)
                 if update_agent:
                     success_sentinel = (
@@ -14341,6 +14671,11 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                 elif auth_onboarding:
                     success_sentinel = (
                         "stock_codex_compat_pkg_clean_vm_auth_onboarding_status="
+                        "replacement-ready"
+                    )
+                elif auth_persistence:
+                    success_sentinel = (
+                        "stock_codex_compat_pkg_clean_vm_auth_persistence_status="
                         "replacement-ready"
                     )
                 elif live_auth_path is None:
@@ -14468,12 +14803,18 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                 )
             update_agent_output_evidence = None
             auth_onboarding_output_evidence = None
+            auth_persistence_output_evidence = None
             host_cache_referenced = False
             host_cache_root = Path.home() / ".local" / "omnigent" / "codex-stock"
-            if update_agent or auth_onboarding:
+            if update_agent or auth_onboarding or auth_persistence:
                 host_cache_referenced = str(host_cache_root) in remote_output
                 if host_cache_referenced:
-                    mode_name = "update agent" if update_agent else "auth onboarding"
+                    if update_agent:
+                        mode_name = "update agent"
+                    elif auth_onboarding:
+                        mode_name = "auth onboarding"
+                    else:
+                        mode_name = "auth persistence"
                     return finalize_clean_vm_proof(
                         _blocked_stock_codex_compat_pkg_clean_vm_proof(
                             tool_paths=tool_paths,
@@ -14493,6 +14834,38 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                             tart_ip=tart_ip,
                             remote_work_dir=remote_work_dir,
                             remote_status="update-agent-host-cache-leak",
+                            remote_output_preview=_preview_text(
+                                remote_output,
+                                limit=12000,
+                            ),
+                            tart_started=tart_started,
+                        )
+                    )
+            if auth_persistence:
+                auth_persistence_output_evidence = (
+                    _parse_clean_vm_auth_persistence_output_evidence(remote_output)
+                )
+                if auth_persistence_output_evidence is None:
+                    return finalize_clean_vm_proof(
+                        _blocked_stock_codex_compat_pkg_clean_vm_proof(
+                            tool_paths=tool_paths,
+                            missing_prerequisites=(
+                                "clean VM auth-persistence proof omitted parseable "
+                                "persisted-auth live evidence",
+                            ),
+                            stock_codex_path=stock_codex_path,
+                            stock_codex_version=stock_codex_version,
+                            stock_codex_sha256=stock_codex_sha256,
+                            package_path=package_path,
+                            package_sha256=package_sha256,
+                            tart_name=clean_vm_tart_name,
+                            ssh_target=resolved_target,
+                            ssh_identity=clean_vm_ssh_identity,
+                            ssh_user=clean_vm_ssh_user,
+                            ssh_port=clean_vm_ssh_port,
+                            tart_ip=tart_ip,
+                            remote_work_dir=remote_work_dir,
+                            remote_status="auth-persistence-evidence-missing",
                             remote_output_preview=_preview_text(
                                 remote_output,
                                 limit=12000,
@@ -14620,6 +14993,19 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
             auth_onboarding_command = None
             auth_onboarding_command_executed = None
             auth_onboarding_auth_uploaded = None
+            auth_persistence_launcher_path = None
+            auth_persistence_selected_command_path = None
+            auth_persistence_codex_home = None
+            auth_persistence_auth_path = None
+            auth_persistence_working_directory = None
+            auth_persistence_pre_unavailable_reason = None
+            auth_persistence_post_unavailable_reason = None
+            auth_persistence_login_command_executed = None
+            auth_persistence_browser_login_automated = None
+            auth_persistence_auth_persisted_after_live = None
+            auth_persistence_thread_id = None
+            auth_persistence_event_count = None
+            auth_persistence_agent_message_preview = None
             if live_output_evidence is not None:
                 (
                     live_thread_id,
@@ -14656,6 +15042,22 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     auth_onboarding_command_executed,
                     auth_onboarding_auth_uploaded,
                 ) = auth_onboarding_output_evidence
+            if auth_persistence_output_evidence is not None:
+                (
+                    auth_persistence_launcher_path,
+                    auth_persistence_selected_command_path,
+                    auth_persistence_codex_home,
+                    auth_persistence_auth_path,
+                    auth_persistence_working_directory,
+                    auth_persistence_pre_unavailable_reason,
+                    auth_persistence_post_unavailable_reason,
+                    auth_persistence_login_command_executed,
+                    auth_persistence_browser_login_automated,
+                    auth_persistence_auth_persisted_after_live,
+                    auth_persistence_thread_id,
+                    auth_persistence_event_count,
+                    auth_persistence_agent_message_preview,
+                ) = auth_persistence_output_evidence
             return finalize_clean_vm_proof(
                 StockCodexCompatPkgCleanVmProof(
                     status="replacement-ready",
@@ -14709,6 +15111,40 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                         auth_onboarding_command_executed
                     ),
                     auth_onboarding_auth_uploaded=auth_onboarding_auth_uploaded,
+                    auth_persistence_requested=auth_persistence,
+                    auth_persistence_auth_source=auth_persistence_auth_source,
+                    auth_persistence_auth_uploaded=(
+                        auth_persistence_auth_path is not None
+                    ),
+                    auth_persistence_launcher_path=auth_persistence_launcher_path,
+                    auth_persistence_selected_command_path=(
+                        auth_persistence_selected_command_path
+                    ),
+                    auth_persistence_codex_home=auth_persistence_codex_home,
+                    auth_persistence_auth_path=auth_persistence_auth_path,
+                    auth_persistence_working_directory=(
+                        auth_persistence_working_directory
+                    ),
+                    auth_persistence_pre_unavailable_reason=(
+                        auth_persistence_pre_unavailable_reason
+                    ),
+                    auth_persistence_post_unavailable_reason=(
+                        auth_persistence_post_unavailable_reason
+                    ),
+                    auth_persistence_login_command_executed=(
+                        auth_persistence_login_command_executed
+                    ),
+                    auth_persistence_browser_login_automated=(
+                        auth_persistence_browser_login_automated
+                    ),
+                    auth_persistence_auth_persisted_after_live=(
+                        auth_persistence_auth_persisted_after_live
+                    ),
+                    auth_persistence_thread_id=auth_persistence_thread_id,
+                    auth_persistence_event_count=auth_persistence_event_count,
+                    auth_persistence_agent_message_preview=(
+                        auth_persistence_agent_message_preview
+                    ),
                 )
             )
     finally:
@@ -14816,6 +15252,42 @@ def run_stock_codex_compat_pkg_clean_vm_auth_onboarding_proof(
         clean_vm_start_tart=clean_vm_start_tart,
         remote_channel=_official_stock_codex_remote_channel(),
         auth_onboarding=True,
+    )
+
+
+def run_stock_codex_compat_pkg_clean_vm_auth_persistence_proof(
+    stock_codex_path: Path,
+    *,
+    package_path: Path | None,
+    clean_vm_ssh_target: str | None,
+    clean_vm_tart_name: str | None,
+    clean_vm_ssh_identity: Path | None,
+    clean_vm_ssh_user: str | None,
+    clean_vm_ssh_port: int,
+    clean_vm_start_tart: bool,
+) -> StockCodexCompatPkgCleanVmProof:
+    """Prove post-login auth.json persistence from the installed launcher."""
+    auth_path, auth_source = _stock_replacement_auth_source()
+    if not codex_native._codex_auth_json_has_available_credential(auth_path):
+        raise SystemExit(
+            "Current real Codex auth source is not available; cannot run clean VM "
+            "auth-persistence proof.\n"
+            f"auth_path={auth_path}\n"
+            f"auth_source={auth_source}"
+        )
+    return run_stock_codex_compat_pkg_clean_vm_proof(
+        stock_codex_path,
+        package_path=package_path,
+        clean_vm_ssh_target=clean_vm_ssh_target,
+        clean_vm_tart_name=clean_vm_tart_name,
+        clean_vm_ssh_identity=clean_vm_ssh_identity,
+        clean_vm_ssh_user=clean_vm_ssh_user,
+        clean_vm_ssh_port=clean_vm_ssh_port,
+        clean_vm_start_tart=clean_vm_start_tart,
+        remote_channel=_official_stock_codex_remote_channel(),
+        auth_persistence=True,
+        auth_persistence_auth_path=auth_path,
+        auth_persistence_auth_source=auth_source,
     )
 
 
@@ -19556,6 +20028,156 @@ def print_stock_codex_compat_pkg_clean_vm_auth_onboarding_proof(
         "ASSERTION: auth onboarding emits a user-run login command through the "
         "installed compatibility launcher while proving the command was not "
         "executed and no auth credential was uploaded"
+    )
+
+
+def print_stock_codex_compat_pkg_clean_vm_auth_persistence_proof(
+    proof: StockCodexCompatPkgCleanVmProof,
+) -> None:
+    """Emit operator evidence for clean-VM persisted auth live execution."""
+    print("stock_codex_compat_pkg_clean_vm_auth_persistence_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_surface="
+        "signed-pkg-clean-vm-persisted-auth-live-model-turn"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_auth_persistence_status={proof.status}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_missing_prerequisites="
+        f"{json.dumps(list(proof.missing_prerequisites), sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_tool_paths="
+        f"{json.dumps(proof.tool_paths, sort_keys=True)}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_auth_persistence_package_path={proof.package_path}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_package_sha256="
+        f"{proof.package_sha256}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_auth_persistence_cask_version={proof.cask_version}")
+    print(f"stock_codex_compat_pkg_clean_vm_auth_persistence_cask_url={proof.cask_url}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_cask_sha256="
+        f"{proof.cask_sha256}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_channel_policy="
+        f"{proof.channel_policy}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_host_stock_codex_uploaded="
+        f"{proof.host_stock_codex_uploaded}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_requested="
+        f"{proof.auth_persistence_requested}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_auth_source="
+        f"{proof.auth_persistence_auth_source}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_auth_uploaded="
+        f"{proof.auth_persistence_auth_uploaded}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_launcher_path="
+        f"{proof.auth_persistence_launcher_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_selected_command_path="
+        f"{proof.auth_persistence_selected_command_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_codex_home="
+        f"{proof.auth_persistence_codex_home}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_auth_path="
+        f"{proof.auth_persistence_auth_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_working_directory="
+        f"{proof.auth_persistence_working_directory}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_pre_unavailable_reason="
+        f"{proof.auth_persistence_pre_unavailable_reason}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_post_unavailable_reason="
+        f"{proof.auth_persistence_post_unavailable_reason}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_login_command_executed="
+        f"{proof.auth_persistence_login_command_executed}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_browser_login_automated="
+        f"{proof.auth_persistence_browser_login_automated}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_auth_persisted_after_live="
+        f"{proof.auth_persistence_auth_persisted_after_live}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_thread_id="
+        f"{proof.auth_persistence_thread_id}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_event_count="
+        f"{proof.auth_persistence_event_count}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_agent_message_preview="
+        f"{proof.auth_persistence_agent_message_preview!r}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_auth_persistence_tart_name={proof.tart_name}")
+    print(f"stock_codex_compat_pkg_clean_vm_auth_persistence_ssh_target={proof.ssh_target}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_ssh_identity="
+        f"{proof.ssh_identity}"
+    )
+    print(f"stock_codex_compat_pkg_clean_vm_auth_persistence_ssh_user={proof.ssh_user}")
+    print(f"stock_codex_compat_pkg_clean_vm_auth_persistence_ssh_port={proof.ssh_port}")
+    print(f"stock_codex_compat_pkg_clean_vm_auth_persistence_tart_ip={proof.tart_ip}")
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_remote_work_dir="
+        f"{proof.remote_work_dir}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_remote_status="
+        f"{proof.remote_status}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_tart_started="
+        f"{proof.tart_started}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_tart_stopped="
+        f"{proof.tart_stopped}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_remote_output="
+        f"{proof.remote_output_preview!r}"
+    )
+    if proof.status == "blocked":
+        print(
+            "ASSERTION: clean VM auth-persistence validation is blocked by "
+            "missing stock auth, official-channel metadata, disposable VM "
+            "SSH/Tart prerequisites, package artifact, noninteractive sudo, "
+            "VM uvx, operator marker, or clean VM state"
+        )
+        return
+    print(
+        "ASSERTION: a proof-scoped post-login auth.json at the guided "
+        "CODEX_HOME is classified as available by the installed runtime and "
+        "survives a real installed-launcher model turn"
+    )
+    print(
+        "ASSERTION: the proof does not automate browser/device login, does not "
+        "upload the host stock Codex binary, and preserves deterministic route "
+        "evidence before the auth-persistence model sentinel"
     )
 
 
@@ -24402,6 +25024,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-pkg-clean-vm",
             "stock-codex-compat-pkg-clean-vm-remote-acquisition",
             "stock-codex-compat-pkg-clean-vm-auth-onboarding",
+            "stock-codex-compat-pkg-clean-vm-auth-persistence",
             "stock-codex-compat-pkg-clean-vm-update-agent",
             "stock-codex-compat-pkg-clean-vm-live",
             "stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
@@ -24591,6 +25214,11 @@ def parse_args() -> argparse.Namespace:
             "clean CODEX_HOME as needs-auth and emitting a guided login "
             "command through the installed compatibility launcher without "
             "uploading credentials or running browser login. "
+            "'stock-codex-compat-pkg-clean-vm-auth-persistence' extends that "
+            "path by copying proof-scoped stock auth as the stand-in for a "
+            "completed login, verifying the same guided CODEX_HOME becomes "
+            "available, and running a real installed-launcher model turn "
+            "without automating browser/device login. "
             "'stock-codex-compat-pkg-clean-vm-update-agent' extends that "
             "clean-VM remote acquisition path by writing the installed "
             "runtime's user LaunchAgent, loading it with launchctl bootstrap, "
@@ -25619,6 +26247,44 @@ def main() -> int:
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_stock_codex_compat_pkg_clean_vm_auth_onboarding_proof(
             run_stock_codex_compat_pkg_clean_vm_auth_onboarding_proof(
+                codex_path,
+                package_path=args.pkg_path,
+                clean_vm_ssh_target=args.clean_vm_ssh_target,
+                clean_vm_tart_name=args.clean_vm_tart_name,
+                clean_vm_ssh_identity=args.clean_vm_ssh_identity,
+                clean_vm_ssh_user=args.clean_vm_ssh_user,
+                clean_vm_ssh_port=args.clean_vm_ssh_port,
+                clean_vm_start_tart=args.clean_vm_start_tart,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-clean-vm-auth-persistence":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-auth-persistence does not use "
+                "--apple-bundle; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-auth-persistence cannot allow a "
+                "Codex-fork binary."
+            )
+        if args.pkg_output_path is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-auth-persistence consumes "
+                "--pkg-path; produce persistent packages with "
+                "stock-codex-compat-pkg-signed-notarized."
+            )
+        if args.pkg_path is None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-clean-vm-auth-persistence requires "
+                "--pkg-path from stock-codex-compat-pkg-signed-notarized."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_pkg_clean_vm_auth_persistence_proof(
+            run_stock_codex_compat_pkg_clean_vm_auth_persistence_proof(
                 codex_path,
                 package_path=args.pkg_path,
                 clean_vm_ssh_target=args.clean_vm_ssh_target,
