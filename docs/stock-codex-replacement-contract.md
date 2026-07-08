@@ -542,7 +542,10 @@ persistence from the same guided `CODEX_HOME`, signed/notarized `.pkg`
 distribution, and marker-gated repeatable cleanup for Tart-started
 package-consuming clean-VM proofs, plus a fail-fast clean-VM release aggregate
 over the remote-acquisition, auth-onboarding, auth-persistence, update-agent,
-and live installed-launcher gates.
+and live installed-launcher gates. The package release-candidate gate is the
+wrapper command `scripts/prove_stock_codex_compat_release_candidate.py`, which
+expands to that aggregate and keeps the release checklist from depending on a
+hand-reconstructed long proof invocation.
 Persistent app-bundle installation, LaunchServices/Dock/Finder default
 behavior, launchd enablement policy, pre-release stock-Codex channel adoption,
 automated browser/device login UX, Keychain-managed credential UX, and broader
@@ -1012,7 +1015,34 @@ parses the scheduled updater JSON from the LaunchAgent stdout log, unloads with
 `launchctl bootout`, and removes proof-owned package/user state. It does not
 decide LaunchDaemon policy, automate browser auth, or adopt pre-release channels.
 
-Clean-VM package release aggregate:
+Release-candidate package gate:
+
+```bash
+uvx --from . python scripts/prove_stock_codex_compat_release_candidate.py \
+  --pkg-path /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-proof-artifacts/omnigent-stock-codex-compat-github-latest.pkg \
+  --codex-path ~/.local/omnigent/codex-stock/0.142.5/codex \
+  --clean-vm-tart-name omnigent-clean-bootstrap-proof \
+  --clean-vm-ssh-identity ~/.ssh/mba_github_ssh_key
+```
+
+For release review without starting the VM, append `--print-command` to inspect
+the exact underlying aggregate command. Operator defaults can also be supplied
+through `OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_PKG_PATH`,
+`OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_CODEX_PATH`,
+`OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_TART_NAME`,
+`OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_USER`,
+`OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_IDENTITY`, and
+`OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_PORT`.
+
+A stock-Codex compatibility package is release-candidate eligible only when
+this wrapper exits zero and the underlying aggregate reports
+`stock_codex_compat_pkg_clean_vm_release_status=replacement-ready`, all five
+step statuses as `replacement-ready`, `blocked_step=None`,
+`host_stock_codex_uploaded_any=False`, and matching Tart started/stopped counts.
+Passing any one underlying clean-VM gate alone is not enough for release
+candidate status.
+
+Underlying clean-VM package release aggregate:
 
 ```bash
 uvx --from . python scripts/prove_stock_codex_replacement.py \

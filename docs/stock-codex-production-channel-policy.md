@@ -125,4 +125,7 @@ proof residue. Direct SSH-target runs keep stale state as a hard blocker. The
 release aggregate `stock-codex-compat-pkg-clean-vm-release` runs the
 remote-acquisition, auth-onboarding, auth-persistence, update-agent, and live
 extensions against one package and one channel selection, fail-fast, so release
-validation does not rely on manually stitching those gates together.
+validation does not rely on manually stitching those gates together. Release
+operators should enter that aggregate through
+`scripts/prove_stock_codex_compat_release_candidate.py`, which is the checklist
+gate for stock-Codex compatibility package release candidates.

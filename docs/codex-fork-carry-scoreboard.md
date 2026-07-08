@@ -351,6 +351,12 @@ The next gates should split by product mode:
   installed user-local `uvx` without shell profile mutation, verified
   noninteractive sudo plus SSH, stopped the clone, and then the same clone passed
   the clean-VM update-agent gate with the signed/notarized package above.
+  The release-candidate wrapper
+  `scripts/prove_stock_codex_compat_release_candidate.py` now makes the
+  `stock-codex-compat-pkg-clean-vm-release` aggregate the checklist gate for a
+  package candidate, requiring remote acquisition, auth onboarding, auth
+  persistence, update-agent, and live installed-launcher proof statuses to pass
+  against one signed/notarized package and one official channel selection.
   The production stock-Codex channel policy gate
   is green for official-source validation, clean-cache reuse before network
   access, fail-closed non-official URL rejection, resolver selection,
