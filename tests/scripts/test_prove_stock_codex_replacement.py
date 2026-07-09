@@ -4504,6 +4504,100 @@ def test_stock_codex_compat_pkg_nontart_clean_machine_preflight_blocks_without_e
     assert any("missing clean-VM release evidence" in item for item in proof.missing_prerequisites)
 
 
+def test_stock_codex_compat_pkg_nontart_clean_machine_preflight_reports_upload_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+    evidence_path = tmp_path / "release-evidence.json"
+    evidence_path.write_text('{"status": "replacement-ready"}\n', encoding="utf-8")
+    cleanup_commands: list[str] = []
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        if path is not None:
+            return None
+        return {"ssh": "/usr/bin/ssh", "scp": "/usr/bin/scp"}.get(name)
+
+    def fake_verifier(
+        *,
+        package_path: Path,
+        release_evidence_path: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        del package_path, release_evidence_path
+        return subprocess.CompletedProcess(["verify"], 0, stdout="verified\n", stderr="")
+
+    def fake_copy_clean_vm_file(
+        *,
+        scp_path: str,
+        ssh_target: str,
+        ssh_port: int,
+        ssh_identity: Path | None,
+        source: Path,
+        remote_destination: str,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del scp_path, ssh_target, ssh_port, ssh_identity, source, remote_destination, timeout
+        return subprocess.CompletedProcess(
+            ["scp"],
+            1,
+            stdout="",
+            stderr="subsystem request failed\n",
+        )
+
+    def fake_run_clean_vm_ssh_command(
+        remote_command: str,
+        *,
+        ssh_path: str,
+        ssh_target: str,
+        ssh_port: int,
+        ssh_identity: Path | None,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del ssh_path, ssh_target, ssh_port, ssh_identity, timeout
+        if remote_command.startswith("/usr/bin/mktemp"):
+            return subprocess.CompletedProcess(
+                ["ssh"],
+                0,
+                stdout="/tmp/omnigent-stock-codex-compat-nontart-preflight.upload\n",
+                stderr="",
+            )
+        if remote_command.startswith("rm -rf "):
+            cleanup_commands.append(remote_command)
+            return subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected remote command: {remote_command}")
+
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+    monkeypatch.setattr(
+        _MOD,
+        "_run_stock_codex_compat_release_evidence_verifier",
+        fake_verifier,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_wait_for_clean_vm_ssh",
+        lambda **_kwargs: subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(_MOD, "_copy_clean_vm_file", fake_copy_clean_vm_file)
+    monkeypatch.setattr(_MOD, "_run_clean_vm_ssh_command", fake_run_clean_vm_ssh_command)
+
+    proof = _MOD.run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_port=22,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.remote_status == "upload-failed"
+    assert "subsystem request failed" in str(proof.remote_output_preview)
+    assert cleanup_commands == [
+        "rm -rf /tmp/omnigent-stock-codex-compat-nontart-preflight.upload"
+    ]
+
+
 def test_stock_codex_compat_pkg_nontart_clean_machine_preflight_rejects_unsafe_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

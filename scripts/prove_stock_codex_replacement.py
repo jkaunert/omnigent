@@ -13945,7 +13945,10 @@ def run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
                         ssh_port=clean_vm_ssh_port,
                         remote_work_dir=remote_work_dir,
                         remote_status="upload-failed",
-                        remote_output_preview=_preview_text(upload.stdout + upload.stderr),
+                        remote_output_preview=_preview_text(
+                            upload.stdout + upload.stderr,
+                            limit=4000,
+                        ),
                     )
                 )
         chmod_remote = _run_clean_vm_ssh_command(
