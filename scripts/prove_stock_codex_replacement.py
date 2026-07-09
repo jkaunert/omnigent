@@ -13507,6 +13507,7 @@ def _run_clean_vm_ssh_command(
         ],
         check=False,
         capture_output=True,
+        stdin=subprocess.DEVNULL,
         text=True,
         timeout=timeout,
     )
@@ -16703,6 +16704,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
         "scp": shutil.which("scp"),
         "tart": shutil.which("tart"),
     }
+    requested_auth_persistence_upload = auth_persistence_auth_path is not None
 
     def decorate_clean_vm_proof(
         proof: StockCodexCompatPkgCleanVmProof,
@@ -16757,7 +16759,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     else None
                 )
             ),
-            auth_persistence_auth_uploaded=auth_persistence_auth_path is not None,
+            auth_persistence_auth_uploaded=requested_auth_persistence_upload,
         )
 
     if (
@@ -17526,7 +17528,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
             auth_persistence_selected_command_path = None
             auth_persistence_selected_command_version = None
             auth_persistence_codex_home = None
-            auth_persistence_auth_path = None
+            auth_persistence_evidence_auth_path = None
             auth_persistence_working_directory = None
             auth_persistence_pre_unavailable_reason = None
             auth_persistence_post_unavailable_reason = None
@@ -17597,7 +17599,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     auth_persistence_selected_command_path,
                     auth_persistence_selected_command_version,
                     auth_persistence_codex_home,
-                    auth_persistence_auth_path,
+                    auth_persistence_evidence_auth_path,
                     auth_persistence_working_directory,
                     auth_persistence_pre_unavailable_reason,
                     auth_persistence_post_unavailable_reason,
@@ -17609,8 +17611,10 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     auth_persistence_event_count,
                     auth_persistence_agent_message_preview,
                 ) = auth_persistence_output_evidence
-                expected_auth_uploaded = auth_persistence_auth_path is not None
-                if auth_persistence_auth_uploaded is not expected_auth_uploaded:
+                if (
+                    auth_persistence_auth_uploaded
+                    is not requested_auth_persistence_upload
+                ):
                     return finalize_clean_vm_proof(
                         _blocked_stock_codex_compat_pkg_clean_vm_proof(
                             tool_paths=tool_paths,
@@ -17735,7 +17739,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                         auth_persistence_selected_command_version
                     ),
                     auth_persistence_codex_home=auth_persistence_codex_home,
-                    auth_persistence_auth_path=auth_persistence_auth_path,
+                    auth_persistence_auth_path=auth_persistence_evidence_auth_path,
                     auth_persistence_working_directory=(
                         auth_persistence_working_directory
                     ),

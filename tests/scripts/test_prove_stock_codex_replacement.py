@@ -4429,6 +4429,32 @@ def test_clean_vm_remote_acquisition_script_uses_url_backed_channel() -> None:
     assert "stock_codex_compat_pkg_clean_vm_update_agent_status=replacement-ready" in script
 
 
+def test_clean_vm_ssh_command_closes_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: dict[str, object] = {}
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        observed["command"] = command
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(_MOD.subprocess, "run", fake_run)
+
+    completed = _MOD._run_clean_vm_ssh_command(
+        "true",
+        ssh_path="/usr/bin/ssh",
+        ssh_target="admin@192.0.2.10",
+        ssh_port=22,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0
+    assert observed["stdin"] is subprocess.DEVNULL
+    assert observed["capture_output"] is True
+    assert observed["text"] is True
+
+
 def test_clean_vm_preflight_cleanup_requires_marker_and_proof_owned_paths() -> None:
     command = _MOD._clean_vm_preflight_cleanup_command()
 
@@ -7383,7 +7409,7 @@ def test_stock_codex_compat_pkg_clean_vm_auth_login_uses_remote_home_without_aut
     assert str(stock_codex) not in bash_commands[0]
 
 
-def test_stock_codex_compat_pkg_clean_vm_auth_persistence_uploads_auth_not_stock_binary(
+def test_stock_codex_compat_pkg_clean_vm_auth_persistence_tracks_auth_source(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -7414,6 +7440,8 @@ def test_stock_codex_compat_pkg_clean_vm_auth_persistence_uploads_auth_not_stock
     uploads: list[tuple[Path, str]] = []
     uploaded_channel: dict[str, object] = {}
     remote_commands: list[str] = []
+    remote_existing_codex_home = "/Users/admin/.codex-omnigent-existing-auth"
+    auth_source_state = {"uploaded": True}
 
     def fake_which(name: str, path: str | None = None) -> str | None:
         if path is not None:
@@ -7464,12 +7492,14 @@ def test_stock_codex_compat_pkg_clean_vm_auth_persistence_uploads_auth_not_stock
             codex_home = (
                 "/Users/admin/.omnigent-stock-codex-compat-clean-vm-remote-"
                 "acquisition-proof/auth-onboarding-codex-home"
+                if auth_source_state["uploaded"]
+                else remote_existing_codex_home
             )
             launcher_path = "/Users/admin/.local/bin/omnigent-stock-codex-compat"
             auth_persistence_evidence = {
                 "authPath": f"{codex_home}/auth.json",
                 "authPersistedAfterLive": True,
-                "authUploaded": True,
+                "authUploaded": auth_source_state["uploaded"],
                 "browserLoginAutomated": False,
                 "codexHome": codex_home,
                 "commandSurface": "installed-compat-launcher",
@@ -7482,7 +7512,9 @@ def test_stock_codex_compat_pkg_clean_vm_auth_persistence_uploads_auth_not_stock
                 "launcherPath": launcher_path,
                 "loginCommandExecuted": False,
                 "postUnavailableReason": None,
-                "preUnavailableReason": "needs-auth",
+                "preUnavailableReason": (
+                    "needs-auth" if auth_source_state["uploaded"] else None
+                ),
                 "selectedCommandPath": launcher_path,
                 "selectedCommandVersion": "codex-cli 0.143.0",
                 "threadId": "019f-auth-persistence-proof",
@@ -7584,6 +7616,49 @@ def test_stock_codex_compat_pkg_clean_vm_auth_persistence_uploads_auth_not_stock
     assert len(bash_commands) == 1
     assert bash_commands[0].endswith("/auth.json auth-persistence")
     assert str(stock_codex) not in bash_commands[0]
+
+    uploads.clear()
+    remote_commands.clear()
+    auth_source_state["uploaded"] = False
+
+    proof = _MOD.run_stock_codex_compat_pkg_clean_vm_proof(
+        stock_codex,
+        package_path=package_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_tart_name=None,
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_user=None,
+        clean_vm_ssh_port=22,
+        clean_vm_start_tart=False,
+        remote_channel=remote_channel,
+        auth_persistence=True,
+        auth_persistence_remote_codex_home=remote_existing_codex_home,
+    )
+
+    uploaded_sources = [source for source, _destination in uploads]
+    assert proof.status == "replacement-ready"
+    assert proof.proof_variant == "official-remote-channel-auth-persistence-existing"
+    assert proof.auth_persistence_auth_source == (
+        f"remote-existing-codex-home:{remote_existing_codex_home}"
+    )
+    assert proof.auth_persistence_auth_uploaded is False
+    assert proof.auth_persistence_codex_home == Path(remote_existing_codex_home)
+    assert proof.auth_persistence_auth_path == (
+        Path(remote_existing_codex_home) / "auth.json"
+    )
+    assert auth_path.resolve() not in [source.resolve() for source in uploaded_sources]
+    assert [source.name for source in uploaded_sources] == [
+        "omnigent-stock-codex-compat.pkg",
+        "channel.json",
+        "clean_vm_proof.sh",
+    ]
+    bash_commands = [
+        command for command in remote_commands if command.startswith("/bin/bash ")
+    ]
+    assert len(bash_commands) == 1
+    assert bash_commands[0].endswith(
+        f"'' auth-persistence-existing {remote_existing_codex_home}"
+    )
 
 
 def test_stock_codex_compat_pkg_clean_vm_auth_persistence_blocks_upload_state_mismatch(
