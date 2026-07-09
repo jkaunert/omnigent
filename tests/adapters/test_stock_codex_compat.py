@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -70,6 +71,41 @@ def test_generated_package_validates_with_stock_codex_wrapper(tmp_path: Path) ->
 
     assert package.tool_names == tuple(spec.name for spec in specs)
     assert validated.tool_names == package.tool_names
+
+
+def test_wrapper_passthrough_commands_inherit_stdio(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = tmp_path / "codex"
+    evidence_path = tmp_path / "wrapper-evidence.json"
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 7)
+
+    monkeypatch.setattr(stock_codex_compat_wrapper.subprocess, "run", fake_run)
+
+    status = stock_codex_compat_wrapper.run_wrapper(
+        ("login", "--device-auth"),
+        stock_codex_path=stock_codex,
+        route_prefix="Routing: orchestrator-led",
+        evidence_path=evidence_path,
+    )
+
+    assert status == 7
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command == [str(stock_codex), "login", "--device-auth"]
+    assert kwargs["check"] is False
+    assert "capture_output" not in kwargs
+    assert kwargs["stdin"] is sys.stdin
+    assert isinstance(kwargs["env"], dict)
+    assert not evidence_path.exists()
 
 
 def test_wrapper_rejects_manifest_adapter_bin_mismatch(tmp_path: Path) -> None:

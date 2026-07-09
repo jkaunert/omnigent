@@ -302,6 +302,11 @@ def prefix_first_agent_message(
     )
 
 
+def should_transform_stock_codex_output(codex_args: Sequence[str]) -> bool:
+    """Return whether stock Codex output should be captured and route-prefixed."""
+    return bool(codex_args) and codex_args[0] == "exec"
+
+
 def run_wrapper(
     codex_args: Sequence[str],
     *,
@@ -337,17 +342,27 @@ def run_wrapper(
         else None
     )
     bridge_context = bridge_service if bridge_service is not None else contextlib.nullcontext()
+    stock_codex_command = [str(stock_codex_path), *codex_args]
+    stock_codex_env = stock_codex_env_with_adapter_bin(
+        adapter_bin,
+        adapter_manifest=adapter_manifest,
+        adapter_bridge_dir=adapter_bridge_dir,
+    )
     with bridge_context:
+        if not should_transform_stock_codex_output(codex_args):
+            completed = subprocess.run(
+                stock_codex_command,
+                check=False,
+                env=stock_codex_env,
+                stdin=sys.stdin,
+            )
+            return completed.returncode
         completed = subprocess.run(
-            [str(stock_codex_path), *codex_args],
+            stock_codex_command,
             check=False,
             capture_output=True,
             text=True,
-            env=stock_codex_env_with_adapter_bin(
-                adapter_bin,
-                adapter_manifest=adapter_manifest,
-                adapter_bridge_dir=adapter_bridge_dir,
-            ),
+            env=stock_codex_env,
             stdin=sys.stdin,
         )
     stdout, evidence = prefix_first_agent_message(
