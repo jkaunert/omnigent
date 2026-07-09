@@ -131,6 +131,13 @@ def infer_target_mode(evidence: Mapping[str, Any]) -> str | None:
     return None
 
 
+def expected_stock_codex_version(evidence: Mapping[str, Any]) -> str | None:
+    cask_version = evidence.get("caskVersion")
+    if isinstance(cask_version, str) and cask_version.strip():
+        return f"codex-cli {cask_version.strip()}"
+    return None
+
+
 def _check_step_statuses(evidence: Mapping[str, Any]) -> list[str]:
     failures: list[str] = []
     step_order = evidence.get("stepOrder")
@@ -163,6 +170,7 @@ def _check_step_statuses(evidence: Mapping[str, Any]) -> list[str]:
 
 def _check_step_details(evidence: Mapping[str, Any], *, target_mode: str | None) -> list[str]:
     failures: list[str] = []
+    expected_version = expected_stock_codex_version(evidence)
     step_details = evidence.get("stepDetails")
     if not isinstance(step_details, Mapping):
         return ["stepDetails is missing or not an object"]
@@ -188,6 +196,36 @@ def _check_step_details(evidence: Mapping[str, Any], *, target_mode: str | None)
         for tart_key in ("tartStarted", "tartStopped"):
             if detail.get(tart_key) is not expected_tart_value:
                 failures.append(f"stepDetails[{step_name}][{tart_key}]={detail.get(tart_key)!r}")
+        if step_name in {"auth-onboarding", "auth-persistence", "live"}:
+            selected_command_path = detail.get("selectedCommandPath")
+            if not _truthy_string(selected_command_path):
+                failures.append(
+                    f"stepDetails[{step_name}][selectedCommandPath]={selected_command_path!r}"
+                )
+            selected_command_version = detail.get("selectedCommandVersion")
+            if (
+                not _truthy_string(selected_command_version)
+                or selected_command_version != expected_version
+            ):
+                failures.append(
+                    "stepDetails"
+                    f"[{step_name}][selectedCommandVersion]={selected_command_version!r}"
+                )
+        if step_name == "update-agent":
+            selected_codex_path = detail.get("selectedCodexPath")
+            if not _truthy_string(selected_codex_path):
+                failures.append(
+                    f"stepDetails[{step_name}][selectedCodexPath]={selected_codex_path!r}"
+                )
+            selected_codex_version = detail.get("selectedCodexVersion")
+            if (
+                not _truthy_string(selected_codex_version)
+                or selected_codex_version != expected_version
+            ):
+                failures.append(
+                    f"stepDetails[{step_name}][selectedCodexVersion]="
+                    f"{selected_codex_version!r}"
+                )
 
     live_detail = step_details.get("live")
     if isinstance(live_detail, Mapping) and not live_detail.get("threadId"):

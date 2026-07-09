@@ -87,6 +87,10 @@ def _ready_evidence(package_sha256: str) -> dict[str, Any]:
                 "hostStockCodexUploaded": False,
                 "tartStarted": True,
                 "tartStopped": True,
+                "selectedCommandPath": None,
+                "selectedCommandVersion": None,
+                "selectedCodexPath": None,
+                "selectedCodexVersion": None,
                 "threadId": None,
                 "scheduledAction": None,
             },
@@ -96,6 +100,12 @@ def _ready_evidence(package_sha256: str) -> dict[str, Any]:
                 "hostStockCodexUploaded": False,
                 "tartStarted": True,
                 "tartStopped": True,
+                "selectedCommandPath": (
+                    "/Users/admin/.local/bin/omnigent-stock-codex-compat"
+                ),
+                "selectedCommandVersion": "codex-cli 0.143.0",
+                "selectedCodexPath": None,
+                "selectedCodexVersion": None,
                 "threadId": None,
                 "scheduledAction": None,
             },
@@ -105,6 +115,12 @@ def _ready_evidence(package_sha256: str) -> dict[str, Any]:
                 "hostStockCodexUploaded": False,
                 "tartStarted": True,
                 "tartStopped": True,
+                "selectedCommandPath": (
+                    "/Users/admin/.local/bin/omnigent-stock-codex-compat"
+                ),
+                "selectedCommandVersion": "codex-cli 0.143.0",
+                "selectedCodexPath": None,
+                "selectedCodexVersion": None,
                 "threadId": "thread-auth",
                 "scheduledAction": None,
             },
@@ -114,6 +130,12 @@ def _ready_evidence(package_sha256: str) -> dict[str, Any]:
                 "hostStockCodexUploaded": False,
                 "tartStarted": True,
                 "tartStopped": True,
+                "selectedCommandPath": None,
+                "selectedCommandVersion": None,
+                "selectedCodexPath": (
+                    "/Users/admin/.local/omnigent/codex-stock/0.143.0/codex"
+                ),
+                "selectedCodexVersion": "codex-cli 0.143.0",
                 "threadId": None,
                 "scheduledAction": "up-to-date",
             },
@@ -123,6 +145,12 @@ def _ready_evidence(package_sha256: str) -> dict[str, Any]:
                 "hostStockCodexUploaded": False,
                 "tartStarted": True,
                 "tartStopped": True,
+                "selectedCommandPath": (
+                    "/Users/admin/.local/bin/omnigent-stock-codex-compat"
+                ),
+                "selectedCommandVersion": "codex-cli 0.143.0",
+                "selectedCodexPath": None,
+                "selectedCodexVersion": None,
                 "threadId": "thread-live",
                 "scheduledAction": None,
             },
@@ -277,6 +305,28 @@ def test_release_evidence_checker_rejects_failed_step(tmp_path: Path) -> None:
 
     assert "stepStatuses[live]='blocked'" in failures
     assert "stepDetails[live][remoteStatus]='blocked'" in failures
+
+
+def test_release_evidence_checker_rejects_stale_selected_version(tmp_path: Path) -> None:
+    pkg_path = _write_package(tmp_path / "compat.pkg")
+    evidence = _ready_evidence(_sha256(pkg_path))
+    evidence["stepDetails"]["live"]["selectedCommandVersion"] = "codex-cli 0.142.5"
+    evidence["stepDetails"]["update-agent"]["selectedCodexVersion"] = "codex-cli 0.142.5"
+
+    failures = _MOD.validate_release_evidence(
+        evidence,
+        pkg_path=pkg_path,
+        package_sha256=_sha256(pkg_path),
+    )
+
+    assert (
+        "stepDetails[live][selectedCommandVersion]='codex-cli 0.142.5'"
+        in failures
+    )
+    assert (
+        "stepDetails[update-agent][selectedCodexVersion]='codex-cli 0.142.5'"
+        in failures
+    )
 
 
 def test_release_evidence_checker_rejects_tart_mismatch(tmp_path: Path) -> None:

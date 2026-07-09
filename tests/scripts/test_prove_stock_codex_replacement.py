@@ -5258,16 +5258,54 @@ def test_stock_codex_compat_pkg_clean_vm_release_runs_steps_in_order(
             live_auth_path=live_auth_path,
             live_auth_source=live_auth_source,
             live_auth_uploaded=live_auth_path is not None,
+            live_selected_command_path=(
+                Path("/Users/admin/.local/bin/omnigent-stock-codex-compat")
+                if step_name == "live"
+                else None
+            ),
+            live_selected_command_version=(
+                remote_channel.selected_version if step_name == "live" else None
+            ),
             live_thread_id="019f-release-live" if step_name == "live" else None,
             update_agent_requested=update_agent,
             update_agent_scheduled_action=(
                 "up-to-date" if step_name == "update-agent" else None
             ),
+            update_agent_selected_codex_path=(
+                Path("/Users/admin/.local/omnigent/codex-stock/0.143.0/codex")
+                if step_name == "update-agent"
+                else None
+            ),
+            update_agent_selected_codex_version=(
+                remote_channel.selected_version
+                if step_name == "update-agent"
+                else None
+            ),
             auth_onboarding_requested=auth_onboarding,
+            auth_onboarding_launcher_path=(
+                Path("/Users/admin/.local/bin/omnigent-stock-codex-compat")
+                if step_name == "auth-onboarding"
+                else None
+            ),
+            auth_onboarding_selected_command_version=(
+                remote_channel.selected_version
+                if step_name == "auth-onboarding"
+                else None
+            ),
             auth_onboarding_auth_uploaded=False if auth_onboarding else None,
             auth_persistence_requested=auth_persistence,
             auth_persistence_auth_source=auth_persistence_auth_source,
             auth_persistence_auth_uploaded=auth_persistence,
+            auth_persistence_selected_command_path=(
+                Path("/Users/admin/.local/bin/omnigent-stock-codex-compat")
+                if step_name == "auth-persistence"
+                else None
+            ),
+            auth_persistence_selected_command_version=(
+                remote_channel.selected_version
+                if step_name == "auth-persistence"
+                else None
+            ),
             auth_persistence_thread_id=(
                 "019f-release-auth-persistence"
                 if step_name == "auth-persistence"
@@ -5335,6 +5373,8 @@ def test_stock_codex_compat_pkg_clean_vm_release_runs_steps_in_order(
     output = capsys.readouterr().out
     assert "stock_codex_compat_pkg_clean_vm_release_status=replacement-ready" in output
     assert '"live": "replacement-ready"' in output
+    assert '"selectedCommandVersion": "codex-cli 0.143.0"' in output
+    assert '"selectedCodexVersion": "codex-cli 0.143.0"' in output
     assert "stock_codex_compat_pkg_clean_vm_release_tart_stopped_count=5" in output
 
 
@@ -5760,6 +5800,7 @@ def test_stock_codex_compat_pkg_clean_vm_update_agent_loads_launchd_without_stoc
                 "launchctlKickstart": "completed",
                 "scheduledAction": "up-to-date",
                 "selectedCodexPath": "/Users/admin/.local/omnigent/codex-stock/0.143.0/codex",
+                "selectedCodexVersion": "codex-cli 0.143.0",
             }
             return subprocess.CompletedProcess(
                 ["ssh"],
@@ -5816,6 +5857,7 @@ def test_stock_codex_compat_pkg_clean_vm_update_agent_loads_launchd_without_stoc
     assert proof.update_agent_selected_codex_path == Path(
         "/Users/admin/.local/omnigent/codex-stock/0.143.0/codex"
     )
+    assert proof.update_agent_selected_codex_version == "codex-cli 0.143.0"
     assert proof.update_agent_host_cache_referenced is False
     assert stock_codex.resolve() not in [source.resolve() for source in uploaded_sources]
     assert [source.name for source in uploaded_sources] == [
@@ -5923,6 +5965,7 @@ def test_stock_codex_compat_pkg_clean_vm_auth_onboarding_guides_login_without_au
                 "kind": "omnigent-clean-vm-auth-onboarding-evidence",
                 "launcherPath": launcher_path,
                 "onboardingCommand": f"CODEX_HOME={codex_home} {launcher_path} login",
+                "selectedCommandVersion": "codex-cli 0.143.0",
                 "unavailableReason": "needs-auth",
             }
             return subprocess.CompletedProcess(
@@ -5985,6 +6028,7 @@ def test_stock_codex_compat_pkg_clean_vm_auth_onboarding_guides_login_without_au
         "/auth-onboarding-codex-home "
         "/Users/admin/.local/bin/omnigent-stock-codex-compat login"
     )
+    assert proof.auth_onboarding_selected_command_version == "codex-cli 0.143.0"
     assert proof.auth_onboarding_command_executed is False
     assert proof.auth_onboarding_auth_uploaded is False
     assert stock_codex.resolve() not in [source.resolve() for source in uploaded_sources]
@@ -6105,6 +6149,7 @@ def test_stock_codex_compat_pkg_clean_vm_auth_persistence_uploads_auth_not_stock
                 "postUnavailableReason": None,
                 "preUnavailableReason": "needs-auth",
                 "selectedCommandPath": launcher_path,
+                "selectedCommandVersion": "codex-cli 0.143.0",
                 "threadId": "019f-auth-persistence-proof",
                 "workingDirectory": (
                     "/Users/admin/.local/omnigent/stock-codex-compat/runtime"
@@ -6171,6 +6216,7 @@ def test_stock_codex_compat_pkg_clean_vm_auth_persistence_uploads_auth_not_stock
         "/Users/admin/.local/bin/omnigent-stock-codex-compat"
     )
     assert proof.auth_persistence_selected_command_path == proof.auth_persistence_launcher_path
+    assert proof.auth_persistence_selected_command_version == "codex-cli 0.143.0"
     assert proof.auth_persistence_codex_home == Path(
         "/Users/admin/.omnigent-stock-codex-compat-clean-vm-remote-acquisition-proof"
         "/auth-onboarding-codex-home"
@@ -6294,6 +6340,7 @@ def test_stock_codex_compat_pkg_clean_vm_live_uploads_auth_but_not_stock_binary(
                 "selectedCommandPath": (
                     "/Users/admin/.local/bin/omnigent-stock-codex-compat"
                 ),
+                "selectedCommandVersion": "codex-cli 0.143.0",
                 "threadId": "019f-live-proof",
                 "workingDirectory": (
                     "/Users/admin/.local/omnigent/stock-codex-compat/runtime"
@@ -6360,6 +6407,7 @@ def test_stock_codex_compat_pkg_clean_vm_live_uploads_auth_but_not_stock_binary(
         "/Users/admin/.local/bin/omnigent-stock-codex-compat"
     )
     assert proof.live_selected_command_path == proof.live_launcher_path
+    assert proof.live_selected_command_version == "codex-cli 0.143.0"
     assert proof.live_codex_home == Path(
         "/Users/admin/.omnigent-stock-codex-compat-clean-vm-remote-acquisition-proof"
         "/live-codex-home"
@@ -6396,6 +6444,7 @@ def test_clean_vm_live_output_evidence_requires_installed_launcher_surface() -> 
                 ),
                 "launcherPath": "/Users/admin/.local/bin/omnigent-stock-codex-compat",
                 "selectedCommandPath": "/Users/admin/.local/bin/omnigent-stock-codex-compat",
+                "selectedCommandVersion": "codex-cli 0.143.0",
                 "threadId": "019f-live-proof",
                 "workingDirectory": "/Users/admin/.local/omnigent/stock-codex-compat/runtime",
             },
@@ -6426,6 +6475,7 @@ def test_clean_vm_update_agent_output_evidence_requires_launchctl_completion() -
                 "launchctlKickstart": "not-run",
                 "scheduledAction": "up-to-date",
                 "selectedCodexPath": "/Users/admin/.local/omnigent/codex-stock/0.143.0/codex",
+                "selectedCodexVersion": "codex-cli 0.143.0",
             },
             sort_keys=True,
         )
@@ -6453,6 +6503,7 @@ def test_clean_vm_auth_onboarding_output_evidence_requires_no_login_execution() 
                 "kind": "omnigent-clean-vm-auth-onboarding-evidence",
                 "launcherPath": launcher_path,
                 "onboardingCommand": f"CODEX_HOME={codex_home} {launcher_path} login",
+                "selectedCommandVersion": "codex-cli 0.143.0",
                 "unavailableReason": "needs-auth",
             },
             sort_keys=True,
@@ -6481,6 +6532,7 @@ def test_clean_vm_auth_onboarding_output_evidence_requires_installed_launcher_pa
                 "kind": "omnigent-clean-vm-auth-onboarding-evidence",
                 "launcherPath": launcher_path,
                 "onboardingCommand": f"CODEX_HOME={codex_home} {launcher_path} login",
+                "selectedCommandVersion": "codex-cli 0.143.0",
                 "unavailableReason": "needs-auth",
             },
             sort_keys=True,
@@ -6518,6 +6570,7 @@ def test_clean_vm_auth_persistence_output_evidence_rejects_automated_browser_log
                 "postUnavailableReason": None,
                 "preUnavailableReason": "needs-auth",
                 "selectedCommandPath": launcher_path,
+                "selectedCommandVersion": "codex-cli 0.143.0",
                 "threadId": "019f-auth-persistence-proof",
                 "workingDirectory": (
                     "/Users/admin/.local/omnigent/stock-codex-compat/runtime"

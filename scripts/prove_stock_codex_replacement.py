@@ -1815,6 +1815,7 @@ class StockCodexCompatPkgCleanVmProof:
     live_model_turn_requested: bool | None = None
     live_launcher_path: Path | None = None
     live_selected_command_path: Path | None = None
+    live_selected_command_version: str | None = None
     live_codex_home: Path | None = None
     live_working_directory: Path | None = None
     live_thread_id: str | None = None
@@ -1830,6 +1831,7 @@ class StockCodexCompatPkgCleanVmProof:
     update_agent_direct_action: str | None = None
     update_agent_scheduled_action: str | None = None
     update_agent_selected_codex_path: Path | None = None
+    update_agent_selected_codex_version: str | None = None
     update_agent_host_cache_referenced: bool | None = None
     auth_onboarding_requested: bool | None = None
     auth_onboarding_launcher_path: Path | None = None
@@ -1837,6 +1839,7 @@ class StockCodexCompatPkgCleanVmProof:
     auth_onboarding_auth_path: Path | None = None
     auth_onboarding_unavailable_reason: str | None = None
     auth_onboarding_command: str | None = None
+    auth_onboarding_selected_command_version: str | None = None
     auth_onboarding_command_executed: bool | None = None
     auth_onboarding_auth_uploaded: bool | None = None
     auth_persistence_requested: bool | None = None
@@ -1844,6 +1847,7 @@ class StockCodexCompatPkgCleanVmProof:
     auth_persistence_auth_uploaded: bool | None = None
     auth_persistence_launcher_path: Path | None = None
     auth_persistence_selected_command_path: Path | None = None
+    auth_persistence_selected_command_version: str | None = None
     auth_persistence_codex_home: Path | None = None
     auth_persistence_auth_path: Path | None = None
     auth_persistence_working_directory: Path | None = None
@@ -8330,7 +8334,7 @@ def _preview_text(value: str, *, limit: int) -> str:
 
 def _parse_clean_vm_live_output_evidence(
     remote_output: str,
-) -> tuple[str, int, str, Path, Path, Path, Path] | None:
+) -> tuple[str, int, str, Path, Path, str, Path, Path] | None:
     """Extract live model-turn evidence emitted by the clean-VM proof script."""
     for line in remote_output.splitlines():
         if not line.startswith("{"):
@@ -8347,6 +8351,7 @@ def _parse_clean_vm_live_output_evidence(
         command_surface = payload.get("commandSurface")
         launcher_path = payload.get("launcherPath")
         selected_command_path = payload.get("selectedCommandPath")
+        selected_command_version = payload.get("selectedCommandVersion")
         codex_home = payload.get("codexHome")
         working_directory = payload.get("workingDirectory")
         if (
@@ -8362,6 +8367,8 @@ def _parse_clean_vm_live_output_evidence(
             and launcher_path
             and isinstance(selected_command_path, str)
             and selected_command_path == launcher_path
+            and isinstance(selected_command_version, str)
+            and selected_command_version
             and isinstance(codex_home, str)
             and codex_home
             and isinstance(working_directory, str)
@@ -8373,6 +8380,7 @@ def _parse_clean_vm_live_output_evidence(
                 preview,
                 Path(launcher_path),
                 Path(selected_command_path),
+                selected_command_version,
                 Path(codex_home),
                 Path(working_directory),
             )
@@ -8381,7 +8389,7 @@ def _parse_clean_vm_live_output_evidence(
 
 def _parse_clean_vm_update_agent_output_evidence(
     remote_output: str,
-) -> tuple[Path, str, str, str, str, str, str, str, Path, bool] | None:
+) -> tuple[Path, str, str, str, str, str, str, str, Path, str, bool] | None:
     """Extract launchd updater evidence emitted by the clean-VM proof script."""
     for line in remote_output.splitlines():
         if not line.startswith("{"):
@@ -8403,6 +8411,7 @@ def _parse_clean_vm_update_agent_output_evidence(
         direct_action = payload.get("directAction")
         scheduled_action = payload.get("scheduledAction")
         selected_codex_path = payload.get("selectedCodexPath")
+        selected_codex_version = payload.get("selectedCodexVersion")
         host_cache_referenced = payload.get("hostCacheReferenced")
         if (
             isinstance(launch_agent_path, str)
@@ -8420,6 +8429,8 @@ def _parse_clean_vm_update_agent_output_evidence(
             and scheduled_action
             and isinstance(selected_codex_path, str)
             and selected_codex_path
+            and isinstance(selected_codex_version, str)
+            and selected_codex_version
             and isinstance(host_cache_referenced, bool)
         ):
             return (
@@ -8432,6 +8443,7 @@ def _parse_clean_vm_update_agent_output_evidence(
                 direct_action,
                 scheduled_action,
                 Path(selected_codex_path),
+                selected_codex_version,
                 host_cache_referenced,
             )
     return None
@@ -8439,7 +8451,7 @@ def _parse_clean_vm_update_agent_output_evidence(
 
 def _parse_clean_vm_auth_onboarding_output_evidence(
     remote_output: str,
-) -> tuple[Path, Path, Path, str, str, bool, bool] | None:
+) -> tuple[Path, Path, Path, str, str, str, bool, bool] | None:
     """Extract guided auth-onboarding evidence emitted by the clean-VM script."""
     for line in remote_output.splitlines():
         if not line.startswith("{"):
@@ -8458,6 +8470,7 @@ def _parse_clean_vm_auth_onboarding_output_evidence(
         auth_path = payload.get("authPath")
         unavailable_reason = payload.get("unavailableReason")
         onboarding_command = payload.get("onboardingCommand")
+        selected_command_version = payload.get("selectedCommandVersion")
         command_executed = payload.get("commandExecuted")
         auth_uploaded = payload.get("authUploaded")
         if not (
@@ -8471,6 +8484,8 @@ def _parse_clean_vm_auth_onboarding_output_evidence(
             and unavailable_reason == "needs-auth"
             and isinstance(onboarding_command, str)
             and onboarding_command
+            and isinstance(selected_command_version, str)
+            and selected_command_version
             and command_executed is False
             and auth_uploaded is False
         ):
@@ -8499,6 +8514,7 @@ def _parse_clean_vm_auth_onboarding_output_evidence(
             parsed_auth_path,
             unavailable_reason,
             onboarding_command,
+            selected_command_version,
             command_executed,
             auth_uploaded,
         )
@@ -8508,7 +8524,21 @@ def _parse_clean_vm_auth_onboarding_output_evidence(
 def _parse_clean_vm_auth_persistence_output_evidence(
     remote_output: str,
 ) -> (
-    tuple[Path, Path, Path, Path, Path, str, str | None, bool, bool, bool, str, int, str]
+    tuple[
+        Path,
+        Path,
+        str,
+        Path,
+        Path,
+        str,
+        str | None,
+        bool,
+        bool,
+        bool,
+        str,
+        int,
+        str,
+    ]
     | None
 ):
     """Extract persisted-auth live evidence emitted by the clean-VM script."""
@@ -8526,6 +8556,7 @@ def _parse_clean_vm_auth_persistence_output_evidence(
         command_surface = payload.get("commandSurface")
         launcher_path = payload.get("launcherPath")
         selected_command_path = payload.get("selectedCommandPath")
+        selected_command_version = payload.get("selectedCommandVersion")
         codex_home = payload.get("codexHome")
         auth_path = payload.get("authPath")
         working_directory = payload.get("workingDirectory")
@@ -8544,6 +8575,8 @@ def _parse_clean_vm_auth_persistence_output_evidence(
             and launcher_path
             and isinstance(selected_command_path, str)
             and selected_command_path == launcher_path
+            and isinstance(selected_command_version, str)
+            and selected_command_version
             and isinstance(codex_home, str)
             and codex_home
             and isinstance(auth_path, str)
@@ -8580,6 +8613,7 @@ def _parse_clean_vm_auth_persistence_output_evidence(
         return (
             parsed_launcher_path,
             Path(selected_command_path),
+            selected_command_version,
             parsed_codex_home,
             parsed_auth_path,
             Path(working_directory),
@@ -14613,7 +14647,8 @@ version_slug="$(
 )"
 provisioned_codex="$clean_cache_root/$version_slug/codex"
 [ -x "$provisioned_codex" ] || fail "remote-acquired stock Codex missing: $provisioned_codex"
-[ "$("$provisioned_codex" --version)" = "$expected_stock_version" ] || \
+provisioned_version="$("$provisioned_codex" --version)"
+[ "$provisioned_version" = "$expected_stock_version" ] || \
   fail "remote-acquired stock Codex version mismatch"
 
 uvx --from "$user_runtime_root" python - \
@@ -14690,6 +14725,7 @@ if not any(
 print(json.dumps({
     "binarySha256": provision.get("sha256"),
     "channelPolicy": channel_policy,
+    "provisionedCodexVersion": expected_stock_version,
     "remoteAcquisitionUrl": expected_channel_url,
 }, sort_keys=True))
 PY
@@ -14697,7 +14733,8 @@ export OMNIGENT_STOCK_CODEX_PATH="$provisioned_codex"
 
 selected="$(command -v omnigent-stock-codex-compat)"
 [ "$selected" = "$launcher_path" ] || fail "selected wrong launcher: $selected"
-[ "$("$selected" --version)" = "$expected_stock_version" ] || \
+selected_version="$("$selected" --version)"
+[ "$selected_version" = "$expected_stock_version" ] || \
   fail "launcher version delegation mismatch"
 probe_output="$("$selected" --omnigent-stock-codex-compat-launcher-probe)"
 case "$probe_output" in
@@ -14711,7 +14748,8 @@ if [ "$proof_mode" = "auth-onboarding" ]; then
     OMNIGENT_STOCK_CODEX_PATH="$provisioned_codex" \
     uvx --from "$user_runtime_root" python - \
       "$auth_onboarding_codex_home" \
-      "$launcher_path" <<'PY'
+      "$launcher_path" \
+      "$selected_version" <<'PY'
 import json
 import shlex
 import sys
@@ -14721,6 +14759,7 @@ from omnigent import codex_native
 
 codex_home = Path(sys.argv[1])
 launcher_path = Path(sys.argv[2])
+selected_command_version = sys.argv[3]
 source = codex_native._resolve_codex_auth_source()
 reason = codex_native._codex_auth_unavailable_reason()
 onboarding_command = (
@@ -14736,6 +14775,7 @@ print(json.dumps({
     "kind": "omnigent-clean-vm-auth-onboarding-evidence",
     "launcherPath": str(launcher_path),
     "onboardingCommand": onboarding_command,
+    "selectedCommandVersion": selected_command_version,
     "unavailableReason": reason,
 }, sort_keys=True))
 if source.auth_path != codex_home / "auth.json":
@@ -14857,6 +14897,7 @@ exit-$auth_persistence_status"
       "$auth_persistence_live_output_path" \
       "$selected" \
       "$launcher_path" \
+      "$selected_version" \
       "$auth_onboarding_codex_home" \
       "$user_runtime_root" <<'PY'
 import json
@@ -14869,6 +14910,7 @@ from pathlib import Path
     live_output_path,
     selected_command_path,
     launcher_path,
+    selected_command_version,
     codex_home,
     user_runtime_root,
 ) = sys.argv[1:]
@@ -14940,6 +14982,7 @@ print(json.dumps({
     "postUnavailableReason": post.get("unavailableReason"),
     "preUnavailableReason": pre.get("unavailableReason"),
     "selectedCommandPath": selected_command_path,
+    "selectedCommandVersion": selected_command_version,
     "threadId": thread_id,
     "workingDirectory": user_runtime_root,
 }, sort_keys=True))
@@ -15150,7 +15193,8 @@ PY
     "$clean_cache_root" \
     "$launch_agent_path" \
     "$launch_agent_label" \
-    "$launch_domain" <<'PY'
+    "$launch_domain" \
+    "$expected_stock_version" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -15163,6 +15207,7 @@ from pathlib import Path
     launch_agent_path,
     launch_agent_label,
     launch_domain,
+    selected_codex_version,
 ) = sys.argv[1:]
 
 direct = json.loads(Path(update_output_path).read_text(encoding="utf-8"))
@@ -15199,6 +15244,7 @@ print(json.dumps({
     "launchctlKickstart": "completed",
     "scheduledAction": scheduled_action,
     "selectedCodexPath": str(selected_codex_path),
+    "selectedCodexVersion": selected_codex_version,
 }, sort_keys=True))
 PY
   printf 'stock_codex_compat_pkg_clean_vm_update_agent_status=replacement-ready\n'
@@ -15244,6 +15290,7 @@ if [ -n "$live_auth_json" ]; then
     "$live_output_path" \
     "$selected" \
     "$launcher_path" \
+    "$selected_version" \
     "$live_codex_home" \
     "$user_runtime_root" <<'PY'
 import json
@@ -15254,6 +15301,7 @@ from pathlib import Path
     live_output_path,
     selected_command_path,
     launcher_path,
+    selected_command_version,
     live_codex_home,
     user_runtime_root,
 ) = sys.argv[1:]
@@ -15304,6 +15352,7 @@ print(json.dumps({
     "firstAgentMessagePreview": first_agent_message[:200],
     "launcherPath": launcher_path,
     "selectedCommandPath": selected_command_path,
+    "selectedCommandVersion": selected_command_version,
     "threadId": thread_id,
     "workingDirectory": user_runtime_root,
 }, sort_keys=True))
@@ -16455,6 +16504,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
             live_agent_message_preview = None
             live_launcher_path = None
             live_selected_command_path = None
+            live_selected_command_version = None
             live_codex_home = None
             live_working_directory = None
             update_agent_launch_agent_path = None
@@ -16466,16 +16516,19 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
             update_agent_direct_action = None
             update_agent_scheduled_action = None
             update_agent_selected_codex_path = None
+            update_agent_selected_codex_version = None
             update_agent_host_cache_referenced = None
             auth_onboarding_launcher_path = None
             auth_onboarding_codex_home = None
             auth_onboarding_auth_path = None
             auth_onboarding_unavailable_reason = None
             auth_onboarding_command = None
+            auth_onboarding_selected_command_version = None
             auth_onboarding_command_executed = None
             auth_onboarding_auth_uploaded = None
             auth_persistence_launcher_path = None
             auth_persistence_selected_command_path = None
+            auth_persistence_selected_command_version = None
             auth_persistence_codex_home = None
             auth_persistence_auth_path = None
             auth_persistence_working_directory = None
@@ -16494,6 +16547,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     live_agent_message_preview,
                     live_launcher_path,
                     live_selected_command_path,
+                    live_selected_command_version,
                     live_codex_home,
                     live_working_directory,
                 ) = live_output_evidence
@@ -16508,6 +16562,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     update_agent_direct_action,
                     update_agent_scheduled_action,
                     update_agent_selected_codex_path,
+                    update_agent_selected_codex_version,
                     update_agent_host_cache_referenced,
                 ) = update_agent_output_evidence
                 update_agent_host_cache_referenced = (
@@ -16520,6 +16575,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     auth_onboarding_auth_path,
                     auth_onboarding_unavailable_reason,
                     auth_onboarding_command,
+                    auth_onboarding_selected_command_version,
                     auth_onboarding_command_executed,
                     auth_onboarding_auth_uploaded,
                 ) = auth_onboarding_output_evidence
@@ -16527,6 +16583,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                 (
                     auth_persistence_launcher_path,
                     auth_persistence_selected_command_path,
+                    auth_persistence_selected_command_version,
                     auth_persistence_codex_home,
                     auth_persistence_auth_path,
                     auth_persistence_working_directory,
@@ -16565,6 +16622,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     live_agent_message_preview=live_agent_message_preview,
                     live_launcher_path=live_launcher_path,
                     live_selected_command_path=live_selected_command_path,
+                    live_selected_command_version=live_selected_command_version,
                     live_codex_home=live_codex_home,
                     live_working_directory=live_working_directory,
                     update_agent_requested=update_agent,
@@ -16577,6 +16635,9 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     update_agent_direct_action=update_agent_direct_action,
                     update_agent_scheduled_action=update_agent_scheduled_action,
                     update_agent_selected_codex_path=update_agent_selected_codex_path,
+                    update_agent_selected_codex_version=(
+                        update_agent_selected_codex_version
+                    ),
                     update_agent_host_cache_referenced=(
                         update_agent_host_cache_referenced
                     ),
@@ -16588,6 +16649,9 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                         auth_onboarding_unavailable_reason
                     ),
                     auth_onboarding_command=auth_onboarding_command,
+                    auth_onboarding_selected_command_version=(
+                        auth_onboarding_selected_command_version
+                    ),
                     auth_onboarding_command_executed=(
                         auth_onboarding_command_executed
                     ),
@@ -16600,6 +16664,9 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                     auth_persistence_launcher_path=auth_persistence_launcher_path,
                     auth_persistence_selected_command_path=(
                         auth_persistence_selected_command_path
+                    ),
+                    auth_persistence_selected_command_version=(
+                        auth_persistence_selected_command_version
                     ),
                     auth_persistence_codex_home=auth_persistence_codex_home,
                     auth_persistence_auth_path=auth_persistence_auth_path,
@@ -21646,6 +21713,10 @@ def print_stock_codex_compat_pkg_clean_vm_update_agent_proof(
         f"{proof.update_agent_selected_codex_path}"
     )
     print(
+        "stock_codex_compat_pkg_clean_vm_update_agent_selected_codex_version="
+        f"{proof.update_agent_selected_codex_version}"
+    )
+    print(
         "stock_codex_compat_pkg_clean_vm_update_agent_host_cache_referenced="
         f"{proof.update_agent_host_cache_referenced}"
     )
@@ -21873,6 +21944,10 @@ def print_stock_codex_compat_pkg_clean_vm_auth_persistence_proof(
         f"{proof.auth_persistence_selected_command_path}"
     )
     print(
+        "stock_codex_compat_pkg_clean_vm_auth_persistence_selected_command_version="
+        f"{proof.auth_persistence_selected_command_version}"
+    )
+    print(
         "stock_codex_compat_pkg_clean_vm_auth_persistence_codex_home="
         f"{proof.auth_persistence_codex_home}"
     )
@@ -22007,6 +22082,10 @@ def print_stock_codex_compat_pkg_clean_vm_live_proof(
     print(
         "stock_codex_compat_pkg_clean_vm_live_selected_command_path="
         f"{proof.live_selected_command_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_clean_vm_live_selected_command_version="
+        f"{proof.live_selected_command_version}"
     )
     print(
         "stock_codex_compat_pkg_clean_vm_live_codex_home="
@@ -22310,6 +22389,37 @@ def print_stock_codex_compat_pkg_clean_vm_release_proof(
                 if step_name == "live"
                 else step_proof.auth_persistence_thread_id
                 if step_name == "auth-persistence"
+                else None
+            ),
+            "selectedCommandPath": (
+                str(step_proof.live_selected_command_path)
+                if step_name == "live" and step_proof.live_selected_command_path
+                else str(step_proof.auth_persistence_selected_command_path)
+                if step_name == "auth-persistence"
+                and step_proof.auth_persistence_selected_command_path
+                else str(step_proof.auth_onboarding_launcher_path)
+                if step_name == "auth-onboarding"
+                and step_proof.auth_onboarding_launcher_path
+                else None
+            ),
+            "selectedCommandVersion": (
+                step_proof.live_selected_command_version
+                if step_name == "live"
+                else step_proof.auth_persistence_selected_command_version
+                if step_name == "auth-persistence"
+                else step_proof.auth_onboarding_selected_command_version
+                if step_name == "auth-onboarding"
+                else None
+            ),
+            "selectedCodexPath": (
+                str(step_proof.update_agent_selected_codex_path)
+                if step_name == "update-agent"
+                and step_proof.update_agent_selected_codex_path
+                else None
+            ),
+            "selectedCodexVersion": (
+                step_proof.update_agent_selected_codex_version
+                if step_name == "update-agent"
                 else None
             ),
             "scheduledAction": (

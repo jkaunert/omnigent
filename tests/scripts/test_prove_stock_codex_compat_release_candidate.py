@@ -81,22 +81,36 @@ def _release_ready_stdout(*, direct_ssh: bool = False) -> str:
                 '{"remote-acquisition":{"status":"replacement-ready",'
                 '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
                 f'"tartStarted":{step_tart_value},"tartStopped":{step_tart_value},'
+                '"selectedCommandPath":null,"selectedCommandVersion":null,'
+                '"selectedCodexPath":null,"selectedCodexVersion":null,'
                 '"threadId":null,"scheduledAction":null},'
                 '"auth-onboarding":{"status":"replacement-ready",'
                 '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
                 f'"tartStarted":{step_tart_value},"tartStopped":{step_tart_value},'
+                '"selectedCommandPath":"/Users/admin/.local/bin/omnigent-stock-codex-compat",'
+                '"selectedCommandVersion":"codex-cli 0.143.0",'
+                '"selectedCodexPath":null,"selectedCodexVersion":null,'
                 '"threadId":null,"scheduledAction":null},'
                 '"auth-persistence":{"status":"replacement-ready",'
                 '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
                 f'"tartStarted":{step_tart_value},"tartStopped":{step_tart_value},'
+                '"selectedCommandPath":"/Users/admin/.local/bin/omnigent-stock-codex-compat",'
+                '"selectedCommandVersion":"codex-cli 0.143.0",'
+                '"selectedCodexPath":null,"selectedCodexVersion":null,'
                 '"threadId":"thread-auth","scheduledAction":null},'
                 '"update-agent":{"status":"replacement-ready",'
                 '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
                 f'"tartStarted":{step_tart_value},"tartStopped":{step_tart_value},'
+                '"selectedCommandPath":null,"selectedCommandVersion":null,'
+                '"selectedCodexPath":"/Users/admin/.local/omnigent/codex-stock/0.143.0/codex",'
+                '"selectedCodexVersion":"codex-cli 0.143.0",'
                 '"threadId":null,"scheduledAction":"up-to-date"},'
                 '"live":{"status":"replacement-ready",'
                 '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
                 f'"tartStarted":{step_tart_value},"tartStopped":{step_tart_value},'
+                '"selectedCommandPath":"/Users/admin/.local/bin/omnigent-stock-codex-compat",'
+                '"selectedCommandVersion":"codex-cli 0.143.0",'
+                '"selectedCodexPath":null,"selectedCodexVersion":null,'
                 '"threadId":"thread-live","scheduledAction":null}}'
             ),
         ]
@@ -513,6 +527,45 @@ def test_release_candidate_wrapper_rejects_direct_ssh_step_tart_activity(
     assert "stepDetails[live][tartStarted]=True" in evidence[
         "releaseCriteriaFailures"
     ]
+
+
+def test_release_candidate_wrapper_rejects_stale_selected_version(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    proof_script = _write_file(tmp_path / "scripts" / "prove.py")
+    pkg_path = _write_file(tmp_path / "artifacts" / "compat.pkg")
+    evidence_path = tmp_path / "artifacts" / "bad-selected-version-evidence.json"
+    stdout = _release_ready_stdout().replace(
+        '"selectedCommandVersion":"codex-cli 0.143.0"',
+        '"selectedCommandVersion":"codex-cli 0.142.5"',
+        1,
+    )
+
+    def fake_run(_command: tuple[str, ...], **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(_MOD.subprocess, "run", fake_run)
+
+    exit_code = _MOD.main(
+        [
+            "--proof-script",
+            str(proof_script),
+            "--pkg-path",
+            str(pkg_path),
+            "--clean-vm-tart-name",
+            "omnigent-clean",
+            "--evidence-output",
+            str(evidence_path),
+        ]
+    )
+
+    assert exit_code == 1
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert (
+        "stepDetails[auth-onboarding][selectedCommandVersion]='codex-cli 0.142.5'"
+        in evidence["releaseCriteriaFailures"]
+    )
 
 
 def test_release_candidate_wrapper_refuses_to_overwrite_evidence(
