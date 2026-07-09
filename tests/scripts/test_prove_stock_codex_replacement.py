@@ -4638,6 +4638,52 @@ def _write_stock_codex_compat_release_evidence(
     return path
 
 
+def _nontart_preflight_proof(
+    *,
+    status: str = "replacement-ready",
+    missing_prerequisites: tuple[str, ...] = (),
+    package_path: Path | None = None,
+    package_sha256: str | None = "pkg-sha",
+    release_evidence_path: Path | None = None,
+    release_evidence_status: str | None = "verified",
+) -> Any:
+    return _MOD.StockCodexCompatPkgNonTartCleanMachinePreflightProof(
+        status=status,
+        missing_prerequisites=missing_prerequisites,
+        tool_paths={"ssh": "/usr/bin/ssh", "scp": "/usr/bin/scp"},
+        package_path=package_path,
+        package_sha256=package_sha256,
+        release_evidence_path=release_evidence_path,
+        release_evidence_status=release_evidence_status,
+        release_evidence_output_preview="verified\n",
+        ssh_target="admin@192.0.2.10",
+        ssh_identity=None,
+        ssh_port=22,
+        remote_work_dir=None,
+        remote_status=status,
+        remote_output_preview="",
+        remote_user="admin",
+        remote_home="/Users/admin",
+        macos_version="26.5.1",
+        arch="arm64",
+        uvx_path="/Users/admin/.local/bin/uvx",
+        uv_path="/Users/admin/.local/bin/uv",
+        sudo_noninteractive=True,
+        disposable_marker_present=True,
+        package_receipt_present=False,
+        package_payload_present=False,
+        launcher_present=False,
+        launcher_manifest_present=False,
+        adapter_root_present=False,
+        stock_cache_present=False,
+        launch_agent_present=False,
+        remote_package_sha256=package_sha256,
+        signature_status="accepted",
+        staple_status="accepted",
+        gatekeeper_status="accepted",
+    )
+
+
 def test_stock_codex_compat_pkg_nontart_clean_machine_preflight_blocks_stale_selected_version(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -4695,6 +4741,131 @@ def test_stock_codex_compat_pkg_nontart_clean_machine_preflight_blocks_stale_sel
     assert "selectedCodexVersion]='codex-cli 0.142.5'" in str(
         proof.release_evidence_output_preview
     )
+
+
+def test_stock_codex_compat_pkg_nontart_clean_machine_install_blocks_before_install(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "compat.pkg"
+    evidence_path = tmp_path / "release-evidence.json"
+
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof",
+        lambda **_kwargs: _nontart_preflight_proof(
+            status="blocked",
+            missing_prerequisites=("release evidence verifier did not pass",),
+            package_path=package_path,
+            release_evidence_path=evidence_path,
+            release_evidence_status="blocked",
+        ),
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_clean_vm_remote_acquisition_proof",
+        lambda *_args, **_kwargs: pytest.fail("install should not run after blocked preflight"),
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_nontart_clean_machine_install_proof(
+        tmp_path / "codex",
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_port=22,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.install is None
+    assert proof.preflight.release_evidence_status == "blocked"
+    assert "non-Tart clean-machine preflight did not pass" in proof.missing_prerequisites
+
+
+def test_stock_codex_compat_pkg_nontart_clean_machine_install_runs_direct_remote_acquisition(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stock_codex = tmp_path / "codex"
+    package_path = tmp_path / "compat.pkg"
+    evidence_path = tmp_path / "release-evidence.json"
+    preflight = _nontart_preflight_proof(
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+    )
+    captured_install_kwargs: dict[str, object] = {}
+
+    def fake_remote_acquisition(
+        stock_codex_path: Path,
+        **kwargs: object,
+    ) -> Any:
+        captured_install_kwargs.update(kwargs)
+        return _MOD.StockCodexCompatPkgCleanVmProof(
+            status="replacement-ready",
+            missing_prerequisites=(),
+            tool_paths={"ssh": "/usr/bin/ssh", "scp": "/usr/bin/scp"},
+            stock_codex_path=stock_codex_path,
+            stock_codex_version="codex-cli 0.142.5",
+            stock_codex_sha256="a" * 64,
+            package_path=package_path,
+            package_sha256="pkg-sha",
+            tart_name=None,
+            ssh_target="admin@192.0.2.10",
+            ssh_identity=None,
+            ssh_user=None,
+            ssh_port=22,
+            tart_ip=None,
+            remote_work_dir="/tmp/proof",
+            remote_status="replacement-ready",
+            remote_output_preview="remote ok",
+            tart_started=False,
+            tart_stopped=False,
+            proof_variant="official-remote-channel-acquisition",
+            cask_version="0.143.0",
+            cask_url=(
+                "https://github.com/openai/codex/releases/download/"
+                "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+            ),
+            cask_sha256="b" * 64,
+            channel_policy="official-openai-github-release",
+            host_stock_codex_uploaded=False,
+        )
+
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof",
+        lambda **_kwargs: preflight,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_clean_vm_remote_acquisition_proof",
+        fake_remote_acquisition,
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_nontart_clean_machine_install_proof(
+        stock_codex,
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_port=22,
+    )
+
+    assert proof.status == "replacement-ready"
+    assert captured_install_kwargs["clean_vm_tart_name"] is None
+    assert captured_install_kwargs["clean_vm_ssh_user"] is None
+    assert captured_install_kwargs["clean_vm_start_tart"] is False
+    assert captured_install_kwargs["clean_vm_ssh_target"] == "admin@192.0.2.10"
+
+    _MOD.print_stock_codex_compat_pkg_nontart_clean_machine_install_proof(proof)
+    output = capsys.readouterr().out
+    assert (
+        "stock_codex_compat_pkg_nontart_clean_machine_install_status=replacement-ready"
+        in output
+    )
+    assert "release-evidence and clean-target preflight checks" in output
+    assert "host_stock_codex_uploaded=False" in output
 
 
 def test_stock_codex_compat_pkg_nontart_clean_machine_preflight_reports_upload_failure(

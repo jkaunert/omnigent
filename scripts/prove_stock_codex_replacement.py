@@ -1901,6 +1901,16 @@ class StockCodexCompatPkgNonTartCleanMachinePreflightProof:
 
 
 @dataclass(frozen=True)
+class StockCodexCompatPkgNonTartCleanMachineInstallProof:
+    """Direct-SSH clean-machine package install/provisioning proof result."""
+
+    status: str
+    missing_prerequisites: tuple[str, ...]
+    preflight: StockCodexCompatPkgNonTartCleanMachinePreflightProof
+    install: StockCodexCompatPkgCleanVmProof | None
+
+
+@dataclass(frozen=True)
 class StockCodexCompatPkgCleanVmReleaseProof:
     """Composite release proof for the signed-pkg clean-VM gates."""
 
@@ -14165,6 +14175,67 @@ def run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
     )
 
 
+def run_stock_codex_compat_pkg_nontart_clean_machine_install_proof(
+    stock_codex_path: Path,
+    *,
+    package_path: Path | None,
+    release_evidence_path: Path | None,
+    clean_vm_ssh_target: str | None,
+    clean_vm_ssh_identity: Path | None,
+    clean_vm_ssh_port: int,
+) -> StockCodexCompatPkgNonTartCleanMachineInstallProof:
+    """Run direct-SSH package install/provisioning after preflight promotion checks."""
+    preflight = run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+        package_path=package_path,
+        release_evidence_path=release_evidence_path,
+        clean_vm_ssh_target=clean_vm_ssh_target,
+        clean_vm_ssh_identity=clean_vm_ssh_identity,
+        clean_vm_ssh_port=clean_vm_ssh_port,
+    )
+    if preflight.status != "replacement-ready":
+        return StockCodexCompatPkgNonTartCleanMachineInstallProof(
+            status="blocked",
+            missing_prerequisites=(
+                "non-Tart clean-machine preflight did not pass",
+                *preflight.missing_prerequisites,
+            ),
+            preflight=preflight,
+            install=None,
+        )
+
+    install = run_stock_codex_compat_pkg_clean_vm_remote_acquisition_proof(
+        stock_codex_path,
+        package_path=package_path,
+        clean_vm_ssh_target=clean_vm_ssh_target,
+        clean_vm_tart_name=None,
+        clean_vm_ssh_identity=clean_vm_ssh_identity,
+        clean_vm_ssh_user=None,
+        clean_vm_ssh_port=clean_vm_ssh_port,
+        clean_vm_start_tart=False,
+    )
+    missing = tuple(install.missing_prerequisites)
+    if install.tart_started or install.tart_name or install.tart_ip:
+        missing = (
+            *missing,
+            "non-Tart clean-machine install unexpectedly used Tart resolution",
+        )
+    if install.status != "replacement-ready" or missing:
+        return StockCodexCompatPkgNonTartCleanMachineInstallProof(
+            status="blocked",
+            missing_prerequisites=missing
+            or ("non-Tart clean-machine install/provisioning did not pass",),
+            preflight=preflight,
+            install=install,
+        )
+
+    return StockCodexCompatPkgNonTartCleanMachineInstallProof(
+        status="replacement-ready",
+        missing_prerequisites=(),
+        preflight=preflight,
+        install=install,
+    )
+
+
 def _clean_vm_bootstrap_script_text() -> str:
     """Return the guest-agent bootstrap script for raw disposable Tart clones."""
     marker_name = shlex.quote(EXTERNAL_CLEAN_USER_MARKER_NAME)
@@ -22295,6 +22366,103 @@ def print_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
     )
 
 
+def print_stock_codex_compat_pkg_nontart_clean_machine_install_proof(
+    proof: StockCodexCompatPkgNonTartCleanMachineInstallProof,
+) -> None:
+    """Emit operator evidence for direct-SSH package install/provisioning."""
+    preflight = proof.preflight
+    install = proof.install
+    print("stock_codex_compat_pkg_nontart_clean_machine_install_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_install_surface="
+        "signed-pkg-nontart-clean-machine-install-provision-cleanup"
+    )
+    print(f"stock_codex_compat_pkg_nontart_clean_machine_install_status={proof.status}")
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_install_missing_prerequisites="
+        f"{json.dumps(list(proof.missing_prerequisites), sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_install_preflight_status="
+        f"{preflight.status}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_install_release_evidence_status="
+        f"{preflight.release_evidence_status}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_install_package_path="
+        f"{preflight.package_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_install_package_sha256="
+        f"{preflight.package_sha256}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_install_ssh_target="
+        f"{preflight.ssh_target}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_install_preflight_remote_status="
+        f"{preflight.remote_status}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_install_install_remote_status="
+        f"{install.remote_status if install else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_install_host_reference_codex_path="
+        f"{install.stock_codex_path if install else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_install_host_reference_version="
+        f"{install.stock_codex_version if install else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_install_cask_version="
+        f"{install.cask_version if install else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_install_cask_url="
+        f"{install.cask_url if install else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_install_channel_policy="
+        f"{install.channel_policy if install else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_install_host_stock_codex_uploaded="
+        f"{install.host_stock_codex_uploaded if install else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_install_tart_started="
+        f"{install.tart_started if install else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_install_tart_stopped="
+        f"{install.tart_stopped if install else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_install_remote_output="
+        f"{install.remote_output_preview if install else None!r}"
+    )
+    if proof.status == "blocked":
+        print(
+            "ASSERTION: non-Tart clean-machine install/provisioning is blocked "
+            "unless release evidence, direct clean-machine preflight, SSH access, "
+            "package installation, official-channel stock Codex acquisition, and "
+            "rollback cleanup all pass"
+        )
+        return
+    print(
+        "ASSERTION: after release-evidence and clean-target preflight checks, "
+        "the signed/notarized package can install on an operator-supplied "
+        "non-Tart disposable macOS target, provision stock Codex from the "
+        "official OpenAI GitHub release channel without uploading the host "
+        "stock binary, and roll back user/package state"
+    )
+
+
 def print_stock_codex_compat_pkg_clean_vm_release_proof(
     proof: StockCodexCompatPkgCleanVmReleaseProof,
 ) -> None:
@@ -27308,6 +27476,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-pkg-clean-vm-live",
             "stock-codex-compat-pkg-clean-vm-release",
             "stock-codex-compat-pkg-nontart-clean-machine-preflight",
+            "stock-codex-compat-pkg-nontart-clean-machine-install",
             "stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
             "stock-codex-compat-wrapper-xcodebuild-bridge-test-adapter",
             "stock-codex-compat-wrapper-relay-tool",
@@ -27528,6 +27697,12 @@ def parse_args() -> argparse.Namespace:
             "uvx, noninteractive sudo, disposable marker, clean Omnigent "
             "state, remote package SHA, pkg signature, stapled ticket, and "
             "Gatekeeper acceptance, and never installs the package. "
+            "'stock-codex-compat-pkg-nontart-clean-machine-install' consumes "
+            "--pkg-path plus --release-evidence-path, runs that same direct "
+            "clean-machine preflight first, then installs the signed/notarized "
+            "package on the operator-supplied direct SSH target, provisions "
+            "stock Codex from the official OpenAI GitHub release channel, and "
+            "rolls back proof-owned user/package state without Tart. "
             "'stock-codex-compat-wrapper-xcodebuild-bridge-adapter' proves "
             "that XcodeBuildMCP simulator build/run can execute through the "
             "same wrapper-owned file bridge while stock Codex stays in "
@@ -28748,6 +28923,64 @@ def main() -> int:
             )
         print_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
             run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+                package_path=args.pkg_path,
+                release_evidence_path=args.release_evidence_path,
+                clean_vm_ssh_target=args.clean_vm_ssh_target,
+                clean_vm_ssh_identity=args.clean_vm_ssh_identity,
+                clean_vm_ssh_port=args.clean_vm_ssh_port,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-nontart-clean-machine-install":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-install does not "
+                "use --apple-bundle; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-install cannot "
+                "allow a Codex-fork binary."
+            )
+        if args.pkg_output_path is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-install consumes "
+                "--pkg-path; produce persistent packages with "
+                "stock-codex-compat-pkg-signed-notarized."
+            )
+        if args.pkg_path is None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-install requires "
+                "--pkg-path from stock-codex-compat-pkg-signed-notarized."
+            )
+        if args.release_evidence_path is None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-install requires "
+                "--release-evidence-path from the clean-VM release evidence artifact."
+            )
+        if args.clean_vm_tart_name is not None or args.clean_vm_start_tart:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-install refuses "
+                "Tart resolution; pass --clean-vm-ssh-target for a direct SSH target."
+            )
+        if args.clean_vm_source_tart_name is not None or args.clean_vm_bootstrap_install_uv:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-install does not "
+                "bootstrap Tart VMs or install uvx; prepare the direct SSH target "
+                "outside this proof."
+            )
+        if args.clean_vm_ssh_user is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-install does not "
+                "derive SSH targets from --clean-vm-ssh-user; include the user in "
+                "--clean-vm-ssh-target."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_pkg_nontart_clean_machine_install_proof(
+            run_stock_codex_compat_pkg_nontart_clean_machine_install_proof(
+                codex_path,
                 package_path=args.pkg_path,
                 release_evidence_path=args.release_evidence_path,
                 clean_vm_ssh_target=args.clean_vm_ssh_target,

@@ -373,21 +373,24 @@ The next gates should split by product mode:
   host stock-Codex upload. The direct-SSH clean-machine preflight runs that
   verifier before SSH readiness, upload, or remote inspection, so stale release
   evidence cannot promote a package candidate onto an operator-supplied target.
-  The production stock-Codex channel policy gate
-  is green for official-source validation, clean-cache reuse before network
-  access, fail-closed non-official URL rejection, resolver selection,
-  explicit-download remote acquisition, SHA verification, safe archive
-  extraction, staged-payload reuse, and no-host-cache leakage from both source
-  checkout and packaged-runtime paths. The next non-Tart production slice is the
-  direct-SSH clean-machine preflight gate: it should consume the archived `.pkg`
-  and release evidence JSON, refuse Tart resolution, verify target readiness and
-  package acceptance without installing, and report `unsafe-target` on dirty
-  unmarked machines. Remaining production choices after that preflight are
-  non-Tart package install/provisioning execution, browser or device auth
-  onboarding UX, launchd enablement policy, alpha/pre-release channel policy,
-  independent archive signature policy, and broader UI/device bridge coverage
-  such as screenshot, snapshot, gesture, or device execution if product scope
-  requires them. Raw unwrapped stock Codex Electron/CLI route parity remains
+  The direct-SSH clean-machine install/provisioning gate is also green:
+  `stock-codex-compat-pkg-nontart-clean-machine-install` first reruns the
+  release-evidence verifier and direct clean-machine preflight, then installs
+  the signed/notarized package on `omnigent-clean@10.0.0.10`, provisions
+  clean-target stock Codex `codex-cli 0.143.0` from the official OpenAI GitHub
+  release channel, confirms `host_stock_codex_uploaded=False` and no Tart use,
+  and a follow-up preflight proves package receipt, payload, launcher,
+  manifest, adapter root, stock cache, and LaunchAgent residue are absent.
+  The production stock-Codex channel policy gate is green for official-source
+  validation, clean-cache reuse before network access, fail-closed non-official
+  URL rejection, resolver selection, explicit-download remote acquisition, SHA
+  verification, safe archive extraction, staged-payload reuse, and no-host-cache
+  leakage from both source checkout and packaged-runtime paths. Remaining
+  production choices are browser or device auth onboarding UX, launchd
+  enablement policy, alpha/pre-release channel policy, independent archive
+  signature policy, and broader UI/device bridge coverage such as screenshot,
+  snapshot, gesture, or device execution if product scope requires them. Raw
+  unwrapped stock Codex Electron/CLI route parity remains
   blocked;
 - decide whether automated browser/device login UX, token freshness validation,
   or cross-machine credential packaging is product scope; or
