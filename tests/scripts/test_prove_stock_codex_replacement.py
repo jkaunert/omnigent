@@ -5154,6 +5154,258 @@ def test_nontart_clean_machine_auth_onboarding_blocks_missing_cask_version(
     assert any("omitted cask version" in item for item in proof.missing_prerequisites)
 
 
+def _auth_login_clean_vm_proof(
+    *,
+    stock_codex_path: Path,
+    package_path: Path,
+    remote_codex_home: str = "/Users/admin/.codex-omnigent-existing-auth",
+    selected_version: str = "codex-cli 0.143.0",
+    cask_version: str | None = "0.143.0",
+    command_executed: bool = True,
+    auth_uploaded: bool = False,
+) -> Any:
+    launcher_path = Path("/Users/admin/.local/bin/omnigent-stock-codex-compat")
+    codex_home = Path(remote_codex_home)
+    return _MOD.StockCodexCompatPkgCleanVmProof(
+        status="replacement-ready",
+        missing_prerequisites=(),
+        tool_paths={"ssh": "/usr/bin/ssh", "scp": "/usr/bin/scp"},
+        stock_codex_path=stock_codex_path,
+        stock_codex_version="codex-cli 0.142.5",
+        stock_codex_sha256="a" * 64,
+        package_path=package_path,
+        package_sha256="pkg-sha",
+        tart_name=None,
+        ssh_target="admin@192.0.2.10",
+        ssh_identity=None,
+        ssh_user=None,
+        ssh_port=22,
+        tart_ip=None,
+        remote_work_dir="/tmp/proof",
+        remote_status="replacement-ready",
+        remote_output_preview="auth login ok",
+        tart_started=False,
+        tart_stopped=False,
+        proof_variant="official-remote-channel-auth-login-existing",
+        cask_version=cask_version,
+        cask_url=(
+            "https://github.com/openai/codex/releases/download/"
+            "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+        ),
+        cask_sha256="b" * 64,
+        channel_policy="official-openai-github-release",
+        host_stock_codex_uploaded=False,
+        auth_login_requested=True,
+        auth_login_auth_source=f"remote-login-codex-home:{remote_codex_home}",
+        auth_login_auth_uploaded=auth_uploaded,
+        auth_login_launcher_path=launcher_path,
+        auth_login_selected_command_path=launcher_path,
+        auth_login_selected_command_version=selected_version,
+        auth_login_codex_home=codex_home,
+        auth_login_auth_path=codex_home / "auth.json",
+        auth_login_command=f"CODEX_HOME={codex_home} {launcher_path} login",
+        auth_login_pre_unavailable_reason="needs-auth",
+        auth_login_post_unavailable_reason=None,
+        auth_login_command_executed=command_executed,
+        auth_login_browser_login_automated=False,
+        auth_login_auth_persisted_after_login=True,
+    )
+
+
+def test_stock_codex_compat_pkg_nontart_clean_machine_auth_login_blocks_before_install(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "compat.pkg"
+    evidence_path = tmp_path / "release-evidence.json"
+
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof",
+        lambda **_kwargs: _nontart_preflight_proof(
+            status="blocked",
+            missing_prerequisites=("release evidence verifier did not pass",),
+            package_path=package_path,
+            release_evidence_path=evidence_path,
+            release_evidence_status="blocked",
+        ),
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_clean_vm_auth_login_proof",
+        lambda *_args, **_kwargs: pytest.fail(
+            "auth login should not run after blocked preflight"
+        ),
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_nontart_clean_machine_auth_login_proof(
+        tmp_path / "codex",
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_port=22,
+        remote_codex_home="/Users/admin/.codex-omnigent-existing-auth",
+        timeout_seconds=30,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.login is None
+    assert proof.preflight.release_evidence_status == "blocked"
+    assert "non-Tart clean-machine preflight did not pass" in proof.missing_prerequisites
+
+
+def test_stock_codex_compat_pkg_nontart_clean_machine_auth_login_requires_absolute_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "compat.pkg"
+    evidence_path = tmp_path / "release-evidence.json"
+    preflight = _nontart_preflight_proof(
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+    )
+
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof",
+        lambda **_kwargs: preflight,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_clean_vm_auth_login_proof",
+        lambda *_args, **_kwargs: pytest.fail(
+            "auth login should not run without an absolute remote CODEX_HOME"
+        ),
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_nontart_clean_machine_auth_login_proof(
+        tmp_path / "codex",
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_port=22,
+        remote_codex_home="relative/codex-home",
+        timeout_seconds=30,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.login is None
+    assert any("absolute remote CODEX_HOME" in item for item in proof.missing_prerequisites)
+
+
+def test_stock_codex_compat_pkg_nontart_clean_machine_auth_login_runs_direct_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stock_codex = tmp_path / "codex"
+    package_path = tmp_path / "compat.pkg"
+    evidence_path = tmp_path / "release-evidence.json"
+    remote_codex_home = "/Users/admin/.codex-omnigent-existing-auth"
+    preflight = _nontart_preflight_proof(
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+    )
+    captured_kwargs: dict[str, object] = {}
+
+    def fake_auth_login(
+        stock_codex_path: Path,
+        **kwargs: object,
+    ) -> Any:
+        captured_kwargs.update(kwargs)
+        return _auth_login_clean_vm_proof(
+            stock_codex_path=stock_codex_path,
+            package_path=package_path,
+            remote_codex_home=remote_codex_home,
+        )
+
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof",
+        lambda **_kwargs: preflight,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_clean_vm_auth_login_proof",
+        fake_auth_login,
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_nontart_clean_machine_auth_login_proof(
+        stock_codex,
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_port=22,
+        remote_codex_home=remote_codex_home,
+        timeout_seconds=45,
+    )
+
+    assert proof.status == "replacement-ready"
+    assert captured_kwargs["clean_vm_tart_name"] is None
+    assert captured_kwargs["clean_vm_ssh_user"] is None
+    assert captured_kwargs["clean_vm_start_tart"] is False
+    assert captured_kwargs["remote_codex_home"] == remote_codex_home
+    assert captured_kwargs["timeout_seconds"] == 45
+
+    _MOD.print_stock_codex_compat_pkg_nontart_clean_machine_auth_login_proof(proof)
+    output = capsys.readouterr().out
+    assert (
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_login_status="
+        "replacement-ready"
+        in output
+    )
+    assert "auth_uploaded=False" in output
+    assert "command_executed=True" in output
+    assert "browser_login_automated=False" in output
+    assert "auth_persisted_after_login=True" in output
+
+
+def test_nontart_clean_machine_auth_login_blocks_if_command_not_executed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = tmp_path / "codex"
+    package_path = tmp_path / "compat.pkg"
+    evidence_path = tmp_path / "release-evidence.json"
+    preflight = _nontart_preflight_proof(
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+    )
+
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof",
+        lambda **_kwargs: preflight,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_clean_vm_auth_login_proof",
+        lambda stock_codex_path, **_kwargs: _auth_login_clean_vm_proof(
+            stock_codex_path=stock_codex_path,
+            package_path=package_path,
+            command_executed=False,
+        ),
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_nontart_clean_machine_auth_login_proof(
+        stock_codex,
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_port=22,
+        remote_codex_home="/Users/admin/.codex-omnigent-existing-auth",
+        timeout_seconds=30,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.login is not None
+    assert any("did not execute login" in item for item in proof.missing_prerequisites)
+
+
 def _auth_persistence_clean_vm_proof(
     *,
     stock_codex_path: Path,
@@ -6952,6 +7204,174 @@ def test_stock_codex_compat_pkg_clean_vm_auth_onboarding_guides_login_without_au
     assert str(stock_codex) not in bash_commands[0]
 
 
+def test_stock_codex_compat_pkg_clean_vm_auth_login_uses_remote_home_without_auth_upload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = _write_codex_binary(
+        tmp_path / "stock" / "codex",
+        version="codex-cli 0.142.5",
+    )
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+    remote_codex_home = "/Users/admin/.codex-omnigent-existing-auth"
+    remote_channel = _MOD._OfficialStockCodexRemoteChannel(
+        policy_name="official-openai-github-release",
+        cask_token="codex",
+        cask_tap="homebrew/cask",
+        cask_homepage="https://github.com/openai/codex",
+        cask_version="0.143.0",
+        cask_url=(
+            "https://github.com/openai/codex/releases/download/"
+            "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+        ),
+        cask_sha256="a" * 64,
+        selected_version="codex-cli 0.143.0",
+        archive_executable="codex-aarch64-apple-darwin",
+    )
+    uploads: list[tuple[Path, str]] = []
+    uploaded_channel: dict[str, object] = {}
+    remote_commands: list[str] = []
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        if path is not None:
+            return None
+        return {
+            "ssh": "/usr/bin/ssh",
+            "scp": "/usr/bin/scp",
+            "tart": "/usr/local/bin/tart",
+        }.get(name)
+
+    def fake_copy_clean_vm_file(
+        *,
+        scp_path: str,
+        ssh_target: str,
+        ssh_port: int,
+        ssh_identity: Path | None,
+        source: Path,
+        remote_destination: str,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del scp_path, ssh_target, ssh_port, ssh_identity, timeout
+        uploads.append((source, remote_destination))
+        if source.name == "channel.json":
+            uploaded_channel.update(json.loads(source.read_text(encoding="utf-8")))
+        return subprocess.CompletedProcess(["scp"], 0, stdout="", stderr="")
+
+    def fake_run_clean_vm_ssh_command(
+        remote_command: str,
+        *,
+        ssh_path: str,
+        ssh_target: str,
+        ssh_port: int,
+        ssh_identity: Path | None,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del ssh_path, ssh_target, ssh_port, ssh_identity, timeout
+        remote_commands.append(remote_command)
+        if remote_command.startswith("/usr/bin/mktemp"):
+            return subprocess.CompletedProcess(
+                ["ssh"],
+                0,
+                stdout="/tmp/omnigent-stock-codex-compat-clean-vm-auth-login.test\n",
+                stderr="",
+            )
+        if remote_command.startswith("chmod "):
+            return subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr="")
+        if remote_command.startswith("/bin/bash "):
+            launcher_path = "/Users/admin/.local/bin/omnigent-stock-codex-compat"
+            auth_login_evidence = {
+                "authPath": f"{remote_codex_home}/auth.json",
+                "authPersistedAfterLogin": True,
+                "authUploaded": False,
+                "browserLoginAutomated": False,
+                "codexHome": remote_codex_home,
+                "commandExecuted": True,
+                "commandSurface": "installed-compat-launcher",
+                "kind": "omnigent-clean-vm-auth-login-evidence",
+                "launcherPath": launcher_path,
+                "loginCommand": f"CODEX_HOME={remote_codex_home} {launcher_path} login",
+                "postUnavailableReason": None,
+                "preUnavailableReason": "needs-auth",
+                "selectedCommandPath": launcher_path,
+                "selectedCommandVersion": "codex-cli 0.143.0",
+            }
+            return subprocess.CompletedProcess(
+                ["ssh"],
+                0,
+                stdout=(
+                    json.dumps(auth_login_evidence, sort_keys=True)
+                    + "\n"
+                    "stock_codex_compat_pkg_clean_vm_auth_login_status="
+                    "replacement-ready\n"
+                ),
+                stderr="",
+            )
+        if remote_command.startswith("rm -rf "):
+            return subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected remote command: {remote_command}")
+
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+    monkeypatch.setattr(
+        _MOD,
+        "_official_stock_codex_remote_channel",
+        lambda: remote_channel,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_wait_for_clean_vm_ssh",
+        lambda **_kwargs: subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(_MOD, "_copy_clean_vm_file", fake_copy_clean_vm_file)
+    monkeypatch.setattr(_MOD, "_run_clean_vm_ssh_command", fake_run_clean_vm_ssh_command)
+
+    proof = _MOD.run_stock_codex_compat_pkg_clean_vm_auth_login_proof(
+        stock_codex,
+        package_path=package_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_tart_name=None,
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_user=None,
+        clean_vm_ssh_port=22,
+        clean_vm_start_tart=False,
+        remote_codex_home=remote_codex_home,
+        timeout_seconds=45,
+    )
+
+    uploaded_sources = [source for source, _destination in uploads]
+    assert proof.status == "replacement-ready"
+    assert proof.proof_variant == "official-remote-channel-auth-login-existing"
+    assert proof.auth_login_requested is True
+    assert proof.host_stock_codex_uploaded is False
+    assert proof.auth_login_auth_source == f"remote-login-codex-home:{remote_codex_home}"
+    assert proof.auth_login_auth_uploaded is False
+    assert proof.auth_login_codex_home == Path(remote_codex_home)
+    assert proof.auth_login_auth_path == Path(remote_codex_home) / "auth.json"
+    assert proof.auth_login_pre_unavailable_reason == "needs-auth"
+    assert proof.auth_login_post_unavailable_reason is None
+    assert proof.auth_login_command_executed is True
+    assert proof.auth_login_browser_login_automated is False
+    assert proof.auth_login_auth_persisted_after_login is True
+    assert stock_codex.resolve() not in [source.resolve() for source in uploaded_sources]
+    assert [source.name for source in uploaded_sources] == [
+        "omnigent-stock-codex-compat.pkg",
+        "channel.json",
+        "clean_vm_proof.sh",
+    ]
+    artifacts = uploaded_channel["artifacts"]
+    assert isinstance(artifacts, list)
+    assert artifacts[0]["url"] == remote_channel.cask_url
+    assert artifacts[0]["sha256"] == remote_channel.cask_sha256
+    assert "path" not in artifacts[0]
+    bash_commands = [command for command in remote_commands if command.startswith("/bin/bash ")]
+    assert len(bash_commands) == 1
+    assert bash_commands[0].endswith(
+        f"'' auth-login-existing {remote_codex_home}"
+    )
+    assert str(stock_codex) not in bash_commands[0]
+
+
 def test_stock_codex_compat_pkg_clean_vm_auth_persistence_uploads_auth_not_stock_binary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -7604,6 +8024,36 @@ def test_clean_vm_auth_onboarding_output_evidence_requires_installed_launcher_pa
     )
 
     assert _MOD._parse_clean_vm_auth_onboarding_output_evidence(output) is None
+
+
+def test_clean_vm_auth_login_output_evidence_requires_login_execution() -> None:
+    codex_home = "/Users/admin/.codex-omnigent-existing-auth"
+    launcher_path = "/Users/admin/.local/bin/omnigent-stock-codex-compat"
+    output = (
+        json.dumps(
+            {
+                "authPath": f"{codex_home}/auth.json",
+                "authPersistedAfterLogin": True,
+                "authUploaded": False,
+                "browserLoginAutomated": False,
+                "codexHome": codex_home,
+                "commandExecuted": False,
+                "commandSurface": "installed-compat-launcher",
+                "kind": "omnigent-clean-vm-auth-login-evidence",
+                "launcherPath": launcher_path,
+                "loginCommand": f"CODEX_HOME={codex_home} {launcher_path} login",
+                "postUnavailableReason": None,
+                "preUnavailableReason": "needs-auth",
+                "selectedCommandPath": launcher_path,
+                "selectedCommandVersion": "codex-cli 0.143.0",
+            },
+            sort_keys=True,
+        )
+        + "\n"
+        + "stock_codex_compat_pkg_clean_vm_auth_login_status=replacement-ready\n"
+    )
+
+    assert _MOD._parse_clean_vm_auth_login_output_evidence(output) is None
 
 
 def test_clean_vm_auth_persistence_output_evidence_rejects_automated_browser_login() -> None:
