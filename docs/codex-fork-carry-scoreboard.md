@@ -365,7 +365,11 @@ The next gates should split by product mode:
   package SHA-256
   `cfff83af6fd1dfc59ea1ed4928befe53929462eabd096e5c54d6171379be7ccc`,
   official channel `0.143.0`, Tart `5/5`, and
-  `hostStockCodexUploadedAny=False`.
+  `hostStockCodexUploadedAny=False`. The offline verifier
+  `scripts/check_stock_codex_compat_release_evidence.py` now re-hashes the
+  archived package and fails closed on evidence schema drift, package hash
+  mismatch, non-official channel evidence, non-ready steps, Tart count
+  mismatch, or host stock-Codex upload.
   The production stock-Codex channel policy gate
   is green for official-source validation, clean-cache reuse before network
   access, fail-closed non-official URL rejection, resolver selection,

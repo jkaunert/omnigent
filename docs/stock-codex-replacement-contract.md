@@ -1058,6 +1058,21 @@ Release review should archive the wrapper evidence JSON alongside the `.pkg`;
 passing any one underlying clean-VM gate alone is not enough for release
 candidate status.
 
+Offline evidence verifier:
+
+```bash
+uvx --from . python scripts/check_stock_codex_compat_release_evidence.py \
+  --pkg-path /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-proof-artifacts/omnigent-stock-codex-compat-github-latest.pkg \
+  --evidence-output /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-proof-artifacts/omnigent-stock-codex-compat-github-latest.release-evidence.json
+```
+
+The verifier does not start Tart, SSH to a VM, upload credentials, invoke
+Codex, or rerun the package. It hashes the supplied `.pkg`, parses the evidence
+artifact, and fails closed on schema drift, package hash mismatch, nonzero
+wrapper or underlying proof exit, non-empty `releaseCriteriaFailures`,
+non-official channel policy or URL, missing step details, any non-ready step,
+Tart start/stop mismatch, or any host stock-Codex upload.
+
 Current local release-candidate evidence:
 `/Users/joshuakaunert/Developer/HarnessEngineering/omnigent-proof-artifacts/omnigent-stock-codex-compat-github-latest.release-evidence.json`
 recorded `status=replacement-ready`, package SHA-256

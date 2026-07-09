@@ -133,4 +133,8 @@ should run that wrapper with `--evidence-output` and archive the generated JSON
 next to the `.pkg`; the artifact records package and official-channel SHA-256
 values, aggregate and per-step statuses, Tart start/stop counts, host-stock
 upload status, and live/auth thread IDs without relying on terminal log
-scraping.
+scraping. The offline verifier
+`scripts/check_stock_codex_compat_release_evidence.py` should then be run
+against the archived `.pkg` and evidence JSON to re-hash the package and fail
+closed on schema drift, non-official channel evidence, non-ready steps, Tart
+count mismatch, or host stock-Codex upload.
