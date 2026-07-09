@@ -15381,8 +15381,7 @@ if [ "$proof_mode" = "auth-login-existing" ]; then
   chmod 700 "$remote_auth_codex_home"
   auth_login_pre_path="$proof_root/auth-login-pre.json"
   auth_login_post_path="$proof_root/auth-login-post.json"
-  auth_login_stdout_path="$proof_root/auth-login-stdout.txt"
-  auth_login_stderr_path="$proof_root/auth-login-stderr.txt"
+  auth_login_output_path="$proof_root/auth-login-output.txt"
   CODEX_HOME="$remote_auth_codex_home" \
     OMNIGENT_STOCK_CODEX_PATH="$provisioned_codex" \
     uvx --from "$user_runtime_root" python - \
@@ -15411,8 +15410,8 @@ PY
   set +e
   CODEX_HOME="$remote_auth_codex_home" \
     OMNIGENT_STOCK_CODEX_PATH="$provisioned_codex" \
-    "$selected" login >"$auth_login_stdout_path" 2>"$auth_login_stderr_path"
-  auth_login_status=$?
+    "$selected" login 2>&1 | tee "$auth_login_output_path"
+  auth_login_status=${PIPESTATUS[0]}
   set -e
   if [ "$auth_login_status" -ne 0 ]; then
     fail "installed launcher auth login failed: exit-$auth_login_status"
