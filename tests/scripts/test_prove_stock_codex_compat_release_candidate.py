@@ -38,7 +38,11 @@ def _write_file(path: Path, text: str = "") -> Path:
     return path
 
 
-def _release_ready_stdout() -> str:
+def _release_ready_stdout(*, direct_ssh: bool = False) -> str:
+    tart_name = "None" if direct_ssh else "omnigent-clean"
+    ssh_target = "omnigent-clean@10.0.0.10" if direct_ssh else "None"
+    tart_count = 0 if direct_ssh else 5
+    step_tart_value = "false" if direct_ssh else "true"
     return "\n".join(
         [
             "ignored=noise",
@@ -52,9 +56,10 @@ def _release_ready_stdout() -> str:
             "stock_codex_compat_pkg_clean_vm_release_cask_url=https://example.test/codex.tgz",
             "stock_codex_compat_pkg_clean_vm_release_cask_sha256=cask-sha",
             "stock_codex_compat_pkg_clean_vm_release_channel_policy=official-openai-github-release",
-            "stock_codex_compat_pkg_clean_vm_release_tart_name=omnigent-clean",
-            "stock_codex_compat_pkg_clean_vm_release_tart_started_count=5",
-            "stock_codex_compat_pkg_clean_vm_release_tart_stopped_count=5",
+            f"stock_codex_compat_pkg_clean_vm_release_tart_name={tart_name}",
+            f"stock_codex_compat_pkg_clean_vm_release_ssh_target={ssh_target}",
+            f"stock_codex_compat_pkg_clean_vm_release_tart_started_count={tart_count}",
+            f"stock_codex_compat_pkg_clean_vm_release_tart_stopped_count={tart_count}",
             (
                 "stock_codex_compat_pkg_clean_vm_release_step_order="
                 '["remote-acquisition","auth-onboarding","auth-persistence",'
@@ -73,7 +78,26 @@ def _release_ready_stdout() -> str:
             "stock_codex_compat_pkg_clean_vm_release_host_stock_codex_uploaded_any=False",
             (
                 "stock_codex_compat_pkg_clean_vm_release_step_details="
-                '{"live":{"threadId":"thread-live","hostStockCodexUploaded":false}}'
+                '{"remote-acquisition":{"status":"replacement-ready",'
+                '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
+                f'"tartStarted":{step_tart_value},"tartStopped":{step_tart_value},'
+                '"threadId":null,"scheduledAction":null},'
+                '"auth-onboarding":{"status":"replacement-ready",'
+                '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
+                f'"tartStarted":{step_tart_value},"tartStopped":{step_tart_value},'
+                '"threadId":null,"scheduledAction":null},'
+                '"auth-persistence":{"status":"replacement-ready",'
+                '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
+                f'"tartStarted":{step_tart_value},"tartStopped":{step_tart_value},'
+                '"threadId":"thread-auth","scheduledAction":null},'
+                '"update-agent":{"status":"replacement-ready",'
+                '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
+                f'"tartStarted":{step_tart_value},"tartStopped":{step_tart_value},'
+                '"threadId":null,"scheduledAction":"up-to-date"},'
+                '"live":{"status":"replacement-ready",'
+                '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
+                f'"tartStarted":{step_tart_value},"tartStopped":{step_tart_value},'
+                '"threadId":"thread-live","scheduledAction":null}}'
             ),
         ]
     )
@@ -119,6 +143,47 @@ def test_release_candidate_wrapper_builds_tart_command(tmp_path: Path) -> None:
         str(Path("~/.ssh/id_release").expanduser()),
         "--clean-vm-start-tart",
     )
+
+
+def test_release_candidate_wrapper_builds_direct_ssh_command(tmp_path: Path) -> None:
+    proof_script = _write_file(tmp_path / "scripts" / "prove.py")
+    pkg_path = _write_file(tmp_path / "artifacts" / "compat.pkg")
+
+    args = _MOD.parse_args(
+        [
+            "--python",
+            "/opt/python",
+            "--proof-script",
+            str(proof_script),
+            "--pkg-path",
+            str(pkg_path),
+            "--codex-path",
+            "~/stock/codex",
+            "--clean-vm-ssh-target",
+            "omnigent-clean@10.0.0.10",
+            "--clean-vm-ssh-identity",
+            "~/.ssh/id_release",
+        ]
+    )
+
+    command = _MOD.build_command(args)
+
+    assert command == (
+        "/opt/python",
+        str(proof_script.resolve()),
+        "--proof",
+        "stock-codex-compat-pkg-clean-vm-release",
+        "--pkg-path",
+        str(pkg_path.resolve()),
+        "--codex-path",
+        str(Path("~/stock/codex").expanduser()),
+        "--clean-vm-ssh-target",
+        "omnigent-clean@10.0.0.10",
+        "--clean-vm-ssh-identity",
+        str(Path("~/.ssh/id_release").expanduser()),
+    )
+    assert "--clean-vm-start-tart" not in command
+    assert "--clean-vm-tart-name" not in command
 
 
 def test_release_candidate_wrapper_uses_environment_defaults(
@@ -319,6 +384,135 @@ def test_release_candidate_wrapper_writes_machine_readable_evidence(
     assert evidence["stdoutLineCount"] == stdout.count("\n") + 1
     assert evidence["stderrLineCount"] == 1
     assert evidence["fields"]["package_path"] == "/tmp/compat.pkg"
+
+
+def test_release_candidate_wrapper_writes_direct_ssh_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    proof_script = _write_file(tmp_path / "scripts" / "prove.py")
+    pkg_path = _write_file(tmp_path / "artifacts" / "compat.pkg")
+    evidence_path = tmp_path / "artifacts" / "direct-release-evidence.json"
+
+    def fake_run(command: tuple[str, ...], **_kwargs: object) -> SimpleNamespace:
+        assert "--clean-vm-ssh-target" in command
+        assert "--clean-vm-start-tart" not in command
+        return SimpleNamespace(
+            returncode=0,
+            stdout=_release_ready_stdout(direct_ssh=True),
+            stderr="",
+        )
+
+    monkeypatch.setattr(_MOD.subprocess, "run", fake_run)
+
+    exit_code = _MOD.main(
+        [
+            "--python",
+            "/opt/python",
+            "--proof-script",
+            str(proof_script),
+            "--pkg-path",
+            str(pkg_path),
+            "--clean-vm-ssh-target",
+            "omnigent-clean@10.0.0.10",
+            "--evidence-output",
+            str(evidence_path),
+        ]
+    )
+
+    assert exit_code == 0
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["targetMode"] == "direct-ssh"
+    assert evidence["tartName"] is None
+    assert evidence["sshTarget"] == "omnigent-clean@10.0.0.10"
+    assert evidence["tartStartedCount"] == 0
+    assert evidence["tartStoppedCount"] == 0
+    assert evidence["releaseCriteriaFailures"] == []
+    assert evidence["stepDetails"]["live"]["tartStarted"] is False
+    assert evidence["stepDetails"]["live"]["threadId"] == "thread-live"
+
+
+def test_release_candidate_wrapper_rejects_direct_ssh_tart_activity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    proof_script = _write_file(tmp_path / "scripts" / "prove.py")
+    pkg_path = _write_file(tmp_path / "artifacts" / "compat.pkg")
+    evidence_path = tmp_path / "artifacts" / "bad-direct-release-evidence.json"
+    stdout = _release_ready_stdout(direct_ssh=True).replace(
+        "stock_codex_compat_pkg_clean_vm_release_tart_started_count=0",
+        "stock_codex_compat_pkg_clean_vm_release_tart_started_count=1",
+    )
+
+    def fake_run(_command: tuple[str, ...], **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(_MOD.subprocess, "run", fake_run)
+
+    exit_code = _MOD.main(
+        [
+            "--proof-script",
+            str(proof_script),
+            "--pkg-path",
+            str(pkg_path),
+            "--clean-vm-ssh-target",
+            "omnigent-clean@10.0.0.10",
+            "--evidence-output",
+            str(evidence_path),
+        ]
+    )
+
+    assert exit_code == 1
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert "tart counts differ: started=1 stopped=0" in evidence[
+        "releaseCriteriaFailures"
+    ]
+    assert "tartStartedCount=1" in evidence["releaseCriteriaFailures"]
+
+
+def test_release_candidate_wrapper_rejects_direct_ssh_step_tart_activity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    proof_script = _write_file(tmp_path / "scripts" / "prove.py")
+    pkg_path = _write_file(tmp_path / "artifacts" / "compat.pkg")
+    evidence_path = tmp_path / "artifacts" / "bad-direct-step-release-evidence.json"
+    stdout = _release_ready_stdout(direct_ssh=True).replace(
+        (
+            '"live":{"status":"replacement-ready",'
+            '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
+            '"tartStarted":false,"tartStopped":false,'
+        ),
+        (
+            '"live":{"status":"replacement-ready",'
+            '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
+            '"tartStarted":true,"tartStopped":false,'
+        ),
+    )
+
+    def fake_run(_command: tuple[str, ...], **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(_MOD.subprocess, "run", fake_run)
+
+    exit_code = _MOD.main(
+        [
+            "--proof-script",
+            str(proof_script),
+            "--pkg-path",
+            str(pkg_path),
+            "--clean-vm-ssh-target",
+            "omnigent-clean@10.0.0.10",
+            "--evidence-output",
+            str(evidence_path),
+        ]
+    )
+
+    assert exit_code == 1
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert "stepDetails[live][tartStarted]=True" in evidence[
+        "releaseCriteriaFailures"
+    ]
 
 
 def test_release_candidate_wrapper_refuses_to_overwrite_evidence(

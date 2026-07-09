@@ -68,6 +68,8 @@ def _ready_evidence(package_sha256: str) -> dict[str, Any]:
         "caskUrl": "https://github.com/openai/codex/releases/download/rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz",
         "caskSha256": "cask-sha",
         "channelPolicy": _MOD.OFFICIAL_CHANNEL_POLICY,
+        "tartName": "omnigent-clean",
+        "sshTarget": None,
         "authPath": "/tmp/auth.json",
         "authSource": "stock-default-home",
         "authAvailable": True,
@@ -129,6 +131,19 @@ def _ready_evidence(package_sha256: str) -> dict[str, Any]:
     }
 
 
+def _direct_ready_evidence(package_sha256: str) -> dict[str, Any]:
+    evidence = _ready_evidence(package_sha256)
+    evidence["targetMode"] = "direct-ssh"
+    evidence["tartName"] = None
+    evidence["sshTarget"] = "omnigent-clean@10.0.0.10"
+    evidence["tartStartedCount"] = 0
+    evidence["tartStoppedCount"] = 0
+    for detail in evidence["stepDetails"].values():
+        detail["tartStarted"] = False
+        detail["tartStopped"] = False
+    return evidence
+
+
 def test_release_evidence_checker_accepts_ready_artifact(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -153,6 +168,31 @@ def test_release_evidence_checker_accepts_ready_artifact(
     assert "release_evidence_status=replacement-ready" in output
     assert f"release_evidence_package_sha256={_sha256(pkg_path)}" in output
     assert "release_evidence_channel_policy=official-openai-github-release" in output
+
+
+def test_release_evidence_checker_accepts_direct_ssh_ready_artifact(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    pkg_path = _write_package(tmp_path / "compat.pkg")
+    evidence_path = _write_json(
+        tmp_path / "direct-release-evidence.json",
+        _direct_ready_evidence(_sha256(pkg_path)),
+    )
+
+    exit_code = _MOD.main(
+        [
+            "--pkg-path",
+            str(pkg_path),
+            "--evidence-output",
+            str(evidence_path),
+        ]
+    )
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "release_evidence_status=replacement-ready" in output
+    assert "release_evidence_target_mode=direct-ssh" in output
 
 
 def test_release_evidence_checker_uses_environment_defaults(
@@ -251,6 +291,25 @@ def test_release_evidence_checker_rejects_tart_mismatch(tmp_path: Path) -> None:
     )
 
     assert "tart counts differ: started=5 stopped=4" in failures
+
+
+def test_release_evidence_checker_rejects_direct_ssh_tart_activity(
+    tmp_path: Path,
+) -> None:
+    pkg_path = _write_package(tmp_path / "compat.pkg")
+    evidence = _direct_ready_evidence(_sha256(pkg_path))
+    evidence["tartStartedCount"] = 1
+    evidence["stepDetails"]["live"]["tartStarted"] = True
+
+    failures = _MOD.validate_release_evidence(
+        evidence,
+        pkg_path=pkg_path,
+        package_sha256=_sha256(pkg_path),
+    )
+
+    assert "tart counts differ: started=1 stopped=0" in failures
+    assert "tartStartedCount=1" in failures
+    assert "stepDetails[live][tartStarted]=True" in failures
 
 
 def test_release_evidence_checker_rejects_host_stock_upload(tmp_path: Path) -> None:

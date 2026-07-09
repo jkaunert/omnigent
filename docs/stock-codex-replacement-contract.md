@@ -570,13 +570,16 @@ persistence from the same guided `CODEX_HOME`, signed/notarized `.pkg`
 distribution, and marker-gated repeatable cleanup for Tart-started
 package-consuming clean-VM proofs, plus a fail-fast clean-VM release aggregate
 over the remote-acquisition, auth-onboarding, auth-persistence, update-agent,
-and live installed-launcher gates. The package release-candidate gate is the
+and live installed-launcher gates. Direct clean-Mac targets can use the same
+aggregate through the release wrapper when the operator prepares a disposable
+SSH account with a real `gui/<uid>` Aqua session for the LaunchAgent step. The
+package release-candidate gate is the
 wrapper command `scripts/prove_stock_codex_compat_release_candidate.py`, which
 expands to that aggregate and keeps the release checklist from depending on a
 hand-reconstructed long proof invocation. When passed `--evidence-output`, the
 wrapper also writes a release evidence JSON artifact with the package/channel
 SHA-256 values, aggregate status, per-step statuses, Tart start/stop counts,
-host-stock-upload result, and live/auth thread details.
+target mode, host-stock-upload result, and live/auth thread details.
 Persistent app-bundle installation, LaunchServices/Dock/Finder default
 behavior, launchd enablement policy, pre-release stock-Codex channel adoption,
 automated browser/device login UX, Keychain-managed credential UX, and broader
@@ -1066,6 +1069,7 @@ known artifact from the same candidate. Operator defaults can also be supplied
 through `OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_PKG_PATH`,
 `OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_CODEX_PATH`,
 `OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_TART_NAME`,
+`OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_TARGET`,
 `OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_USER`,
 `OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_IDENTITY`, and
 `OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_PORT`. The optional evidence path can
@@ -1081,7 +1085,9 @@ A stock-Codex compatibility package is release-candidate eligible only when
 this wrapper exits zero and the underlying aggregate reports
 `stock_codex_compat_pkg_clean_vm_release_status=replacement-ready`, all five
 step statuses as `replacement-ready`, `blocked_step=None`,
-`host_stock_codex_uploaded_any=False`, and matching Tart started/stopped counts.
+`host_stock_codex_uploaded_any=False`, and either five matching Tart
+started/stopped counts for Tart mode or zero Tart started/stopped counts for
+direct SSH mode.
 Release review should archive the wrapper evidence JSON alongside the `.pkg`;
 passing any one underlying clean-VM gate alone is not enough for release
 candidate status.
@@ -1163,16 +1169,15 @@ next step. This is the preferred release confidence command for the current
 signed package track; it is not a new browser auth, Keychain, LaunchDaemon,
 pre-release, or raw-stock-entrypoint parity claim.
 
-Direct clean-Mac package release aggregate:
+Direct clean-Mac package release-candidate gate:
 
 ```bash
-uvx --from . python scripts/prove_stock_codex_replacement.py \
-  --proof stock-codex-compat-pkg-clean-vm-release \
+uvx --from . python scripts/prove_stock_codex_compat_release_candidate.py \
   --codex-path ~/.local/omnigent/codex-stock/0.142.5/codex \
   --pkg-path /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-proof-artifacts/omnigent-stock-codex-compat-github-latest.pkg \
   --clean-vm-ssh-target omnigent-clean@10.0.0.10 \
   --clean-vm-ssh-identity ~/.ssh/mba_github_ssh_key \
-  --live-proof-timeout 600
+  --evidence-output /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-proof-artifacts/omnigent-stock-codex-compat-github-latest.direct-clean-mac.release-evidence.json
 ```
 
 This form uses the same aggregate but supplies a direct SSH target instead of a
@@ -1183,9 +1188,10 @@ stock-Codex-compat state. If the update-agent step is in scope, the account
 must also have a real loginwindow Aqua session so `launchctl print gui/$(id -u)`
 succeeds. A background SSH-only `user/<uid>` launchd domain is insufficient for
 LaunchAgent bootstrap on Tahoe; it failed with `Bootstrap failed: 5: Input/output error`
-even for a minimal plist. This direct command emits terminal proof evidence; it
-complements the archived wrapper evidence JSON rather than replacing it unless a
-separate evidence-output wrapper is added for direct clean-Mac targets.
+even for a minimal plist. The wrapper records `targetMode=direct-ssh`, accepts
+`tartStartedCount=0` and `tartStoppedCount=0`, preserves the same package,
+official-channel, step-status, no-host-stock-upload, and live/auth thread
+criteria, and writes the machine-readable evidence JSON beside the `.pkg`.
 
 Clean Codex-auth onboarding boundary:
 

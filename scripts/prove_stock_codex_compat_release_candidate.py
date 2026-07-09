@@ -9,7 +9,7 @@ import os
 import shlex
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -63,6 +63,23 @@ EXPECTED_RELEASE_STEPS = (
     "update-agent",
     "live",
 )
+TART_TARGET_MODE = "tart"
+DIRECT_SSH_TARGET_MODE = "direct-ssh"
+
+
+def _truthy_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def infer_target_mode(evidence: Mapping[str, Any]) -> str | None:
+    target_mode = evidence.get("targetMode")
+    if target_mode in {TART_TARGET_MODE, DIRECT_SSH_TARGET_MODE}:
+        return str(target_mode)
+    if _truthy_string(evidence.get("tartName")):
+        return TART_TARGET_MODE
+    if _truthy_string(evidence.get("sshTarget")):
+        return DIRECT_SSH_TARGET_MODE
+    return None
 
 
 def _env_path(name: str) -> Path | None:
@@ -293,6 +310,9 @@ def build_evidence_artifact(
     for proof_key, artifact_key in EVIDENCE_FIELD_MAP.items():
         if proof_key in fields:
             artifact[artifact_key] = fields[proof_key]
+    target_mode = infer_target_mode(artifact)
+    if target_mode is not None:
+        artifact["targetMode"] = target_mode
     return artifact
 
 
@@ -351,12 +371,43 @@ def release_criteria_failures(evidence: dict[str, Any]) -> list[str]:
             f"hostStockCodexUploadedAny={evidence.get('hostStockCodexUploadedAny')!r}"
         )
 
+    target_mode = infer_target_mode(evidence)
+    if target_mode is None:
+        failures.append("targetMode could not be inferred")
     tart_started = evidence.get("tartStartedCount")
     tart_stopped = evidence.get("tartStoppedCount")
     if tart_started != tart_stopped:
         failures.append(f"tart counts differ: started={tart_started!r} stopped={tart_stopped!r}")
-    if evidence.get("tartName") and tart_started != len(EXPECTED_RELEASE_STEPS):
-        failures.append(f"tartStartedCount={tart_started!r}")
+    if target_mode == TART_TARGET_MODE:
+        if not evidence.get("tartName"):
+            failures.append("tartName is missing for tart target mode")
+        if tart_started != len(EXPECTED_RELEASE_STEPS):
+            failures.append(f"tartStartedCount={tart_started!r}")
+    elif target_mode == DIRECT_SSH_TARGET_MODE:
+        if not evidence.get("sshTarget"):
+            failures.append("sshTarget is missing for direct SSH target mode")
+        if tart_started != 0:
+            failures.append(f"tartStartedCount={tart_started!r}")
+        if tart_stopped != 0:
+            failures.append(f"tartStoppedCount={tart_stopped!r}")
+
+    step_details = evidence.get("stepDetails")
+    if not isinstance(step_details, dict):
+        failures.append("stepDetails is missing or not an object")
+    else:
+        if set(step_details) != set(EXPECTED_RELEASE_STEPS):
+            failures.append(f"stepDetails keys={sorted(step_details)!r}")
+        expected_tart_value = target_mode == TART_TARGET_MODE
+        for step_name in EXPECTED_RELEASE_STEPS:
+            detail = step_details.get(step_name)
+            if not isinstance(detail, dict):
+                failures.append(f"stepDetails[{step_name}] is missing or not an object")
+                continue
+            for tart_key in ("tartStarted", "tartStopped"):
+                if detail.get(tart_key) is not expected_tart_value:
+                    failures.append(
+                        f"stepDetails[{step_name}][{tart_key}]={detail.get(tart_key)!r}"
+                    )
 
     for required_key in (
         "packageSha256",

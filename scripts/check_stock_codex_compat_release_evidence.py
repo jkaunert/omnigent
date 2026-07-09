@@ -27,6 +27,8 @@ EXPECTED_RELEASE_STEPS = (
     "update-agent",
     "live",
 )
+TART_TARGET_MODE = "tart"
+DIRECT_SSH_TARGET_MODE = "direct-ssh"
 
 REQUIRED_FIELDS = (
     "kind",
@@ -114,6 +116,21 @@ def _missing_required_fields(evidence: Mapping[str, Any]) -> list[str]:
     return [field for field in REQUIRED_FIELDS if field not in evidence]
 
 
+def _truthy_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def infer_target_mode(evidence: Mapping[str, Any]) -> str | None:
+    target_mode = evidence.get("targetMode")
+    if target_mode in {TART_TARGET_MODE, DIRECT_SSH_TARGET_MODE}:
+        return str(target_mode)
+    if _truthy_string(evidence.get("tartName")):
+        return TART_TARGET_MODE
+    if _truthy_string(evidence.get("sshTarget")):
+        return DIRECT_SSH_TARGET_MODE
+    return None
+
+
 def _check_step_statuses(evidence: Mapping[str, Any]) -> list[str]:
     failures: list[str] = []
     step_order = evidence.get("stepOrder")
@@ -144,7 +161,7 @@ def _check_step_statuses(evidence: Mapping[str, Any]) -> list[str]:
     return failures
 
 
-def _check_step_details(evidence: Mapping[str, Any]) -> list[str]:
+def _check_step_details(evidence: Mapping[str, Any], *, target_mode: str | None) -> list[str]:
     failures: list[str] = []
     step_details = evidence.get("stepDetails")
     if not isinstance(step_details, Mapping):
@@ -167,8 +184,9 @@ def _check_step_details(evidence: Mapping[str, Any]) -> list[str]:
                 f"[{step_name}][hostStockCodexUploaded]="
                 f"{detail.get('hostStockCodexUploaded')!r}"
             )
+        expected_tart_value = target_mode == TART_TARGET_MODE
         for tart_key in ("tartStarted", "tartStopped"):
-            if detail.get(tart_key) is not True:
+            if detail.get(tart_key) is not expected_tart_value:
                 failures.append(f"stepDetails[{step_name}][{tart_key}]={detail.get(tart_key)!r}")
 
     live_detail = step_details.get("live")
@@ -236,6 +254,9 @@ def validate_release_evidence(
             f"hostStockCodexUploadedAny={evidence.get('hostStockCodexUploadedAny')!r}"
         )
 
+    target_mode = infer_target_mode(evidence)
+    if target_mode is None:
+        failures.append("targetMode could not be inferred")
     tart_started = evidence.get("tartStartedCount")
     tart_stopped = evidence.get("tartStoppedCount")
     if not isinstance(tart_started, int):
@@ -247,11 +268,20 @@ def validate_release_evidence(
             failures.append(
                 f"tart counts differ: started={tart_started!r} stopped={tart_stopped!r}"
             )
-        if tart_started != len(EXPECTED_RELEASE_STEPS):
+        if target_mode == TART_TARGET_MODE and tart_started != len(EXPECTED_RELEASE_STEPS):
             failures.append(f"tartStartedCount={tart_started!r}")
+        if target_mode == DIRECT_SSH_TARGET_MODE:
+            if tart_started != 0:
+                failures.append(f"tartStartedCount={tart_started!r}")
+            if tart_stopped != 0:
+                failures.append(f"tartStoppedCount={tart_stopped!r}")
+    if target_mode == TART_TARGET_MODE and not evidence.get("tartName"):
+        failures.append("tartName is missing for tart target mode")
+    if target_mode == DIRECT_SSH_TARGET_MODE and not evidence.get("sshTarget"):
+        failures.append("sshTarget is missing for direct SSH target mode")
 
     failures.extend(_check_step_statuses(evidence))
-    failures.extend(_check_step_details(evidence))
+    failures.extend(_check_step_details(evidence, target_mode=target_mode))
     return failures
 
 
@@ -285,6 +315,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"release_evidence_channel_policy={evidence['channelPolicy']}")
     print(f"release_evidence_cask_version={evidence['caskVersion']}")
     print(f"release_evidence_step_order={json.dumps(evidence['stepOrder'])}")
+    target_mode = infer_target_mode(evidence)
+    if target_mode is not None:
+        print(f"release_evidence_target_mode={target_mode}")
     return 0
 
 
