@@ -390,16 +390,26 @@ The next gates should split by product mode:
   `host_stock_codex_uploaded=False`, `auth_uploaded=False`,
   `command_executed=False`, and no Tart use. A follow-up preflight again proves
   no package/user/LaunchAgent residue.
+  The no-host-auth-upload post-login verifier is now implemented but live-blocked
+  pending an operator-created remote auth home:
+  `stock-codex-compat-pkg-nontart-clean-machine-auth-persistence` accepts
+  `--clean-vm-remote-codex-home`, refuses Tart and uploaded credentials, runs
+  release-evidence verification plus direct clean-machine preflight, and then
+  uses a preexisting remote `auth.json` for the installed-launcher live turn
+  while preserving that auth home and cleaning Omnigent/package state. The
+  current `omnigent-clean@10.0.0.10` target has no such authenticated remote
+  `CODEX_HOME` yet.
   The production stock-Codex channel policy gate is green for official-source
   validation, clean-cache reuse before network access, fail-closed non-official
   URL rejection, resolver selection, explicit-download remote acquisition, SHA
   verification, safe archive extraction, staged-payload reuse, and no-host-cache
   leakage from both source checkout and packaged-runtime paths. Remaining
-  production choices are automated browser/device login UX, token freshness and
-  credential-persistence policy, launchd enablement policy, alpha/pre-release
-  channel policy, independent archive signature policy, and broader UI/device
-  bridge coverage such as screenshot, snapshot, gesture, or device execution if
-  product scope requires them. Raw unwrapped stock Codex Electron/CLI route parity remains
+  production choices are automated browser/device login UX versus documented
+  user-run login, remote auth-home preparation and token freshness policy,
+  launchd enablement policy, alpha/pre-release channel policy, independent
+  archive signature policy, and broader UI/device bridge coverage such as
+  screenshot, snapshot, gesture, or device execution if product scope requires
+  them. Raw unwrapped stock Codex Electron/CLI route parity remains
   blocked;
 - decide whether automated browser/device login UX, token freshness validation,
   or cross-machine credential packaging is product scope; or
