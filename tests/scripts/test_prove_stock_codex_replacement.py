@@ -4684,6 +4684,49 @@ def _nontart_preflight_proof(
     )
 
 
+def test_stock_codex_compat_pkg_nontart_clean_machine_preflight_requires_user_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+    evidence_path = _write_stock_codex_compat_release_evidence(
+        tmp_path / "release-evidence.json",
+        package_path=package_path.resolve(),
+        package_sha256=_MOD.sha256_file(package_path),
+    )
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        if path is not None:
+            return None
+        return {"ssh": "/usr/bin/ssh", "scp": "/usr/bin/scp"}.get(name)
+
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+    monkeypatch.setattr(
+        _MOD,
+        "_run_stock_codex_compat_release_evidence_verifier",
+        lambda **_kwargs: pytest.fail("preflight should block before verifier"),
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_wait_for_clean_vm_ssh",
+        lambda **_kwargs: pytest.fail("preflight should block before SSH readiness"),
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+        clean_vm_ssh_target="192.0.2.10",
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_port=22,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.remote_status is None
+    assert any("include the remote user" in item for item in proof.missing_prerequisites)
+
+
 def test_stock_codex_compat_pkg_nontart_clean_machine_preflight_blocks_stale_selected_version(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -4866,6 +4909,249 @@ def test_stock_codex_compat_pkg_nontart_clean_machine_install_runs_direct_remote
     )
     assert "release-evidence and clean-target preflight checks" in output
     assert "host_stock_codex_uploaded=False" in output
+
+
+def test_stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_blocks_before_install(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "compat.pkg"
+    evidence_path = tmp_path / "release-evidence.json"
+
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof",
+        lambda **_kwargs: _nontart_preflight_proof(
+            status="blocked",
+            missing_prerequisites=("release evidence verifier did not pass",),
+            package_path=package_path,
+            release_evidence_path=evidence_path,
+            release_evidence_status="blocked",
+        ),
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_clean_vm_auth_onboarding_proof",
+        lambda *_args, **_kwargs: pytest.fail(
+            "auth onboarding should not run after blocked preflight"
+        ),
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_proof(
+        tmp_path / "codex",
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_port=22,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.onboarding is None
+    assert proof.preflight.release_evidence_status == "blocked"
+    assert "non-Tart clean-machine preflight did not pass" in proof.missing_prerequisites
+
+
+def _auth_onboarding_clean_vm_proof(
+    *,
+    stock_codex_path: Path,
+    package_path: Path,
+    selected_version: str = "codex-cli 0.143.0",
+    cask_version: str | None = "0.143.0",
+    command_executed: bool = False,
+    auth_uploaded: bool = False,
+) -> Any:
+    launcher_path = Path("/Users/admin/.local/bin/omnigent-stock-codex-compat")
+    codex_home = Path(
+        "/Users/admin/.omnigent-stock-codex-compat-clean-vm-remote-acquisition-proof"
+        "/auth-onboarding-codex-home"
+    )
+    return _MOD.StockCodexCompatPkgCleanVmProof(
+        status="replacement-ready",
+        missing_prerequisites=(),
+        tool_paths={"ssh": "/usr/bin/ssh", "scp": "/usr/bin/scp"},
+        stock_codex_path=stock_codex_path,
+        stock_codex_version="codex-cli 0.142.5",
+        stock_codex_sha256="a" * 64,
+        package_path=package_path,
+        package_sha256="pkg-sha",
+        tart_name=None,
+        ssh_target="admin@192.0.2.10",
+        ssh_identity=None,
+        ssh_user=None,
+        ssh_port=22,
+        tart_ip=None,
+        remote_work_dir="/tmp/proof",
+        remote_status="replacement-ready",
+        remote_output_preview="auth onboarding ok",
+        tart_started=False,
+        tart_stopped=False,
+        proof_variant="official-remote-channel-auth-onboarding",
+        cask_version=cask_version,
+        cask_url=(
+            "https://github.com/openai/codex/releases/download/"
+            "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+        ),
+        cask_sha256="b" * 64,
+        channel_policy="official-openai-github-release",
+        host_stock_codex_uploaded=False,
+        auth_onboarding_requested=True,
+        auth_onboarding_launcher_path=launcher_path,
+        auth_onboarding_codex_home=codex_home,
+        auth_onboarding_auth_path=codex_home / "auth.json",
+        auth_onboarding_unavailable_reason="needs-auth",
+        auth_onboarding_command=f"CODEX_HOME={codex_home} {launcher_path} login",
+        auth_onboarding_selected_command_version=selected_version,
+        auth_onboarding_command_executed=command_executed,
+        auth_onboarding_auth_uploaded=auth_uploaded,
+    )
+
+
+def test_stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_runs_direct_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stock_codex = tmp_path / "codex"
+    package_path = tmp_path / "compat.pkg"
+    evidence_path = tmp_path / "release-evidence.json"
+    preflight = _nontart_preflight_proof(
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+    )
+    captured_onboarding_kwargs: dict[str, object] = {}
+
+    def fake_auth_onboarding(
+        stock_codex_path: Path,
+        **kwargs: object,
+    ) -> Any:
+        captured_onboarding_kwargs.update(kwargs)
+        return _auth_onboarding_clean_vm_proof(
+            stock_codex_path=stock_codex_path,
+            package_path=package_path,
+        )
+
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof",
+        lambda **_kwargs: preflight,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_clean_vm_auth_onboarding_proof",
+        fake_auth_onboarding,
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_proof(
+        stock_codex,
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_port=22,
+    )
+
+    assert proof.status == "replacement-ready"
+    assert captured_onboarding_kwargs["clean_vm_tart_name"] is None
+    assert captured_onboarding_kwargs["clean_vm_ssh_user"] is None
+    assert captured_onboarding_kwargs["clean_vm_start_tart"] is False
+    assert captured_onboarding_kwargs["clean_vm_ssh_target"] == "admin@192.0.2.10"
+
+    _MOD.print_stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_proof(
+        proof
+    )
+    output = capsys.readouterr().out
+    assert (
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_status="
+        "replacement-ready"
+        in output
+    )
+    assert "needs-auth" in output
+    assert "login" in output
+    assert "auth_uploaded=False" in output
+    assert "command_executed=False" in output
+
+
+def test_nontart_clean_machine_auth_onboarding_blocks_stale_selected_version(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = tmp_path / "codex"
+    package_path = tmp_path / "compat.pkg"
+    evidence_path = tmp_path / "release-evidence.json"
+    preflight = _nontart_preflight_proof(
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+    )
+
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof",
+        lambda **_kwargs: preflight,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_clean_vm_auth_onboarding_proof",
+        lambda stock_codex_path, **_kwargs: _auth_onboarding_clean_vm_proof(
+            stock_codex_path=stock_codex_path,
+            package_path=package_path,
+            selected_version="codex-cli 0.142.5",
+        ),
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_proof(
+        stock_codex,
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_port=22,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.onboarding is not None
+    assert any("selected stale stock Codex" in item for item in proof.missing_prerequisites)
+
+
+def test_nontart_clean_machine_auth_onboarding_blocks_missing_cask_version(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = tmp_path / "codex"
+    package_path = tmp_path / "compat.pkg"
+    evidence_path = tmp_path / "release-evidence.json"
+    preflight = _nontart_preflight_proof(
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+    )
+
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof",
+        lambda **_kwargs: preflight,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_clean_vm_auth_onboarding_proof",
+        lambda stock_codex_path, **_kwargs: _auth_onboarding_clean_vm_proof(
+            stock_codex_path=stock_codex_path,
+            package_path=package_path,
+            cask_version=None,
+        ),
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_proof(
+        stock_codex,
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_port=22,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.onboarding is not None
+    assert any("omitted cask version" in item for item in proof.missing_prerequisites)
 
 
 def test_stock_codex_compat_pkg_nontart_clean_machine_preflight_reports_upload_failure(

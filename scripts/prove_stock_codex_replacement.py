@@ -1911,6 +1911,16 @@ class StockCodexCompatPkgNonTartCleanMachineInstallProof:
 
 
 @dataclass(frozen=True)
+class StockCodexCompatPkgNonTartCleanMachineAuthOnboardingProof:
+    """Direct-SSH clean-machine guided auth-onboarding proof result."""
+
+    status: str
+    missing_prerequisites: tuple[str, ...]
+    preflight: StockCodexCompatPkgNonTartCleanMachinePreflightProof
+    onboarding: StockCodexCompatPkgCleanVmProof | None
+
+
+@dataclass(frozen=True)
 class StockCodexCompatPkgCleanVmReleaseProof:
     """Composite release proof for the signed-pkg clean-VM gates."""
 
@@ -13805,6 +13815,12 @@ def run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
             "stock-codex-compat-pkg-nontart-clean-machine-preflight requires "
             "--clean-vm-ssh-target; Tart resolution is intentionally disabled"
         )
+    elif "@" not in clean_vm_ssh_target:
+        missing.append(
+            "stock-codex-compat-pkg-nontart-clean-machine-preflight requires "
+            "--clean-vm-ssh-target to include the remote user, for example "
+            "omnigent-clean@host"
+        )
 
     resolved_package_path = package_path.expanduser().resolve() if package_path else None
     package_sha256: str | None = None
@@ -14233,6 +14249,91 @@ def run_stock_codex_compat_pkg_nontart_clean_machine_install_proof(
         missing_prerequisites=(),
         preflight=preflight,
         install=install,
+    )
+
+
+def run_stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_proof(
+    stock_codex_path: Path,
+    *,
+    package_path: Path | None,
+    release_evidence_path: Path | None,
+    clean_vm_ssh_target: str | None,
+    clean_vm_ssh_identity: Path | None,
+    clean_vm_ssh_port: int,
+) -> StockCodexCompatPkgNonTartCleanMachineAuthOnboardingProof:
+    """Run direct-SSH guided auth onboarding after preflight promotion checks."""
+    preflight = run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+        package_path=package_path,
+        release_evidence_path=release_evidence_path,
+        clean_vm_ssh_target=clean_vm_ssh_target,
+        clean_vm_ssh_identity=clean_vm_ssh_identity,
+        clean_vm_ssh_port=clean_vm_ssh_port,
+    )
+    if preflight.status != "replacement-ready":
+        return StockCodexCompatPkgNonTartCleanMachineAuthOnboardingProof(
+            status="blocked",
+            missing_prerequisites=(
+                "non-Tart clean-machine preflight did not pass",
+                *preflight.missing_prerequisites,
+            ),
+            preflight=preflight,
+            onboarding=None,
+        )
+
+    onboarding = run_stock_codex_compat_pkg_clean_vm_auth_onboarding_proof(
+        stock_codex_path,
+        package_path=package_path,
+        clean_vm_ssh_target=clean_vm_ssh_target,
+        clean_vm_tart_name=None,
+        clean_vm_ssh_identity=clean_vm_ssh_identity,
+        clean_vm_ssh_user=None,
+        clean_vm_ssh_port=clean_vm_ssh_port,
+        clean_vm_start_tart=False,
+    )
+    missing = list(onboarding.missing_prerequisites)
+    expected_selected_version = (
+        f"codex-cli {onboarding.cask_version}" if onboarding.cask_version else None
+    )
+    if onboarding.tart_started or onboarding.tart_name or onboarding.tart_ip:
+        missing.append("non-Tart clean-machine auth onboarding unexpectedly used Tart")
+    if onboarding.host_stock_codex_uploaded is not False:
+        missing.append("non-Tart clean-machine auth onboarding uploaded host stock Codex")
+    if onboarding.auth_onboarding_requested is not True:
+        missing.append("non-Tart clean-machine auth onboarding was not requested")
+    if onboarding.auth_onboarding_unavailable_reason != "needs-auth":
+        missing.append("non-Tart clean-machine auth onboarding did not classify needs-auth")
+    if not onboarding.auth_onboarding_command:
+        missing.append("non-Tart clean-machine auth onboarding omitted login command")
+    if onboarding.auth_onboarding_command_executed is not False:
+        missing.append("non-Tart clean-machine auth onboarding executed login command")
+    if onboarding.auth_onboarding_auth_uploaded is not False:
+        missing.append("non-Tart clean-machine auth onboarding uploaded auth material")
+    if not onboarding.cask_version:
+        missing.append("non-Tart clean-machine auth onboarding omitted cask version")
+    if (
+        expected_selected_version is not None
+        and onboarding.auth_onboarding_selected_command_version
+        != expected_selected_version
+    ):
+        missing.append(
+            "non-Tart clean-machine auth onboarding selected stale stock Codex "
+            f"{onboarding.auth_onboarding_selected_command_version!r}; expected "
+            f"{expected_selected_version!r}"
+        )
+    if onboarding.status != "replacement-ready" or missing:
+        return StockCodexCompatPkgNonTartCleanMachineAuthOnboardingProof(
+            status="blocked",
+            missing_prerequisites=tuple(missing)
+            or ("non-Tart clean-machine auth onboarding did not pass",),
+            preflight=preflight,
+            onboarding=onboarding,
+        )
+
+    return StockCodexCompatPkgNonTartCleanMachineAuthOnboardingProof(
+        status="replacement-ready",
+        missing_prerequisites=(),
+        preflight=preflight,
+        onboarding=onboarding,
     )
 
 
@@ -22463,6 +22564,128 @@ def print_stock_codex_compat_pkg_nontart_clean_machine_install_proof(
     )
 
 
+def print_stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_proof(
+    proof: StockCodexCompatPkgNonTartCleanMachineAuthOnboardingProof,
+) -> None:
+    """Emit operator evidence for direct-SSH guided auth onboarding."""
+    preflight = proof.preflight
+    onboarding = proof.onboarding
+    print("stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_surface="
+        "signed-pkg-nontart-clean-machine-guided-auth"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_status="
+        f"{proof.status}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_missing_prerequisites="
+        f"{json.dumps(list(proof.missing_prerequisites), sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_preflight_status="
+        f"{preflight.status}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_release_evidence_status="
+        f"{preflight.release_evidence_status}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_package_path="
+        f"{preflight.package_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_package_sha256="
+        f"{preflight.package_sha256}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_ssh_target="
+        f"{preflight.ssh_target}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_preflight_remote_status="
+        f"{preflight.remote_status}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_remote_status="
+        f"{onboarding.remote_status if onboarding else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_cask_version="
+        f"{onboarding.cask_version if onboarding else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_channel_policy="
+        f"{onboarding.channel_policy if onboarding else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_host_stock_codex_uploaded="
+        f"{onboarding.host_stock_codex_uploaded if onboarding else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_launcher_path="
+        f"{onboarding.auth_onboarding_launcher_path if onboarding else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_selected_command_version="
+        f"{onboarding.auth_onboarding_selected_command_version if onboarding else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_codex_home="
+        f"{onboarding.auth_onboarding_codex_home if onboarding else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_auth_path="
+        f"{onboarding.auth_onboarding_auth_path if onboarding else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_unavailable_reason="
+        f"{onboarding.auth_onboarding_unavailable_reason if onboarding else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_command="
+        f"{onboarding.auth_onboarding_command if onboarding else None!r}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_command_executed="
+        f"{onboarding.auth_onboarding_command_executed if onboarding else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_auth_uploaded="
+        f"{onboarding.auth_onboarding_auth_uploaded if onboarding else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_tart_started="
+        f"{onboarding.tart_started if onboarding else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_tart_stopped="
+        f"{onboarding.tart_stopped if onboarding else None}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_remote_output="
+        f"{onboarding.remote_output_preview if onboarding else None!r}"
+    )
+    if proof.status == "blocked":
+        print(
+            "ASSERTION: non-Tart clean-machine auth onboarding is blocked unless "
+            "release evidence, direct clean-machine preflight, package install, "
+            "official-channel stock Codex acquisition, clean needs-auth "
+            "classification, guided login command emission, and rollback cleanup "
+            "all pass without uploading auth or executing login"
+        )
+        return
+    print(
+        "ASSERTION: after release-evidence and clean-target preflight checks, "
+        "the signed/notarized package can install on an operator-supplied "
+        "non-Tart disposable macOS target, provision stock Codex from the "
+        "official channel, classify clean proof-scoped auth as needs-auth, and "
+        "emit a user-run login command through the installed compatibility "
+        "launcher without uploading credentials or automating browser/device login"
+    )
+
+
 def print_stock_codex_compat_pkg_clean_vm_release_proof(
     proof: StockCodexCompatPkgCleanVmReleaseProof,
 ) -> None:
@@ -27477,6 +27700,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-pkg-clean-vm-release",
             "stock-codex-compat-pkg-nontart-clean-machine-preflight",
             "stock-codex-compat-pkg-nontart-clean-machine-install",
+            "stock-codex-compat-pkg-nontart-clean-machine-auth-onboarding",
             "stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
             "stock-codex-compat-wrapper-xcodebuild-bridge-test-adapter",
             "stock-codex-compat-wrapper-relay-tool",
@@ -27703,6 +27927,10 @@ def parse_args() -> argparse.Namespace:
             "package on the operator-supplied direct SSH target, provisions "
             "stock Codex from the official OpenAI GitHub release channel, and "
             "rolls back proof-owned user/package state without Tart. "
+            "'stock-codex-compat-pkg-nontart-clean-machine-auth-onboarding' "
+            "extends that direct target path by classifying a proof-scoped clean "
+            "CODEX_HOME as needs-auth and emitting the user-run compatibility "
+            "launcher login command without uploading auth or automating login. "
             "'stock-codex-compat-wrapper-xcodebuild-bridge-adapter' proves "
             "that XcodeBuildMCP simulator build/run can execute through the "
             "same wrapper-owned file bridge while stock Codex stays in "
@@ -28980,6 +29208,69 @@ def main() -> int:
         assert_stock_codex_path(codex_path, allow_fork_codex=False)
         print_stock_codex_compat_pkg_nontart_clean_machine_install_proof(
             run_stock_codex_compat_pkg_nontart_clean_machine_install_proof(
+                codex_path,
+                package_path=args.pkg_path,
+                release_evidence_path=args.release_evidence_path,
+                clean_vm_ssh_target=args.clean_vm_ssh_target,
+                clean_vm_ssh_identity=args.clean_vm_ssh_identity,
+                clean_vm_ssh_port=args.clean_vm_ssh_port,
+            )
+        )
+        return 0
+
+    if (
+        requested_proof
+        == "stock-codex-compat-pkg-nontart-clean-machine-auth-onboarding"
+    ):
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-auth-onboarding "
+                "does not use --apple-bundle; omit it."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-auth-onboarding "
+                "cannot allow a Codex-fork binary."
+            )
+        if args.pkg_output_path is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-auth-onboarding "
+                "consumes --pkg-path; produce persistent packages with "
+                "stock-codex-compat-pkg-signed-notarized."
+            )
+        if args.pkg_path is None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-auth-onboarding "
+                "requires --pkg-path from stock-codex-compat-pkg-signed-notarized."
+            )
+        if args.release_evidence_path is None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-auth-onboarding "
+                "requires --release-evidence-path from the clean-VM release "
+                "evidence artifact."
+            )
+        if args.clean_vm_tart_name is not None or args.clean_vm_start_tart:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-auth-onboarding "
+                "refuses Tart resolution; pass --clean-vm-ssh-target for a "
+                "direct SSH target."
+            )
+        if args.clean_vm_source_tart_name is not None or args.clean_vm_bootstrap_install_uv:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-auth-onboarding "
+                "does not bootstrap Tart VMs or install uvx; prepare the direct "
+                "SSH target outside this proof."
+            )
+        if args.clean_vm_ssh_user is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-auth-onboarding "
+                "does not derive SSH targets from --clean-vm-ssh-user; include "
+                "the user in --clean-vm-ssh-target."
+            )
+        codex_path = resolve_codex_path(args.codex_path)
+        assert_stock_codex_path(codex_path, allow_fork_codex=False)
+        print_stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_proof(
+            run_stock_codex_compat_pkg_nontart_clean_machine_auth_onboarding_proof(
                 codex_path,
                 package_path=args.pkg_path,
                 release_evidence_path=args.release_evidence_path,
