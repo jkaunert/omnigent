@@ -4452,6 +4452,333 @@ def test_clean_vm_preflight_cleanup_requires_marker_and_proof_owned_paths() -> N
     assert "stock_codex_compat_pkg_clean_vm_preflight_cleanup=completed" in command
 
 
+def test_nontart_clean_machine_preflight_script_is_inspection_only() -> None:
+    script = _MOD._nontart_clean_machine_preflight_script_text()
+
+    assert "stock_codex_compat_pkg_nontart_clean_machine_preflight_" in script
+    assert ".omnigent-stock-codex-compat-clean-user-ok" in script
+    assert "sudo -n true" in script
+    assert "command -v uvx" in script
+    assert 'pkg_id="ai.omnigent.stock-codex-compat"' in script
+    assert "/Library/Application Support/Omnigent/stock-codex-compat" in script
+    assert "$HOME/.local/bin/omnigent-stock-codex-compat" in script
+    assert "$HOME/.local/omnigent/launchers/stock-codex-compat.json" in script
+    assert "$HOME/.local/omnigent/stock-codex-compat" in script
+    assert "$HOME/.local/omnigent/codex-stock" in script
+    assert "$HOME/Library/LaunchAgents/ai.omnigent.stock-codex-compat.update.plist" in script
+    assert 'pkgutil --check-signature "$pkg_path"' in script
+    assert 'xcrun stapler validate "$pkg_path"' in script
+    assert 'spctl -a -vv -t install "$pkg_path"' in script
+    assert "installer -pkg" not in script
+    assert "pkgutil --forget" not in script
+    assert "rm -rf" not in script
+
+
+def test_stock_codex_compat_pkg_nontart_clean_machine_preflight_blocks_without_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        if path is not None:
+            return None
+        return {"ssh": "/usr/bin/ssh", "scp": "/usr/bin/scp"}.get(name)
+
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+
+    proof = _MOD.run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+        package_path=package_path,
+        release_evidence_path=tmp_path / "missing-release-evidence.json",
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_port=22,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.package_path == package_path.resolve()
+    assert proof.package_sha256 == _MOD.sha256_file(package_path)
+    assert proof.release_evidence_path == (tmp_path / "missing-release-evidence.json").resolve()
+    assert any("missing clean-VM release evidence" in item for item in proof.missing_prerequisites)
+
+
+def test_stock_codex_compat_pkg_nontart_clean_machine_preflight_rejects_unsafe_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+    evidence_path = tmp_path / "release-evidence.json"
+    evidence_path.write_text('{"status": "replacement-ready"}\n', encoding="utf-8")
+    package_sha = _MOD.sha256_file(package_path)
+    expected_package_path = package_path.resolve()
+    uploads: list[tuple[Path, str]] = []
+    remote_commands: list[str] = []
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        if path is not None:
+            return None
+        return {"ssh": "/usr/bin/ssh", "scp": "/usr/bin/scp"}.get(name)
+
+    def fake_verifier(
+        *,
+        package_path: Path,
+        release_evidence_path: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        assert package_path == expected_package_path
+        assert release_evidence_path == evidence_path.resolve()
+        return subprocess.CompletedProcess(["verify"], 0, stdout="verified\n", stderr="")
+
+    def fake_copy_clean_vm_file(
+        *,
+        scp_path: str,
+        ssh_target: str,
+        ssh_port: int,
+        ssh_identity: Path | None,
+        source: Path,
+        remote_destination: str,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del scp_path, ssh_target, ssh_port, ssh_identity, timeout
+        uploads.append((source, remote_destination))
+        return subprocess.CompletedProcess(["scp"], 0, stdout="", stderr="")
+
+    def fake_run_clean_vm_ssh_command(
+        remote_command: str,
+        *,
+        ssh_path: str,
+        ssh_target: str,
+        ssh_port: int,
+        ssh_identity: Path | None,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del ssh_path, ssh_target, ssh_port, ssh_identity, timeout
+        remote_commands.append(remote_command)
+        if remote_command.startswith("/usr/bin/mktemp"):
+            return subprocess.CompletedProcess(
+                ["ssh"],
+                0,
+                stdout="/tmp/omnigent-stock-codex-compat-nontart-preflight.test\n",
+                stderr="",
+            )
+        if remote_command.startswith("chmod +x "):
+            return subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr="")
+        if remote_command.startswith("/bin/bash "):
+            prefix = "stock_codex_compat_pkg_nontart_clean_machine_preflight"
+            return subprocess.CompletedProcess(
+                ["ssh"],
+                0,
+                stdout=(
+                    f"{prefix}_status=inspected\n"
+                    f"{prefix}_user=admin\n"
+                    f"{prefix}_home=/Users/admin\n"
+                    f"{prefix}_macos_version=26.0\n"
+                    f"{prefix}_arch=arm64\n"
+                    f"{prefix}_uvx_path=/Users/admin/.local/bin/uvx\n"
+                    f"{prefix}_uv_path=/Users/admin/.local/bin/uv\n"
+                    f"{prefix}_sudo_noninteractive=true\n"
+                    f"{prefix}_disposable_marker_present=false\n"
+                    f"{prefix}_package_receipt_present=false\n"
+                    f"{prefix}_package_payload_present=false\n"
+                    f"{prefix}_launcher_present=true\n"
+                    f"{prefix}_launcher_manifest_present=false\n"
+                    f"{prefix}_adapter_root_present=false\n"
+                    f"{prefix}_stock_cache_present=false\n"
+                    f"{prefix}_launch_agent_present=false\n"
+                    f"{prefix}_remote_package_sha256={package_sha}\n"
+                    f"{prefix}_package_sha_match=true\n"
+                    f"{prefix}_signature_status=accepted\n"
+                    f"{prefix}_staple_status=accepted\n"
+                    f"{prefix}_gatekeeper_status=accepted\n"
+                ),
+                stderr="",
+            )
+        if remote_command.startswith("rm -rf "):
+            return subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected remote command: {remote_command}")
+
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+    monkeypatch.setattr(
+        _MOD,
+        "_run_stock_codex_compat_release_evidence_verifier",
+        fake_verifier,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_wait_for_clean_vm_ssh",
+        lambda **_kwargs: subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(_MOD, "_copy_clean_vm_file", fake_copy_clean_vm_file)
+    monkeypatch.setattr(_MOD, "_run_clean_vm_ssh_command", fake_run_clean_vm_ssh_command)
+
+    proof = _MOD.run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_port=22,
+    )
+
+    assert proof.status == "unsafe-target"
+    assert proof.remote_status == "unsafe-target"
+    assert proof.release_evidence_status == "verified"
+    assert proof.launcher_present is True
+    assert proof.disposable_marker_present is False
+    assert any("not marked disposable" in item for item in proof.missing_prerequisites)
+    assert [source.name for source, _destination in uploads] == [
+        "omnigent-stock-codex-compat.pkg",
+        "nontart_clean_machine_preflight.sh",
+    ]
+    assert not any("installer -pkg" in command for command in remote_commands)
+    assert not any("pkgutil --forget" in command for command in remote_commands)
+
+
+def test_stock_codex_compat_pkg_nontart_clean_machine_preflight_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+    evidence_path = tmp_path / "release-evidence.json"
+    evidence_path.write_text('{"status": "replacement-ready"}\n', encoding="utf-8")
+    identity = tmp_path / "id_ed25519"
+    identity.write_text("identity\n", encoding="utf-8")
+    package_sha = _MOD.sha256_file(package_path)
+    expected_package_path = package_path.resolve()
+    remote_commands: list[str] = []
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        if path is not None:
+            return None
+        return {"ssh": "/usr/bin/ssh", "scp": "/usr/bin/scp"}.get(name)
+
+    def fake_verifier(
+        *,
+        package_path: Path,
+        release_evidence_path: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        assert package_path == expected_package_path
+        assert release_evidence_path == evidence_path.resolve()
+        return subprocess.CompletedProcess(["verify"], 0, stdout="verified\n", stderr="")
+
+    def fake_copy_clean_vm_file(
+        *,
+        scp_path: str,
+        ssh_target: str,
+        ssh_port: int,
+        ssh_identity: Path | None,
+        source: Path,
+        remote_destination: str,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del scp_path, ssh_target, ssh_port, ssh_identity, source, remote_destination, timeout
+        return subprocess.CompletedProcess(["scp"], 0, stdout="", stderr="")
+
+    def fake_run_clean_vm_ssh_command(
+        remote_command: str,
+        *,
+        ssh_path: str,
+        ssh_target: str,
+        ssh_port: int,
+        ssh_identity: Path | None,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del ssh_path, ssh_target, ssh_port, ssh_identity, timeout
+        remote_commands.append(remote_command)
+        if remote_command.startswith("/usr/bin/mktemp"):
+            return subprocess.CompletedProcess(
+                ["ssh"],
+                0,
+                stdout="/tmp/omnigent-stock-codex-compat-nontart-preflight.ready\n",
+                stderr="",
+            )
+        if remote_command.startswith("chmod +x "):
+            return subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr="")
+        if remote_command.startswith("/bin/bash "):
+            prefix = "stock_codex_compat_pkg_nontart_clean_machine_preflight"
+            return subprocess.CompletedProcess(
+                ["ssh"],
+                0,
+                stdout=(
+                    f"{prefix}_status=inspected\n"
+                    f"{prefix}_user=admin\n"
+                    f"{prefix}_home=/Users/admin\n"
+                    f"{prefix}_macos_version=26.0\n"
+                    f"{prefix}_arch=arm64\n"
+                    f"{prefix}_uvx_path=/Users/admin/.local/bin/uvx\n"
+                    f"{prefix}_uv_path=/Users/admin/.local/bin/uv\n"
+                    f"{prefix}_sudo_noninteractive=true\n"
+                    f"{prefix}_disposable_marker_present=true\n"
+                    f"{prefix}_package_receipt_present=false\n"
+                    f"{prefix}_package_payload_present=false\n"
+                    f"{prefix}_launcher_present=false\n"
+                    f"{prefix}_launcher_manifest_present=false\n"
+                    f"{prefix}_adapter_root_present=false\n"
+                    f"{prefix}_stock_cache_present=false\n"
+                    f"{prefix}_launch_agent_present=false\n"
+                    f"{prefix}_remote_package_sha256={package_sha}\n"
+                    f"{prefix}_package_sha_match=true\n"
+                    f"{prefix}_signature_status=accepted\n"
+                    f"{prefix}_staple_status=accepted\n"
+                    f"{prefix}_gatekeeper_status=accepted\n"
+                ),
+                stderr="",
+            )
+        if remote_command.startswith("rm -rf "):
+            return subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected remote command: {remote_command}")
+
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+    monkeypatch.setattr(
+        _MOD,
+        "_run_stock_codex_compat_release_evidence_verifier",
+        fake_verifier,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_wait_for_clean_vm_ssh",
+        lambda **_kwargs: subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(_MOD, "_copy_clean_vm_file", fake_copy_clean_vm_file)
+    monkeypatch.setattr(_MOD, "_run_clean_vm_ssh_command", fake_run_clean_vm_ssh_command)
+
+    proof = _MOD.run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_ssh_identity=identity,
+        clean_vm_ssh_port=2222,
+    )
+
+    assert proof.status == "replacement-ready"
+    assert proof.remote_status == "replacement-ready"
+    assert proof.ssh_identity == identity.resolve()
+    assert proof.ssh_port == 2222
+    assert proof.remote_package_sha256 == package_sha
+    assert proof.signature_status == "accepted"
+    assert proof.staple_status == "accepted"
+    assert proof.gatekeeper_status == "accepted"
+    assert any(command.startswith("rm -rf ") for command in remote_commands)
+
+    _MOD.print_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(proof)
+    output = capsys.readouterr().out
+    assert (
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_status=replacement-ready"
+        in output
+    )
+    assert (
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_"
+        "release_evidence_status=verified"
+        in output
+    )
+    assert "ASSERTION: the signed/notarized package and release evidence are consistent" in output
+
+
 def test_stock_codex_compat_pkg_clean_vm_remote_acquisition_does_not_upload_stock_binary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

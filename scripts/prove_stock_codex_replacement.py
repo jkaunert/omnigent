@@ -261,6 +261,9 @@ DEFAULT_PATH_CUTOVER_FALLBACK_STEPS = (
 PKG_SIGN_IDENTITY_ENV = "OMNIGENT_PKG_SIGN_IDENTITY"
 PKG_SIGN_KEYCHAIN_ENV = "OMNIGENT_PKG_SIGN_KEYCHAIN"
 NOTARYTOOL_PROFILE_ENV = "OMNIGENT_NOTARYTOOL_PROFILE"
+STOCK_CODEX_COMPAT_RELEASE_EVIDENCE_ENV = (
+    "OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_EVIDENCE_OUTPUT"
+)
 LAUNCHER_ACTIVATION_SENTINEL = "OMNIGENT_CODEX_LAUNCHER_ACTIVATION_OK"
 LAUNCHER_ACTIVATION_PROBE_ARG = "--omnigent-launcher-probe"
 APP_BUNDLE_ENTRYPOINT_NAME = "Omnigent Codex"
@@ -1852,6 +1855,45 @@ class StockCodexCompatPkgCleanVmProof:
     auth_persistence_thread_id: str | None = None
     auth_persistence_event_count: int | None = None
     auth_persistence_agent_message_preview: str | None = None
+
+
+@dataclass(frozen=True)
+class StockCodexCompatPkgNonTartCleanMachinePreflightProof:
+    """Preflight result for an operator-supplied direct-SSH macOS target."""
+
+    status: str
+    missing_prerequisites: tuple[str, ...]
+    tool_paths: dict[str, str | None]
+    package_path: Path | None
+    package_sha256: str | None
+    release_evidence_path: Path | None
+    release_evidence_status: str | None
+    release_evidence_output_preview: str | None
+    ssh_target: str | None
+    ssh_identity: Path | None
+    ssh_port: int | None
+    remote_work_dir: str | None
+    remote_status: str | None
+    remote_output_preview: str | None
+    remote_user: str | None
+    remote_home: str | None
+    macos_version: str | None
+    arch: str | None
+    uvx_path: str | None
+    uv_path: str | None
+    sudo_noninteractive: bool | None
+    disposable_marker_present: bool | None
+    package_receipt_present: bool | None
+    package_payload_present: bool | None
+    launcher_present: bool | None
+    launcher_manifest_present: bool | None
+    adapter_root_present: bool | None
+    stock_cache_present: bool | None
+    launch_agent_present: bool | None
+    remote_package_sha256: str | None
+    signature_status: str | None
+    staple_status: str | None
+    gatekeeper_status: str | None
 
 
 @dataclass(frozen=True)
@@ -13492,6 +13534,600 @@ def _resolve_clean_vm_ssh_target(
     return f"{ssh_user}@{tart_ip}", tart_ip, tart_started, ()
 
 
+def _run_stock_codex_compat_release_evidence_verifier(
+    *,
+    package_path: Path,
+    release_evidence_path: Path,
+) -> subprocess.CompletedProcess[str]:
+    """Run the offline release evidence verifier against a package/evidence pair."""
+    verifier_path = (
+        Path(__file__).resolve().parent
+        / "check_stock_codex_compat_release_evidence.py"
+    )
+    return subprocess.run(
+        [
+            sys.executable,
+            str(verifier_path),
+            "--pkg-path",
+            str(package_path),
+            "--evidence-output",
+            str(release_evidence_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def _blocked_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+    *,
+    tool_paths: dict[str, str | None],
+    missing_prerequisites: tuple[str, ...],
+    package_path: Path | None,
+    package_sha256: str | None = None,
+    release_evidence_path: Path | None = None,
+    release_evidence_status: str | None = None,
+    release_evidence_output_preview: str | None = None,
+    ssh_target: str | None = None,
+    ssh_identity: Path | None = None,
+    ssh_port: int | None = None,
+    remote_work_dir: str | None = None,
+    remote_status: str | None = None,
+    remote_output_preview: str | None = None,
+    status: str = "blocked",
+) -> StockCodexCompatPkgNonTartCleanMachinePreflightProof:
+    return StockCodexCompatPkgNonTartCleanMachinePreflightProof(
+        status=status,
+        missing_prerequisites=missing_prerequisites,
+        tool_paths=tool_paths,
+        package_path=package_path,
+        package_sha256=package_sha256,
+        release_evidence_path=release_evidence_path,
+        release_evidence_status=release_evidence_status,
+        release_evidence_output_preview=release_evidence_output_preview,
+        ssh_target=ssh_target,
+        ssh_identity=ssh_identity,
+        ssh_port=ssh_port,
+        remote_work_dir=remote_work_dir,
+        remote_status=remote_status,
+        remote_output_preview=remote_output_preview,
+        remote_user=None,
+        remote_home=None,
+        macos_version=None,
+        arch=None,
+        uvx_path=None,
+        uv_path=None,
+        sudo_noninteractive=None,
+        disposable_marker_present=None,
+        package_receipt_present=None,
+        package_payload_present=None,
+        launcher_present=None,
+        launcher_manifest_present=None,
+        adapter_root_present=None,
+        stock_cache_present=None,
+        launch_agent_present=None,
+        remote_package_sha256=None,
+        signature_status=None,
+        staple_status=None,
+        gatekeeper_status=None,
+    )
+
+
+def _nontart_clean_machine_preflight_script_text() -> str:
+    """Return the read-only direct-SSH clean-machine inspection script."""
+    marker_name = shlex.quote(EXTERNAL_CLEAN_USER_MARKER_NAME)
+    return f'''#!/bin/bash
+set -u
+
+pkg_path="${{1:-}}"
+expected_pkg_sha="${{2:-}}"
+prefix="stock_codex_compat_pkg_nontart_clean_machine_preflight_"
+pkg_id="ai.omnigent.stock-codex-compat"
+install_prefix="/Library/Application Support/Omnigent/stock-codex-compat"
+marker="$HOME/{marker_name}"
+launcher_path="$HOME/.local/bin/omnigent-stock-codex-compat"
+manifest_path="$HOME/.local/omnigent/launchers/stock-codex-compat.json"
+adapter_root="$HOME/.local/omnigent/stock-codex-compat"
+clean_cache_root="$HOME/.local/omnigent/codex-stock"
+launch_agent_path="$HOME/Library/LaunchAgents/ai.omnigent.stock-codex-compat.update.plist"
+
+emit() {{
+  printf '%s%s=%s\\n' "$prefix" "$1" "$2"
+}}
+
+path_exists_bool() {{
+  if [ -e "$1" ]; then
+    printf 'true'
+  else
+    printf 'false'
+  fi
+}}
+
+status_for_output() {{
+  if [ "$1" -eq 0 ]; then
+    printf 'accepted'
+  else
+    printf 'rejected'
+  fi
+}}
+
+path_prefix="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin"
+path_prefix="$path_prefix:/nix/var/nix/profiles/default/bin"
+export PATH="$path_prefix:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
+emit status inspected
+emit user "${{USER:-}}"
+emit home "$HOME"
+emit macos_version "$(sw_vers -productVersion 2>/dev/null || true)"
+emit arch "$(uname -m 2>/dev/null || true)"
+emit uvx_path "$(command -v uvx 2>/dev/null || true)"
+emit uv_path "$(command -v uv 2>/dev/null || true)"
+if sudo -n true >/dev/null 2>&1; then
+  emit sudo_noninteractive true
+else
+  emit sudo_noninteractive false
+fi
+emit disposable_marker_present "$(path_exists_bool "$marker")"
+if pkgutil --pkg-info "$pkg_id" >/dev/null 2>&1; then
+  emit package_receipt_present true
+else
+  emit package_receipt_present false
+fi
+emit package_payload_present "$(path_exists_bool "$install_prefix")"
+emit launcher_present "$(path_exists_bool "$launcher_path")"
+emit launcher_manifest_present "$(path_exists_bool "$manifest_path")"
+emit adapter_root_present "$(path_exists_bool "$adapter_root")"
+emit stock_cache_present "$(path_exists_bool "$clean_cache_root")"
+emit launch_agent_present "$(path_exists_bool "$launch_agent_path")"
+
+if [ -f "$pkg_path" ] && command -v shasum >/dev/null 2>&1; then
+  actual_pkg_sha="$(shasum -a 256 "$pkg_path" 2>/dev/null | awk '{{print $1}}')"
+else
+  actual_pkg_sha=""
+fi
+emit remote_package_sha256 "$actual_pkg_sha"
+if [ -n "$expected_pkg_sha" ] && \
+   [ -n "$actual_pkg_sha" ] && \
+   [ "$actual_pkg_sha" != "$expected_pkg_sha" ]; then
+  emit package_sha_match false
+else
+  emit package_sha_match true
+fi
+
+if command -v pkgutil >/dev/null 2>&1 && [ -f "$pkg_path" ]; then
+  pkgutil --check-signature "$pkg_path" >/dev/null 2>&1
+  emit signature_status "$(status_for_output "$?")"
+else
+  emit signature_status missing-pkgutil-or-package
+fi
+if command -v xcrun >/dev/null 2>&1 && [ -f "$pkg_path" ]; then
+  xcrun stapler validate "$pkg_path" >/dev/null 2>&1
+  emit staple_status "$(status_for_output "$?")"
+else
+  emit staple_status missing-xcrun-or-package
+fi
+if command -v spctl >/dev/null 2>&1 && [ -f "$pkg_path" ]; then
+  spctl -a -vv -t install "$pkg_path" >/dev/null 2>&1
+  emit gatekeeper_status "$(status_for_output "$?")"
+else
+  emit gatekeeper_status missing-spctl-or-package
+fi
+'''
+
+
+def _parse_nontart_clean_machine_preflight_evidence(output: str) -> dict[str, str]:
+    """Parse key=value evidence emitted by the non-Tart preflight script."""
+    prefix = "stock_codex_compat_pkg_nontart_clean_machine_preflight_"
+    evidence: dict[str, str] = {}
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line.startswith(prefix) or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        evidence[key.removeprefix(prefix)] = value
+    return evidence
+
+
+def _evidence_bool(evidence: Mapping[str, str], key: str) -> bool | None:
+    value = evidence.get(key)
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    return None
+
+
+def run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+    *,
+    package_path: Path | None,
+    release_evidence_path: Path | None,
+    clean_vm_ssh_target: str | None,
+    clean_vm_ssh_identity: Path | None,
+    clean_vm_ssh_port: int,
+) -> StockCodexCompatPkgNonTartCleanMachinePreflightProof:
+    """Preflight an operator-supplied macOS target without Tart or install."""
+    tool_paths = {
+        "ssh": shutil.which("ssh"),
+        "scp": shutil.which("scp"),
+    }
+    missing: list[str] = []
+    if not tool_paths["ssh"]:
+        missing.append("missing tool: ssh")
+    if not tool_paths["scp"]:
+        missing.append("missing tool: scp")
+    if not clean_vm_ssh_target:
+        missing.append(
+            "stock-codex-compat-pkg-nontart-clean-machine-preflight requires "
+            "--clean-vm-ssh-target; Tart resolution is intentionally disabled"
+        )
+
+    resolved_package_path = package_path.expanduser().resolve() if package_path else None
+    package_sha256: str | None = None
+    if resolved_package_path is None:
+        missing.append(
+            "stock-codex-compat-pkg-nontart-clean-machine-preflight requires "
+            "--pkg-path from stock-codex-compat-pkg-signed-notarized"
+        )
+    elif resolved_package_path.is_file():
+        package_sha256 = sha256_file(resolved_package_path)
+    else:
+        missing.append(f"missing prebuilt compatibility pkg: {resolved_package_path}")
+
+    resolved_evidence_path = (
+        release_evidence_path.expanduser().resolve() if release_evidence_path else None
+    )
+    if resolved_evidence_path is None:
+        missing.append(
+            "stock-codex-compat-pkg-nontart-clean-machine-preflight requires "
+            "--release-evidence-path from the clean-VM release evidence artifact"
+        )
+    elif not resolved_evidence_path.is_file():
+        missing.append(f"missing clean-VM release evidence: {resolved_evidence_path}")
+
+    resolved_identity = (
+        clean_vm_ssh_identity.expanduser().resolve()
+        if clean_vm_ssh_identity is not None
+        else None
+    )
+    if resolved_identity is not None and not resolved_identity.is_file():
+        missing.append(f"missing clean machine SSH identity: {resolved_identity}")
+
+    if missing:
+        return _blocked_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+            tool_paths=tool_paths,
+            missing_prerequisites=tuple(missing),
+            package_path=resolved_package_path,
+            package_sha256=package_sha256,
+            release_evidence_path=resolved_evidence_path,
+            ssh_target=clean_vm_ssh_target,
+            ssh_identity=resolved_identity,
+            ssh_port=clean_vm_ssh_port,
+        )
+
+    assert tool_paths["ssh"] is not None
+    assert tool_paths["scp"] is not None
+    assert clean_vm_ssh_target is not None
+    assert resolved_package_path is not None
+    assert package_sha256 is not None
+    assert resolved_evidence_path is not None
+
+    verifier = _run_stock_codex_compat_release_evidence_verifier(
+        package_path=resolved_package_path,
+        release_evidence_path=resolved_evidence_path,
+    )
+    verifier_output = (verifier.stdout or "") + (verifier.stderr or "")
+    release_evidence_status = "verified" if verifier.returncode == 0 else "blocked"
+    release_evidence_preview = _preview_text(verifier_output, limit=4000)
+    if verifier.returncode != 0:
+        return _blocked_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+            tool_paths=tool_paths,
+            missing_prerequisites=("release evidence verifier did not pass",),
+            package_path=resolved_package_path,
+            package_sha256=package_sha256,
+            release_evidence_path=resolved_evidence_path,
+            release_evidence_status=release_evidence_status,
+            release_evidence_output_preview=release_evidence_preview,
+            ssh_target=clean_vm_ssh_target,
+            ssh_identity=resolved_identity,
+            ssh_port=clean_vm_ssh_port,
+            remote_status="not-started",
+        )
+
+    remote_work_dir: str | None = None
+
+    def finalize(
+        proof: StockCodexCompatPkgNonTartCleanMachinePreflightProof,
+    ) -> StockCodexCompatPkgNonTartCleanMachinePreflightProof:
+        if remote_work_dir:
+            with contextlib.suppress(Exception):
+                _run_clean_vm_ssh_command(
+                    f"rm -rf {shlex.quote(remote_work_dir)}",
+                    ssh_path=tool_paths["ssh"],
+                    ssh_target=clean_vm_ssh_target,
+                    ssh_port=clean_vm_ssh_port,
+                    ssh_identity=resolved_identity,
+                    timeout=30,
+                )
+        return proof
+
+    ssh_ready = _wait_for_clean_vm_ssh(
+        ssh_path=tool_paths["ssh"],
+        ssh_target=clean_vm_ssh_target,
+        ssh_port=clean_vm_ssh_port,
+        ssh_identity=resolved_identity,
+        timeout=60,
+    )
+    if ssh_ready.returncode != 0:
+        return _blocked_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+            tool_paths=tool_paths,
+            missing_prerequisites=("clean machine SSH target did not become reachable",),
+            package_path=resolved_package_path,
+            package_sha256=package_sha256,
+            release_evidence_path=resolved_evidence_path,
+            release_evidence_status=release_evidence_status,
+            release_evidence_output_preview=release_evidence_preview,
+            ssh_target=clean_vm_ssh_target,
+            ssh_identity=resolved_identity,
+            ssh_port=clean_vm_ssh_port,
+            remote_status="ssh-unreachable",
+            remote_output_preview=_preview_text(
+                ssh_ready.stdout + ssh_ready.stderr,
+                limit=4000,
+            ),
+        )
+
+    mktemp = _run_clean_vm_ssh_command(
+        "/usr/bin/mktemp -d /tmp/omnigent-stock-codex-compat-nontart-preflight.XXXXXX",
+        ssh_path=tool_paths["ssh"],
+        ssh_target=clean_vm_ssh_target,
+        ssh_port=clean_vm_ssh_port,
+        ssh_identity=resolved_identity,
+        timeout=60,
+    )
+    if mktemp.returncode != 0:
+        return _blocked_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+            tool_paths=tool_paths,
+            missing_prerequisites=(
+                "could not create remote non-Tart preflight work directory over SSH",
+            ),
+            package_path=resolved_package_path,
+            package_sha256=package_sha256,
+            release_evidence_path=resolved_evidence_path,
+            release_evidence_status=release_evidence_status,
+            release_evidence_output_preview=release_evidence_preview,
+            ssh_target=clean_vm_ssh_target,
+            ssh_identity=resolved_identity,
+            ssh_port=clean_vm_ssh_port,
+            remote_status="mktemp-failed",
+            remote_output_preview=_preview_text(mktemp.stdout + mktemp.stderr),
+        )
+    remote_work_dir = mktemp.stdout.strip().splitlines()[-1].strip()
+
+    with tempfile.TemporaryDirectory(
+        prefix="omnigent-stock-codex-compat-nontart-preflight-"
+    ) as temp_root:
+        root = Path(temp_root)
+        script_path = root / "nontart_clean_machine_preflight.sh"
+        script_path.write_text(
+            _nontart_clean_machine_preflight_script_text(),
+            encoding="utf-8",
+        )
+        script_path.chmod(0o755)
+        upload_plan = (
+            (resolved_package_path, f"{remote_work_dir}/omnigent-stock-codex-compat.pkg"),
+            (script_path, f"{remote_work_dir}/nontart_clean_machine_preflight.sh"),
+        )
+        for source, destination in upload_plan:
+            upload = _copy_clean_vm_file(
+                scp_path=tool_paths["scp"],
+                ssh_target=clean_vm_ssh_target,
+                ssh_port=clean_vm_ssh_port,
+                ssh_identity=resolved_identity,
+                source=source,
+                remote_destination=destination,
+                timeout=600,
+            )
+            if upload.returncode != 0:
+                return finalize(
+                    _blocked_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+                        tool_paths=tool_paths,
+                        missing_prerequisites=(
+                            "could not upload non-Tart clean-machine preflight artifact",
+                        ),
+                        package_path=resolved_package_path,
+                        package_sha256=package_sha256,
+                        release_evidence_path=resolved_evidence_path,
+                        release_evidence_status=release_evidence_status,
+                        release_evidence_output_preview=release_evidence_preview,
+                        ssh_target=clean_vm_ssh_target,
+                        ssh_identity=resolved_identity,
+                        ssh_port=clean_vm_ssh_port,
+                        remote_work_dir=remote_work_dir,
+                        remote_status="upload-failed",
+                        remote_output_preview=_preview_text(upload.stdout + upload.stderr),
+                    )
+                )
+        chmod_remote = _run_clean_vm_ssh_command(
+            "chmod +x "
+            f"{shlex.quote(remote_work_dir + '/nontart_clean_machine_preflight.sh')}",
+            ssh_path=tool_paths["ssh"],
+            ssh_target=clean_vm_ssh_target,
+            ssh_port=clean_vm_ssh_port,
+            ssh_identity=resolved_identity,
+            timeout=60,
+        )
+        if chmod_remote.returncode != 0:
+            return finalize(
+                _blocked_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+                    tool_paths=tool_paths,
+                    missing_prerequisites=(
+                        "could not mark non-Tart clean-machine preflight script executable",
+                    ),
+                    package_path=resolved_package_path,
+                    package_sha256=package_sha256,
+                    release_evidence_path=resolved_evidence_path,
+                    release_evidence_status=release_evidence_status,
+                    release_evidence_output_preview=release_evidence_preview,
+                    ssh_target=clean_vm_ssh_target,
+                    ssh_identity=resolved_identity,
+                    ssh_port=clean_vm_ssh_port,
+                    remote_work_dir=remote_work_dir,
+                    remote_status="chmod-failed",
+                    remote_output_preview=_preview_text(
+                        chmod_remote.stdout + chmod_remote.stderr
+                    ),
+                )
+            )
+        remote_command = " ".join(
+            shlex.quote(part)
+            for part in (
+                "/bin/bash",
+                f"{remote_work_dir}/nontart_clean_machine_preflight.sh",
+                f"{remote_work_dir}/omnigent-stock-codex-compat.pkg",
+                package_sha256,
+            )
+        )
+        remote = _run_clean_vm_ssh_command(
+            remote_command,
+            ssh_path=tool_paths["ssh"],
+            ssh_target=clean_vm_ssh_target,
+            ssh_port=clean_vm_ssh_port,
+            ssh_identity=resolved_identity,
+            timeout=180,
+        )
+
+    remote_output = (remote.stdout or "") + (remote.stderr or "")
+    evidence = _parse_nontart_clean_machine_preflight_evidence(remote_output)
+    if remote.returncode != 0 or evidence.get("status") != "inspected":
+        return finalize(
+            _blocked_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+                tool_paths=tool_paths,
+                missing_prerequisites=(
+                    "non-Tart clean-machine remote preflight did not emit "
+                    "parseable inspection evidence",
+                ),
+                package_path=resolved_package_path,
+                package_sha256=package_sha256,
+                release_evidence_path=resolved_evidence_path,
+                release_evidence_status=release_evidence_status,
+                release_evidence_output_preview=release_evidence_preview,
+                ssh_target=clean_vm_ssh_target,
+                ssh_identity=resolved_identity,
+                ssh_port=clean_vm_ssh_port,
+                remote_work_dir=remote_work_dir,
+                remote_status=f"exit-{remote.returncode}",
+                remote_output_preview=_preview_text(remote_output, limit=8000),
+            )
+        )
+
+    marker_present = _evidence_bool(evidence, "disposable_marker_present")
+    sudo_noninteractive = _evidence_bool(evidence, "sudo_noninteractive")
+    state_fields = {
+        "package receipt": _evidence_bool(evidence, "package_receipt_present"),
+        "package payload": _evidence_bool(evidence, "package_payload_present"),
+        "managed launcher": _evidence_bool(evidence, "launcher_present"),
+        "launcher manifest": _evidence_bool(evidence, "launcher_manifest_present"),
+        "adapter root": _evidence_bool(evidence, "adapter_root_present"),
+        "stock Codex cache": _evidence_bool(evidence, "stock_cache_present"),
+        "LaunchAgent": _evidence_bool(evidence, "launch_agent_present"),
+    }
+    present_state = tuple(name for name, present in state_fields.items() if present)
+    remote_missing: list[str] = []
+    unsafe_missing: list[str] = []
+    if present_state and marker_present is not True:
+        unsafe_missing.append(
+            "operator SSH target contains existing Omnigent state and is not "
+            f"marked disposable with {EXTERNAL_CLEAN_USER_MARKER_NAME}: "
+            + ", ".join(present_state)
+        )
+    if marker_present is not True:
+        remote_missing.append(
+            f"remote user home is missing disposable marker {EXTERNAL_CLEAN_USER_MARKER_NAME}"
+        )
+    elif present_state:
+        remote_missing.append(
+            "remote disposable target contains existing Omnigent state; clean it "
+            "outside this preflight before running package-consuming gates: "
+            + ", ".join(present_state)
+        )
+    if sudo_noninteractive is not True:
+        remote_missing.append("remote sudo requires interactive authentication")
+    if not evidence.get("uvx_path"):
+        remote_missing.append("remote uvx is not available on the proof PATH")
+    if evidence.get("arch") != "arm64":
+        remote_missing.append(
+            f"remote architecture must be arm64 for the selected stock Codex archive: "
+            f"{evidence.get('arch') or 'unknown'}"
+        )
+    if not evidence.get("macos_version"):
+        remote_missing.append("remote macOS version could not be determined")
+    if evidence.get("remote_package_sha256") != package_sha256:
+        remote_missing.append("remote uploaded package SHA-256 does not match local package")
+    for label, key in (
+        ("package signature", "signature_status"),
+        ("stapled notarization ticket", "staple_status"),
+        ("Gatekeeper install assessment", "gatekeeper_status"),
+    ):
+        if evidence.get(key) != "accepted":
+            remote_missing.append(
+                f"remote {label} was not accepted: {evidence.get(key) or 'missing'}"
+            )
+
+    status = "replacement-ready"
+    status_missing: tuple[str, ...] = ()
+    remote_status = "replacement-ready"
+    if unsafe_missing:
+        status = "unsafe-target"
+        status_missing = tuple(unsafe_missing + remote_missing)
+        remote_status = "unsafe-target"
+    elif remote_missing:
+        status = "blocked"
+        status_missing = tuple(remote_missing)
+        remote_status = "blocked"
+
+    return finalize(
+        StockCodexCompatPkgNonTartCleanMachinePreflightProof(
+            status=status,
+            missing_prerequisites=status_missing,
+            tool_paths=tool_paths,
+            package_path=resolved_package_path,
+            package_sha256=package_sha256,
+            release_evidence_path=resolved_evidence_path,
+            release_evidence_status=release_evidence_status,
+            release_evidence_output_preview=release_evidence_preview,
+            ssh_target=clean_vm_ssh_target,
+            ssh_identity=resolved_identity,
+            ssh_port=clean_vm_ssh_port,
+            remote_work_dir=remote_work_dir,
+            remote_status=remote_status,
+            remote_output_preview=_preview_text(remote_output, limit=8000),
+            remote_user=evidence.get("user") or None,
+            remote_home=evidence.get("home") or None,
+            macos_version=evidence.get("macos_version") or None,
+            arch=evidence.get("arch") or None,
+            uvx_path=evidence.get("uvx_path") or None,
+            uv_path=evidence.get("uv_path") or None,
+            sudo_noninteractive=sudo_noninteractive,
+            disposable_marker_present=marker_present,
+            package_receipt_present=_evidence_bool(evidence, "package_receipt_present"),
+            package_payload_present=_evidence_bool(evidence, "package_payload_present"),
+            launcher_present=_evidence_bool(evidence, "launcher_present"),
+            launcher_manifest_present=_evidence_bool(
+                evidence,
+                "launcher_manifest_present",
+            ),
+            adapter_root_present=_evidence_bool(evidence, "adapter_root_present"),
+            stock_cache_present=_evidence_bool(evidence, "stock_cache_present"),
+            launch_agent_present=_evidence_bool(evidence, "launch_agent_present"),
+            remote_package_sha256=evidence.get("remote_package_sha256") or None,
+            signature_status=evidence.get("signature_status") or None,
+            staple_status=evidence.get("staple_status") or None,
+            gatekeeper_status=evidence.get("gatekeeper_status") or None,
+        )
+    )
+
+
 def _clean_vm_bootstrap_script_text() -> str:
     """Return the guest-agent bootstrap script for raw disposable Tart clones."""
     marker_name = shlex.quote(EXTERNAL_CLEAN_USER_MARKER_NAME)
@@ -21418,6 +22054,164 @@ def print_stock_codex_compat_pkg_clean_vm_live_proof(
     )
 
 
+def print_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+    proof: StockCodexCompatPkgNonTartCleanMachinePreflightProof,
+) -> None:
+    """Emit operator evidence for direct-SSH clean-machine readiness."""
+    print("stock_codex_compat_pkg_nontart_clean_machine_preflight_rehearsal=selected")
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_surface="
+        "signed-pkg-nontart-clean-machine-preflight"
+    )
+    print(f"stock_codex_compat_pkg_nontart_clean_machine_preflight_status={proof.status}")
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_missing_prerequisites="
+        f"{json.dumps(list(proof.missing_prerequisites), sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_tool_paths="
+        f"{json.dumps(proof.tool_paths, sort_keys=True)}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_package_path="
+        f"{proof.package_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_package_sha256="
+        f"{proof.package_sha256}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_release_evidence_path="
+        f"{proof.release_evidence_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_release_evidence_status="
+        f"{proof.release_evidence_status}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_release_evidence_output="
+        f"{proof.release_evidence_output_preview!r}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_ssh_target="
+        f"{proof.ssh_target}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_ssh_identity="
+        f"{proof.ssh_identity}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_ssh_port="
+        f"{proof.ssh_port}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_remote_work_dir="
+        f"{proof.remote_work_dir}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_remote_status="
+        f"{proof.remote_status}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_remote_user="
+        f"{proof.remote_user}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_remote_home="
+        f"{proof.remote_home}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_macos_version="
+        f"{proof.macos_version}"
+    )
+    print(f"stock_codex_compat_pkg_nontart_clean_machine_preflight_arch={proof.arch}")
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_uvx_path="
+        f"{proof.uvx_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_uv_path="
+        f"{proof.uv_path}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_sudo_noninteractive="
+        f"{proof.sudo_noninteractive}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_disposable_marker_present="
+        f"{proof.disposable_marker_present}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_package_receipt_present="
+        f"{proof.package_receipt_present}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_package_payload_present="
+        f"{proof.package_payload_present}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_launcher_present="
+        f"{proof.launcher_present}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_launcher_manifest_present="
+        f"{proof.launcher_manifest_present}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_adapter_root_present="
+        f"{proof.adapter_root_present}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_stock_cache_present="
+        f"{proof.stock_cache_present}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_launch_agent_present="
+        f"{proof.launch_agent_present}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_remote_package_sha256="
+        f"{proof.remote_package_sha256}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_signature_status="
+        f"{proof.signature_status}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_staple_status="
+        f"{proof.staple_status}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_gatekeeper_status="
+        f"{proof.gatekeeper_status}"
+    )
+    print(
+        "stock_codex_compat_pkg_nontart_clean_machine_preflight_remote_output="
+        f"{proof.remote_output_preview!r}"
+    )
+    if proof.status == "unsafe-target":
+        print(
+            "ASSERTION: the direct SSH target contains existing Omnigent "
+            "stock-Codex compatibility state without a disposable marker; no "
+            "package install or existing-state cleanup was performed"
+        )
+        return
+    if proof.status == "blocked":
+        print(
+            "ASSERTION: non-Tart clean-machine preflight is blocked by missing "
+            "artifact evidence, SSH access, macOS/arm64 readiness, uvx, "
+            "noninteractive sudo, disposable marker, clean target state, or "
+            "package signature/notarization/Gatekeeper acceptance"
+        )
+        return
+    print(
+        "ASSERTION: the signed/notarized package and release evidence are "
+        "consistent, the direct SSH macOS target is reachable and clean, and "
+        "package signature, staple, and Gatekeeper checks pass without "
+        "installing the package"
+    )
+
+
 def print_stock_codex_compat_pkg_clean_vm_release_proof(
     proof: StockCodexCompatPkgCleanVmReleaseProof,
 ) -> None:
@@ -26399,6 +27193,7 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-pkg-clean-vm-update-agent",
             "stock-codex-compat-pkg-clean-vm-live",
             "stock-codex-compat-pkg-clean-vm-release",
+            "stock-codex-compat-pkg-nontart-clean-machine-preflight",
             "stock-codex-compat-wrapper-xcodebuild-bridge-adapter",
             "stock-codex-compat-wrapper-xcodebuild-bridge-test-adapter",
             "stock-codex-compat-wrapper-relay-tool",
@@ -26612,6 +27407,13 @@ def parse_args() -> argparse.Namespace:
             "update-agent, and live installed-launcher clean-VM gates against "
             "one signed/notarized package and fails fast on the first boundary "
             "that is not replacement-ready. "
+            "'stock-codex-compat-pkg-nontart-clean-machine-preflight' "
+            "consumes --pkg-path plus --release-evidence-path, refuses Tart "
+            "resolution, uploads only the package and transient inspection "
+            "script to an operator-supplied direct SSH macOS target, checks "
+            "uvx, noninteractive sudo, disposable marker, clean Omnigent "
+            "state, remote package SHA, pkg signature, stapled ticket, and "
+            "Gatekeeper acceptance, and never installs the package. "
             "'stock-codex-compat-wrapper-xcodebuild-bridge-adapter' proves "
             "that XcodeBuildMCP simulator build/run can execute through the "
             "same wrapper-owned file bridge while stock Codex stays in "
@@ -26721,6 +27523,20 @@ def parse_args() -> argparse.Namespace:
             "stock-codex-compat-pkg-clean-user-canary and "
             "stock-codex-compat-pkg-external-clean-user. When set, validation "
             "skips signing and notarization credentials."
+        ),
+    )
+    parser.add_argument(
+        "--release-evidence-path",
+        type=Path,
+        default=(
+            Path(os.environ[STOCK_CODEX_COMPAT_RELEASE_EVIDENCE_ENV])
+            if os.environ.get(STOCK_CODEX_COMPAT_RELEASE_EVIDENCE_ENV)
+            else None
+        ),
+        help=(
+            "Release evidence JSON produced by the stock-Codex compatibility "
+            "clean-VM release gate. Defaults to "
+            f"{STOCK_CODEX_COMPAT_RELEASE_EVIDENCE_ENV}."
         ),
     )
     parser.add_argument(
@@ -27763,6 +28579,66 @@ def main() -> int:
                 clean_vm_ssh_user=args.clean_vm_ssh_user,
                 clean_vm_ssh_port=args.clean_vm_ssh_port,
                 clean_vm_start_tart=args.clean_vm_start_tart,
+            )
+        )
+        return 0
+
+    if requested_proof == "stock-codex-compat-pkg-nontart-clean-machine-preflight":
+        if args.apple_bundle is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-preflight does not "
+                "use --apple-bundle; omit it."
+            )
+        if args.codex_path is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-preflight does not "
+                "execute Codex; omit --codex-path."
+            )
+        if args.allow_fork_codex:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-preflight cannot "
+                "allow a Codex-fork binary."
+            )
+        if args.pkg_output_path is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-preflight consumes "
+                "--pkg-path; produce persistent packages with "
+                "stock-codex-compat-pkg-signed-notarized."
+            )
+        if args.pkg_path is None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-preflight requires "
+                "--pkg-path from stock-codex-compat-pkg-signed-notarized."
+            )
+        if args.release_evidence_path is None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-preflight requires "
+                "--release-evidence-path from the clean-VM release evidence artifact."
+            )
+        if args.clean_vm_tart_name is not None or args.clean_vm_start_tart:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-preflight refuses "
+                "Tart resolution; pass --clean-vm-ssh-target for a direct SSH target."
+            )
+        if args.clean_vm_source_tart_name is not None or args.clean_vm_bootstrap_install_uv:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-preflight does not "
+                "bootstrap Tart VMs or install uvx; prepare the direct SSH target "
+                "outside this preflight."
+            )
+        if args.clean_vm_ssh_user is not None:
+            raise SystemExit(
+                "stock-codex-compat-pkg-nontart-clean-machine-preflight does not "
+                "derive SSH targets from --clean-vm-ssh-user; include the user in "
+                "--clean-vm-ssh-target."
+            )
+        print_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+            run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+                package_path=args.pkg_path,
+                release_evidence_path=args.release_evidence_path,
+                clean_vm_ssh_target=args.clean_vm_ssh_target,
+                clean_vm_ssh_identity=args.clean_vm_ssh_identity,
+                clean_vm_ssh_port=args.clean_vm_ssh_port,
             )
         )
         return 0

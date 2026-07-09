@@ -375,12 +375,17 @@ The next gates should split by product mode:
   access, fail-closed non-official URL rejection, resolver selection,
   explicit-download remote acquisition, SHA verification, safe archive
   extraction, staged-payload reuse, and no-host-cache leakage from both source
-  checkout and packaged-runtime paths. Remaining production choices are non-Tart
-  clean-machine provisioning, browser or device auth onboarding UX, launchd
-  enablement policy, alpha/pre-release channel policy, independent archive
-  signature policy, and broader UI/device bridge coverage such as screenshot,
-  snapshot, gesture, or device execution if product scope requires them. Raw
-  unwrapped stock Codex Electron/CLI route parity remains blocked;
+  checkout and packaged-runtime paths. The next non-Tart production slice is the
+  direct-SSH clean-machine preflight gate: it should consume the archived `.pkg`
+  and release evidence JSON, refuse Tart resolution, verify target readiness and
+  package acceptance without installing, and report `unsafe-target` on dirty
+  unmarked machines. Remaining production choices after that preflight are
+  non-Tart package install/provisioning execution, browser or device auth
+  onboarding UX, launchd enablement policy, alpha/pre-release channel policy,
+  independent archive signature policy, and broader UI/device bridge coverage
+  such as screenshot, snapshot, gesture, or device execution if product scope
+  requires them. Raw unwrapped stock Codex Electron/CLI route parity remains
+  blocked;
 - decide whether automated browser/device login UX, token freshness validation,
   or cross-machine credential packaging is product scope; or
 - broaden the Apple workflow smoke to release/readiness/review only if product

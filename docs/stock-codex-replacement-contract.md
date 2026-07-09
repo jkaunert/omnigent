@@ -1073,6 +1073,29 @@ wrapper or underlying proof exit, non-empty `releaseCriteriaFailures`,
 non-official channel policy or URL, missing step details, any non-ready step,
 Tart start/stop mismatch, or any host stock-Codex upload.
 
+Non-Tart clean-machine preflight:
+
+```bash
+uvx --from . python scripts/prove_stock_codex_replacement.py \
+  --proof stock-codex-compat-pkg-nontart-clean-machine-preflight \
+  --pkg-path /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-proof-artifacts/omnigent-stock-codex-compat-github-latest.pkg \
+  --release-evidence-path /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-proof-artifacts/omnigent-stock-codex-compat-github-latest.release-evidence.json \
+  --clean-vm-ssh-target admin@<clean-mac-host> \
+  --clean-vm-ssh-identity ~/.ssh/mba_github_ssh_key
+```
+
+This gate is preflight-only for operator-supplied direct SSH targets. It first
+runs the offline release evidence verifier against the package/evidence pair,
+then uploads only the package and a transient inspection script to a remote
+temporary directory. It checks SSH reachability, macOS version, `arm64`, `uvx`,
+noninteractive `sudo`, the disposable marker, absence of Omnigent
+stock-Codex-compat state, remote package SHA-256, `pkgutil --check-signature`,
+`xcrun stapler validate`, and `spctl -a -vv -t install`. It refuses Tart
+resolution, does not install the package, does not run Codex, and does not clean
+existing target state. A dirty unmarked target reports `unsafe-target`; a
+marked but dirty target reports `blocked` until the operator cleans it outside
+this preflight.
+
 Current local release-candidate evidence:
 `/Users/joshuakaunert/Developer/HarnessEngineering/omnigent-proof-artifacts/omnigent-stock-codex-compat-github-latest.release-evidence.json`
 recorded `status=replacement-ready`, package SHA-256

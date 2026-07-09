@@ -138,3 +138,11 @@ scraping. The offline verifier
 against the archived `.pkg` and evidence JSON to re-hash the package and fail
 closed on schema drift, non-official channel evidence, non-ready steps, Tart
 count mismatch, or host stock-Codex upload.
+
+For non-Tart targets, run
+`stock-codex-compat-pkg-nontart-clean-machine-preflight` before any package
+install or auth/live proof. That gate consumes the archived `.pkg` plus release
+evidence JSON, refuses Tart resolution, checks the operator-supplied SSH host
+for `uvx`, noninteractive `sudo`, disposable marker, clean Omnigent state,
+remote package SHA, signature, staple, and Gatekeeper acceptance, and reports
+`unsafe-target` instead of cleaning or installing on a dirty unmarked machine.
