@@ -4504,6 +4504,199 @@ def test_stock_codex_compat_pkg_nontart_clean_machine_preflight_blocks_without_e
     assert any("missing clean-VM release evidence" in item for item in proof.missing_prerequisites)
 
 
+def _write_stock_codex_compat_release_evidence(
+    path: Path,
+    *,
+    package_path: Path,
+    package_sha256: str,
+    selected_version: str = "codex-cli 0.143.0",
+) -> Path:
+    selected_launcher = "/Users/admin/.local/bin/omnigent-stock-codex-compat"
+    selected_codex = "/Users/admin/.local/omnigent/codex-stock/0.143.0/codex"
+    evidence: dict[str, Any] = {
+        "kind": "omnigent-stock-codex-compat-release-candidate-evidence",
+        "schemaVersion": 1,
+        "proof": "stock-codex-compat-pkg-clean-vm-release",
+        "command": ["prove"],
+        "exitCode": 0,
+        "underlyingExitCode": 0,
+        "releaseCriteriaFailures": [],
+        "status": "replacement-ready",
+        "missingPrerequisites": [],
+        "packagePath": str(package_path),
+        "packageSha256": package_sha256,
+        "stockCodexPath": "/Users/admin/.local/omnigent/codex-stock/0.142.5/codex",
+        "stockCodexVersion": "codex-cli 0.142.5",
+        "stockCodexSha256": "a" * 64,
+        "caskVersion": "0.143.0",
+        "caskUrl": (
+            "https://github.com/openai/codex/releases/download/"
+            "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+        ),
+        "caskSha256": "b" * 64,
+        "channelPolicy": "official-openai-github-release",
+        "targetMode": "direct-ssh",
+        "sshTarget": "admin@192.0.2.10",
+        "authPath": "/Users/admin/.codex/auth.json",
+        "authSource": "stock-default-home",
+        "authAvailable": True,
+        "stepOrder": [
+            "remote-acquisition",
+            "auth-onboarding",
+            "auth-persistence",
+            "update-agent",
+            "live",
+        ],
+        "stepStatuses": {
+            "remote-acquisition": "replacement-ready",
+            "auth-onboarding": "replacement-ready",
+            "auth-persistence": "replacement-ready",
+            "update-agent": "replacement-ready",
+            "live": "replacement-ready",
+        },
+        "stepMissingPrerequisites": {
+            "remote-acquisition": [],
+            "auth-onboarding": [],
+            "auth-persistence": [],
+            "update-agent": [],
+            "live": [],
+        },
+        "blockedStep": None,
+        "tartStartedCount": 0,
+        "tartStoppedCount": 0,
+        "hostStockCodexUploadedAny": False,
+        "stepDetails": {
+            "remote-acquisition": {
+                "status": "replacement-ready",
+                "remoteStatus": "replacement-ready",
+                "hostStockCodexUploaded": False,
+                "tartStarted": False,
+                "tartStopped": False,
+                "selectedCommandPath": None,
+                "selectedCommandVersion": None,
+                "selectedCodexPath": None,
+                "selectedCodexVersion": None,
+                "threadId": None,
+                "scheduledAction": None,
+            },
+            "auth-onboarding": {
+                "status": "replacement-ready",
+                "remoteStatus": "replacement-ready",
+                "hostStockCodexUploaded": False,
+                "tartStarted": False,
+                "tartStopped": False,
+                "selectedCommandPath": selected_launcher,
+                "selectedCommandVersion": selected_version,
+                "selectedCodexPath": None,
+                "selectedCodexVersion": None,
+                "threadId": None,
+                "scheduledAction": None,
+            },
+            "auth-persistence": {
+                "status": "replacement-ready",
+                "remoteStatus": "replacement-ready",
+                "hostStockCodexUploaded": False,
+                "tartStarted": False,
+                "tartStopped": False,
+                "selectedCommandPath": selected_launcher,
+                "selectedCommandVersion": selected_version,
+                "selectedCodexPath": None,
+                "selectedCodexVersion": None,
+                "threadId": "thread-auth",
+                "scheduledAction": None,
+            },
+            "update-agent": {
+                "status": "replacement-ready",
+                "remoteStatus": "replacement-ready",
+                "hostStockCodexUploaded": False,
+                "tartStarted": False,
+                "tartStopped": False,
+                "selectedCommandPath": None,
+                "selectedCommandVersion": None,
+                "selectedCodexPath": selected_codex,
+                "selectedCodexVersion": selected_version,
+                "threadId": None,
+                "scheduledAction": "up-to-date",
+            },
+            "live": {
+                "status": "replacement-ready",
+                "remoteStatus": "replacement-ready",
+                "hostStockCodexUploaded": False,
+                "tartStarted": False,
+                "tartStopped": False,
+                "selectedCommandPath": selected_launcher,
+                "selectedCommandVersion": selected_version,
+                "selectedCodexPath": None,
+                "selectedCodexVersion": None,
+                "threadId": "thread-live",
+                "scheduledAction": None,
+            },
+        },
+        "fields": [],
+    }
+    path.write_text(json.dumps(evidence) + "\n", encoding="utf-8")
+    return path
+
+
+def test_stock_codex_compat_pkg_nontart_clean_machine_preflight_blocks_stale_selected_version(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+    evidence_path = _write_stock_codex_compat_release_evidence(
+        tmp_path / "release-evidence.json",
+        package_path=package_path.resolve(),
+        package_sha256=_MOD.sha256_file(package_path),
+        selected_version="codex-cli 0.142.5",
+    )
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        if path is not None:
+            return None
+        return {"ssh": "/usr/bin/ssh", "scp": "/usr/bin/scp"}.get(name)
+
+    monkeypatch.setattr(_MOD.shutil, "which", fake_which)
+    monkeypatch.setattr(
+        _MOD,
+        "_wait_for_clean_vm_ssh",
+        lambda **_kwargs: pytest.fail("preflight should block before SSH readiness"),
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_copy_clean_vm_file",
+        lambda **_kwargs: pytest.fail("preflight should block before uploading artifacts"),
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_run_clean_vm_ssh_command",
+        lambda *_args, **_kwargs: pytest.fail("preflight should block before remote commands"),
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
+        package_path=package_path,
+        release_evidence_path=evidence_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_port=22,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.remote_status == "not-started"
+    assert proof.release_evidence_status == "blocked"
+    assert any(
+        item == "release evidence verifier did not pass"
+        for item in proof.missing_prerequisites
+    )
+    assert "selectedCommandVersion]='codex-cli 0.142.5'" in str(
+        proof.release_evidence_output_preview
+    )
+    assert "selectedCodexVersion]='codex-cli 0.142.5'" in str(
+        proof.release_evidence_output_preview
+    )
+
+
 def test_stock_codex_compat_pkg_nontart_clean_machine_preflight_reports_upload_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

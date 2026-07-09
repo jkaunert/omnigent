@@ -22288,9 +22288,10 @@ def print_stock_codex_compat_pkg_nontart_clean_machine_preflight_proof(
         return
     print(
         "ASSERTION: the signed/notarized package and release evidence are "
-        "consistent, the direct SSH macOS target is reachable and clean, and "
-        "package signature, staple, and Gatekeeper checks pass without "
-        "installing the package"
+        "consistent, the release evidence includes clean-target selected "
+        "stock-Codex versions for every package-consuming step, the direct SSH "
+        "macOS target is reachable and clean, and package signature, staple, "
+        "and Gatekeeper checks pass without installing the package"
     )
 
 

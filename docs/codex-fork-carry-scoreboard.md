@@ -369,7 +369,10 @@ The next gates should split by product mode:
   `scripts/check_stock_codex_compat_release_evidence.py` now re-hashes the
   archived package and fails closed on evidence schema drift, package hash
   mismatch, non-official channel evidence, non-ready steps, Tart count
-  mismatch, or host stock-Codex upload.
+  mismatch, stale or missing clean-target selected stock-Codex versions, or
+  host stock-Codex upload. The direct-SSH clean-machine preflight runs that
+  verifier before SSH readiness, upload, or remote inspection, so stale release
+  evidence cannot promote a package candidate onto an operator-supplied target.
   The production stock-Codex channel policy gate
   is green for official-source validation, clean-cache reuse before network
   access, fail-closed non-official URL rejection, resolver selection,

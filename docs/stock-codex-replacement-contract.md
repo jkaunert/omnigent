@@ -1204,6 +1204,13 @@ official-channel, step-status, selected-version, no-host-stock-upload, and
 live/auth thread criteria, and writes the machine-readable evidence JSON beside
 the `.pkg`.
 
+Direct clean-machine preflight is the package-promotion boundary for an
+operator-supplied non-Tart target. It runs
+`scripts/check_stock_codex_compat_release_evidence.py` against the archived
+`.pkg` and release evidence before SSH readiness, upload, or remote inspection.
+That means stale or missing clean-target selected-version evidence blocks
+promotion before the target can be touched.
+
 Clean Codex-auth onboarding boundary:
 
 ```bash
