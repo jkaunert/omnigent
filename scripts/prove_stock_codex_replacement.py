@@ -8657,7 +8657,7 @@ def _parse_clean_vm_auth_login_output_evidence(
             continue
         expected_command = (
             f"CODEX_HOME={shlex.quote(str(parsed_codex_home))} "
-            f"{shlex.quote(str(parsed_launcher_path))} login"
+            f"{shlex.quote(str(parsed_launcher_path))} login --device-auth"
         )
         if login_command != expected_command:
             continue
@@ -15410,7 +15410,7 @@ PY
   set +e
   CODEX_HOME="$remote_auth_codex_home" \
     OMNIGENT_STOCK_CODEX_PATH="$provisioned_codex" \
-    "$selected" login 2>&1 | tee "$auth_login_output_path"
+    "$selected" login --device-auth 2>&1 | tee "$auth_login_output_path"
   auth_login_status=${PIPESTATUS[0]}
   set -e
   if [ "$auth_login_status" -ne 0 ]; then
@@ -15474,7 +15474,7 @@ if auth_path.stat().st_size <= 0:
     raise SystemExit("auth login file is empty")
 login_command = (
     f"CODEX_HOME={shlex.quote(str(codex_home_path))} "
-    f"{shlex.quote(str(Path(launcher_path)))} login"
+    f"{shlex.quote(str(Path(launcher_path)))} login --device-auth"
 )
 print(json.dumps({
     "authPath": str(auth_path),

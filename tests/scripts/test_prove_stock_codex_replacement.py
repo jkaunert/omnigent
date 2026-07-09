@@ -7231,6 +7231,7 @@ def test_stock_codex_compat_pkg_clean_vm_auth_login_uses_remote_home_without_aut
         archive_executable="codex-aarch64-apple-darwin",
     )
     uploads: list[tuple[Path, str]] = []
+    uploaded_scripts: list[str] = []
     uploaded_channel: dict[str, object] = {}
     remote_commands: list[str] = []
 
@@ -7257,6 +7258,8 @@ def test_stock_codex_compat_pkg_clean_vm_auth_login_uses_remote_home_without_aut
         uploads.append((source, remote_destination))
         if source.name == "channel.json":
             uploaded_channel.update(json.loads(source.read_text(encoding="utf-8")))
+        if source.name == "clean_vm_proof.sh":
+            uploaded_scripts.append(source.read_text(encoding="utf-8"))
         return subprocess.CompletedProcess(["scp"], 0, stdout="", stderr="")
 
     def fake_run_clean_vm_ssh_command(
@@ -7291,7 +7294,10 @@ def test_stock_codex_compat_pkg_clean_vm_auth_login_uses_remote_home_without_aut
                 "commandSurface": "installed-compat-launcher",
                 "kind": "omnigent-clean-vm-auth-login-evidence",
                 "launcherPath": launcher_path,
-                "loginCommand": f"CODEX_HOME={remote_codex_home} {launcher_path} login",
+                "loginCommand": (
+                    f"CODEX_HOME={remote_codex_home} "
+                    f"{launcher_path} login --device-auth"
+                ),
                 "postUnavailableReason": None,
                 "preUnavailableReason": "needs-auth",
                 "selectedCommandPath": launcher_path,
@@ -7359,6 +7365,8 @@ def test_stock_codex_compat_pkg_clean_vm_auth_login_uses_remote_home_without_aut
         "channel.json",
         "clean_vm_proof.sh",
     ]
+    assert len(uploaded_scripts) == 1
+    assert '"$selected" login --device-auth 2>&1 | tee' in uploaded_scripts[0]
     artifacts = uploaded_channel["artifacts"]
     assert isinstance(artifacts, list)
     assert artifacts[0]["url"] == remote_channel.cask_url
@@ -8041,7 +8049,9 @@ def test_clean_vm_auth_login_output_evidence_requires_login_execution() -> None:
                 "commandSurface": "installed-compat-launcher",
                 "kind": "omnigent-clean-vm-auth-login-evidence",
                 "launcherPath": launcher_path,
-                "loginCommand": f"CODEX_HOME={codex_home} {launcher_path} login",
+                "loginCommand": (
+                    f"CODEX_HOME={codex_home} {launcher_path} login --device-auth"
+                ),
                 "postUnavailableReason": None,
                 "preUnavailableReason": "needs-auth",
                 "selectedCommandPath": launcher_path,
