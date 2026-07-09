@@ -7366,7 +7366,10 @@ def test_stock_codex_compat_pkg_clean_vm_auth_login_uses_remote_home_without_aut
         "clean_vm_proof.sh",
     ]
     assert len(uploaded_scripts) == 1
-    assert '"$selected" login --device-auth 2>&1 | tee' in uploaded_scripts[0]
+    assert (
+        'script -q "$auth_login_output_path" "$selected" login --device-auth'
+        in uploaded_scripts[0]
+    )
     artifacts = uploaded_channel["artifacts"]
     assert isinstance(artifacts, list)
     assert artifacts[0]["url"] == remote_channel.cask_url

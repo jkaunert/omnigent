@@ -15410,8 +15410,8 @@ PY
   set +e
   CODEX_HOME="$remote_auth_codex_home" \
     OMNIGENT_STOCK_CODEX_PATH="$provisioned_codex" \
-    "$selected" login --device-auth 2>&1 | tee "$auth_login_output_path"
-  auth_login_status=${PIPESTATUS[0]}
+    script -q "$auth_login_output_path" "$selected" login --device-auth
+  auth_login_status=$?
   set -e
   if [ "$auth_login_status" -ne 0 ]; then
     fail "installed launcher auth login failed: exit-$auth_login_status"
