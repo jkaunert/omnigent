@@ -220,6 +220,7 @@ The current spike proves the first narrow adapter behavior:
 | Temporary macOS app-bundle entrypoint rehearsal | `replacement-ready` for a non-installed `.app` launcher shape | `scripts/prove_stock_codex_replacement.py --proof app-bundle-entrypoint` creates a temporary `Omnigent Codex.app` bundle with a generated `Contents/Info.plist` and executable `Contents/MacOS/omnigent-codex`, validates the plist keys, directly runs the executable probe, and verifies the entrypoint exports `OMNIGENT_STOCK_CODEX_PATH=<stock codex>` before delegating to `uvx --from <repo> omnigent codex`. The current green run used stock Codex `0.142.2`, bundle identifier `ai.omnigent.codex`, executable `omnigent-codex`, and a temporary app bundle that was removed after proof. This proves the user-facing app-entrypoint shape without mutating the stock Codex app, `/Applications`, LaunchServices, Dock/Finder defaults, shell profiles, or persistent launcher state; it does not prove signing, notarization, packaging, Sparkle/update behavior, or production app installation. |
 | Isolated Codex launcher activation rehearsal | `replacement-ready` for temporary PATH shadowing, pinned stock-Codex delegation, no-recursion lookup, and rollback | `scripts/prove_stock_codex_replacement.py --proof launcher-activation` creates a temporary versioned pinned target under `omnigent/codex-stock/<version>/codex` by copying the current stock Codex binary, creates a temporary `codex` shim, prepends only that temp shim directory to `PATH` inside the proof process, and proves `codex` resolves to the shim during activation. The shim exports `OMNIGENT_STOCK_CODEX_PATH=<pinned target>` before delegation, and Omnigent's central Codex resolver selects that pinned binary instead of the shadowed `codex` command. The proof still verifies the sanitized PATH no longer points at the shim and can resolve the original stock Codex at `/opt/homebrew/bin/codex`, whose realpath was `/opt/homebrew/Caskroom/codex/0.142.2/codex-aarch64-apple-darwin`; it also verifies the delegate shape `/Users/joshuakaunert/.local/bin/uvx --from /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit omnigent codex`. After the scoped activation, `PATH` lookup restores to `/opt/homebrew/bin/codex`. This proves a rollback-first launcher shape can avoid recursive `codex` lookup and can target a managed pinned stock-Codex binary, not a persistent shell alias, app launcher, production-default mutation, persistent provisioner execution, remote downloader/update channel, or live Codex TUI launch. |
 | Persistent Omnigent `codex` launcher/default | `replacement-ready` for the current-host Homebrew-bin default with rollback | `scripts/install_omnigent_codex_launcher.py` installs a managed launcher at the selected `codex` path, writes a manifest, preserves `codex --version` by delegating it to the pinned stock binary, probes with `--omnigent-launcher-probe`, exports `OMNIGENT_STOCK_CODEX_PATH` before normal delegation to `uvx --from <repo> omnigent codex`, backs up an existing unmanaged target, and uninstalls only when the target carries the Omnigent marker. `omnigent.inner.codex_executor._find_codex_cli()` detects the managed launcher marker and manifest so inner Omnigent sessions resolve to the pinned stock binary instead of recursing into the launcher. On 2026-06-28, `/opt/homebrew/bin/codex` was replaced by the managed launcher, the original Homebrew symlink was preserved at `/opt/homebrew/bin/codex.omnigent-backup-20260628T091032Z`, `codex --version` returned `codex-cli 0.142.2`, `codex --omnigent-launcher-probe` returned `OMNIGENT_CODEX_PERSISTENT_LAUNCHER_OK`, and `scripts/prove_stock_codex_replacement.py --proof graph --live-proof-timeout 180` with no explicit `--codex-path` resolved to `/Users/joshuakaunert/.local/omnigent/codex-stock/0.142.2/codex` and passed in 33.3s after an actual rollback/reinstall cycle. Rollback command: `uvx --from /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit python /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit/scripts/install_omnigent_codex_launcher.py --uninstall --launcher-path /opt/homebrew/bin/codex --manifest-path /Users/joshuakaunert/.local/omnigent/launchers/codex.json`. This proves current-host default mutation and rollback execution, not a remote download/update channel, clean-auth onboarding, cross-machine portability, or app-bundle launcher mutation. |
+| Immutable stock-Codex compatibility release promotion | `implemented; live promotion pending` for commit-bound package/evidence/manifest production | `scripts/promote_stock_codex_compat_release.py` requires a clean attached branch whose local and live remote upstream both equal `HEAD`, binds all release tools to tracked HEAD blobs, requires an explicit Developer ID Installer identity and notary profile, creates a new output directory outside the checkout, and composes signed/notarized package production, the five-step release candidate, offline evidence validation, signature/staple/Gatekeeper verification, and expanded package metadata validation. It writes `promotion-manifest.json` last and removes partial output on failure. Focused adversarial unit coverage proves success ordering, partial-output cleanup, hash mismatch rejection, immutable/output-boundary enforcement, direct-auth requirements, explicit signing identity, dirty/local-unpushed/remote-unpushed rejection, external or modified release-tool rejection, package and command tamper rejection, embedded metadata mismatch rejection, and verification after artifact relocation. This row does not claim a live promotion until a clean pushed commit runs the full signed/notarized direct-target transaction. Artifact upload, trusted publication of the manifest digest, detached manifest signing, release version finalization, and rollout/feed policy remain separate release steps. |
 
 2026-07-09 direct-auth release supersession note: the historical status text in
 the direct release/auth rows above predates operator-completed wrapper login.
@@ -1183,6 +1184,53 @@ artifact, and fails closed on schema drift, package hash mismatch, nonzero
 wrapper or underlying proof exit, non-empty `releaseCriteriaFailures`,
 non-official channel policy or URL, missing step details, any non-ready step,
 Tart start/stop mismatch, or any host stock-Codex upload.
+
+Immutable release promotion gate:
+
+```bash
+uv run python scripts/promote_stock_codex_compat_release.py \
+  --output-dir /absolute/path/to/new-release-directory \
+  --codex-path ~/.local/omnigent/codex-stock/0.142.5/codex \
+  --pkg-sign-identity "Developer ID Installer: <name> (<team-id>)" \
+  --notarytool-profile OmnigentExperiment \
+  --clean-vm-ssh-target omnigent-clean@10.0.0.10 \
+  --clean-vm-remote-codex-home /Users/omnigent-clean/.codex-omnigent-wrapper-auth \
+  --clean-vm-ssh-identity ~/.ssh/mba_github_ssh_key
+```
+
+The promotion command owns the full producer-to-candidate transaction. It
+requires a new output directory outside the source checkout, a clean attached
+Git branch whose local upstream and live remote branch both resolve to `HEAD`,
+tracked release scripts whose worktree content matches the recorded commit, an
+explicit Developer ID Installer identity, and an explicit notarytool Keychain
+profile. It creates one signed/notarized package, runs the five-step clean-target
+release candidate and offline evidence verifier against that exact package,
+rechecks the package signature, staple, Gatekeeper decision, identifier,
+version, install location, and embedded source-bundle digest, then writes
+`promotion-manifest.json` last. A failed phase removes the partial release
+directory; there is intentionally no overwrite or force mode.
+
+The promotion manifest records the source commit, branch, remote ref and commit,
+release-tool paths plus SHA-256 and Git blob ids, package and source-bundle
+SHA-256 values, package identifier/version, signing identity, notarization
+submission, release-evidence SHA-256, exact commands, official stock-Codex
+channel selection, and auth/live thread ids. The directory contains stable
+artifact filenames and separately records original build paths, so a copied or
+downloaded directory can be checked at its new location:
+
+```bash
+uv run python scripts/promote_stock_codex_compat_release.py \
+  --verify-only /absolute/path/to/release-directory
+```
+
+`--verify-only` re-hashes both artifacts, rechecks package distribution and
+embedded metadata, validates manifest/evidence consistency, and reruns the
+offline release-evidence checker without contacting the clean target. This gate
+does not upload artifacts, create a GitHub release, sign the promotion manifest
+as a detached object, or choose rollout/update-feed policy. Distribution must
+publish the promotion-manifest SHA-256 through a trusted release channel rather
+than treating an unpinned manifest downloaded beside a package as its own trust
+root.
 
 Non-Tart clean-machine preflight:
 

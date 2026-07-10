@@ -146,6 +146,21 @@ matching available `auth.json`, and records `authUploaded=false` for onboarding,
 persistence, and live. The recorded command must name the same SSH target and
 remote auth home.
 
+A package intended for distribution must enter those gates through
+`scripts/promote_stock_codex_compat_release.py`, not through separate hand-run
+producer and release-candidate commands. Promotion is permitted only from a
+clean commit that matches both its local tracking ref and the live remote branch;
+the producer, release-candidate wrapper, and offline checker must be tracked
+files whose content matches that commit. The command requires an explicit
+Developer ID Installer identity and notarytool profile, writes a new immutable
+release directory, and emits the manifest only after package signing,
+notarization, clean-target validation, offline evidence validation, signature,
+staple, Gatekeeper, and embedded package-metadata checks all pass. Release review
+must archive the `.pkg`, release evidence JSON, and promotion manifest together,
+and publish the manifest SHA-256 through the trusted release channel. The
+promotion script does not upload or publish those artifacts and the manifest is
+not a detached signature by itself.
+
 For non-Tart targets, run
 `stock-codex-compat-pkg-nontart-clean-machine-preflight` before any package
 install or auth/live proof. That gate consumes the archived `.pkg` plus release
