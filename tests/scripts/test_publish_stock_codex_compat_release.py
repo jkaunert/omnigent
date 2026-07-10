@@ -77,6 +77,7 @@ def _publication_fixture(tmp_path: Path) -> tuple[Path, dict[str, object]]:
         "kind": _MOD.PUBLICATION_KIND,
         "schemaVersion": _MOD.PUBLICATION_SCHEMA_VERSION,
         "status": _MOD.PUBLICATION_STATUS,
+        "releaseImmutable": True,
         "repository": _REPOSITORY,
         "tag": _TAG,
         "packageVersion": "0.1.0",
@@ -119,6 +120,29 @@ def test_validate_tag_uses_independent_compatibility_namespace() -> None:
         _MOD._validate_tag("v0.1.0", version="0.1.0")
 
 
+def test_require_immutable_releases_enabled_rejects_disabled_setting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        _MOD,
+        "_run_command",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["gh"],
+            0,
+            stdout='{"enabled":false,"enforced_by_owner":false}\n',
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(_MOD.PublicationError, match="immutable releases must be enabled"):
+        _MOD._require_immutable_releases_enabled(
+            "/usr/bin/gh",
+            _REPOSITORY,
+            cwd=tmp_path,
+        )
+
+
 def test_gh_release_payload_normalizes_draft_release_view(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -141,7 +165,7 @@ def test_gh_release_payload_normalizes_draft_release_view(
             0,
             stdout=(
                 '{"tagName":"stock-codex-compat-v0.1.0",'
-                '"isDraft":true,"isPrerelease":false,'
+                '"isDraft":true,"isImmutable":false,"isPrerelease":false,'
                 '"url":"https://github.com/jkaunert/omnigent/releases/tag/'
                 'untagged-0123456789abcdef","body":"notes",'
                 '"assets":[{"name":"artifact.pkg","size":12,'
@@ -169,12 +193,13 @@ def test_gh_release_payload_normalizes_draft_release_view(
             "--repo",
             _REPOSITORY,
             "--json",
-            "tagName,isDraft,isPrerelease,url,body,assets",
+            "tagName,isDraft,isImmutable,isPrerelease,url,body,assets",
         )
     ]
     assert payload == {
         "tag_name": _TAG,
         "draft": True,
+        "immutable": False,
         "prerelease": False,
         "html_url": (
             "https://github.com/jkaunert/omnigent/releases/tag/untagged-0123456789abcdef"
@@ -207,6 +232,7 @@ def test_verify_release_payload_requires_record_digest_and_exact_assets(
     payload = {
         "tag_name": _TAG,
         "draft": True,
+        "immutable": False,
         "prerelease": False,
         "html_url": (
             "https://github.com/jkaunert/omnigent/releases/tag/untagged-0123456789abcdef"
@@ -319,6 +345,118 @@ def test_verify_downloaded_assets_rejects_tampering(tmp_path: Path) -> None:
         )
 
 
+def test_verify_release_payload_requires_public_immutability(tmp_path: Path) -> None:
+    record, publication = _publication_fixture(tmp_path)
+    record_sha256 = _MOD.sha256_file(record)
+    artifact_paths = [
+        path
+        for path in (tmp_path / "publication").iterdir()
+        if path.name != _MOD.PUBLICATION_RECORD_FILENAME
+    ]
+    payload = {
+        "tag_name": _TAG,
+        "draft": False,
+        "immutable": False,
+        "prerelease": False,
+        "html_url": _MOD._release_url(_REPOSITORY, _TAG),
+        "body": f"publication record: {record_sha256}",
+        "assets": [
+            *[
+                {
+                    "name": artifact.name,
+                    "browser_download_url": _MOD._release_asset_url(
+                        _REPOSITORY,
+                        _TAG,
+                        artifact.name,
+                    ),
+                    "size": artifact.stat().st_size,
+                }
+                for artifact in artifact_paths
+            ],
+            {
+                "name": _MOD.PUBLICATION_RECORD_FILENAME,
+                "browser_download_url": _MOD._release_asset_url(
+                    _REPOSITORY,
+                    _TAG,
+                    _MOD.PUBLICATION_RECORD_FILENAME,
+                ),
+                "size": record.stat().st_size,
+            },
+        ],
+    }
+
+    with pytest.raises(_MOD.PublicationError, match="immutable state"):
+        _MOD._verify_release_payload(
+            payload,
+            repository=_REPOSITORY,
+            tag=_TAG,
+            publication=publication,
+            publication_record_sha256=record_sha256,
+            expect_draft=False,
+        )
+
+    payload["immutable"] = True
+    urls = _MOD._verify_release_payload(
+        payload,
+        repository=_REPOSITORY,
+        tag=_TAG,
+        publication=publication,
+        publication_record_sha256=record_sha256,
+        expect_draft=False,
+    )
+    assert set(urls) == {
+        *(path.name for path in artifact_paths),
+        _MOD.PUBLICATION_RECORD_FILENAME,
+    }
+
+
+def test_verify_release_attestations_checks_release_and_package(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package_path = _write(tmp_path / "artifact.pkg", b"package")
+    commands: list[tuple[str, ...]] = []
+
+    def fake_run_command(command: Any, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        command_tuple = tuple(command)
+        commands.append(command_tuple)
+        return subprocess.CompletedProcess(command_tuple, 0, stdout="{}\n", stderr="")
+
+    monkeypatch.setattr(_MOD, "_run_command", fake_run_command)
+
+    _MOD._verify_release_attestations(
+        "/usr/bin/gh",
+        _REPOSITORY,
+        _TAG,
+        package_path,
+        cwd=tmp_path,
+    )
+
+    assert commands == [
+        (
+            "/usr/bin/gh",
+            "release",
+            "verify",
+            _TAG,
+            "--repo",
+            _REPOSITORY,
+            "--format",
+            "json",
+        ),
+        (
+            "/usr/bin/gh",
+            "release",
+            "verify-asset",
+            _TAG,
+            str(package_path),
+            "--repo",
+            _REPOSITORY,
+            "--format",
+            "json",
+        ),
+    ]
+
+
 def test_publish_release_drafts_verifies_and_publishes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -343,7 +481,17 @@ def test_publish_release_drafts_verifies_and_publishes(
     )
     monkeypatch.setattr(_MOD, "_remote_tag_commit", lambda *_args, **_kwargs: _COMMIT)
     monkeypatch.setattr(_MOD, "_release_exists", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        _MOD,
+        "_require_immutable_releases_enabled",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(_MOD, "_verify_public_assets", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        _MOD,
+        "_verify_release_attestations",
+        lambda *_args, **_kwargs: None,
+    )
 
     def fake_run_command(
         command: Any,
@@ -377,6 +525,7 @@ def test_publish_release_drafts_verifies_and_publishes(
         return {
             "tag_name": tag,
             "draft": True,
+            "immutable": False,
             "prerelease": False,
             "html_url": _MOD._release_url(repository, tag),
             "body": notes,
@@ -445,6 +594,11 @@ def test_publish_release_cleans_failed_draft_and_output(
     )
     monkeypatch.setattr(_MOD, "_remote_tag_commit", lambda *_args, **_kwargs: _COMMIT)
     monkeypatch.setattr(_MOD, "_release_exists", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        _MOD,
+        "_require_immutable_releases_enabled",
+        lambda *_args, **_kwargs: None,
+    )
 
     def fake_run_command(
         command: Any,

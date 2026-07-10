@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,7 +22,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 PUBLICATION_KIND = "omnigent-stock-codex-compat-github-publication"
-PUBLICATION_SCHEMA_VERSION = 1
+PUBLICATION_SCHEMA_VERSION = 2
 PUBLICATION_STATUS = "published"
 PUBLICATION_RECORD_FILENAME = "publication-record.json"
 CHECKSUMS_FILENAME = "SHA256SUMS"
@@ -225,6 +226,26 @@ def _release_exists(gh: str, repository: str, tag: str, *, cwd: Path) -> bool:
     )
 
 
+def _require_immutable_releases_enabled(
+    gh: str,
+    repository: str,
+    *,
+    cwd: Path,
+) -> None:
+    completed = _run_command(
+        (gh, "api", f"repos/{repository}/immutable-releases"),
+        cwd=cwd,
+        timeout=60,
+        label="GitHub immutable releases setting inspection",
+    )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise PublicationError("GitHub immutable releases setting returned invalid JSON") from exc
+    if not isinstance(payload, Mapping) or payload.get("enabled") is not True:
+        raise PublicationError("GitHub immutable releases must be enabled before publication")
+
+
 def _gh_release_payload(
     gh: str,
     repository: str,
@@ -241,7 +262,7 @@ def _gh_release_payload(
             "--repo",
             repository,
             "--json",
-            "tagName,isDraft,isPrerelease,url,body,assets",
+            "tagName,isDraft,isImmutable,isPrerelease,url,body,assets",
         ),
         cwd=cwd,
         timeout=60,
@@ -268,6 +289,7 @@ def _gh_release_payload(
     return {
         "tag_name": payload.get("tagName"),
         "draft": payload.get("isDraft"),
+        "immutable": payload.get("isImmutable"),
         "prerelease": payload.get("isPrerelease"),
         "html_url": payload.get("url"),
         "body": payload.get("body"),
@@ -344,6 +366,9 @@ def _verify_release_payload(
         raise PublicationError("GitHub release tag does not match publication record")
     if payload.get("draft") is not expect_draft:
         raise PublicationError(f"GitHub release draft state is not {expect_draft}")
+    expected_immutable = not expect_draft
+    if payload.get("immutable") is not expected_immutable:
+        raise PublicationError(f"GitHub release immutable state is not {expected_immutable}")
     if payload.get("prerelease") is not False:
         raise PublicationError("stable compatibility release cannot be a prerelease")
     release_url = payload.get("html_url")
@@ -498,6 +523,55 @@ def _verify_public_assets(
             )
 
 
+def _verify_release_attestations(
+    gh: str,
+    repository: str,
+    tag: str,
+    package_path: Path,
+    *,
+    cwd: Path,
+) -> None:
+    release_completed: subprocess.CompletedProcess[str] | None = None
+    asset_completed: subprocess.CompletedProcess[str] | None = None
+    for attempt in range(12):
+        release_completed = _run_command(
+            (gh, "release", "verify", tag, "--repo", repository, "--format", "json"),
+            cwd=cwd,
+            timeout=120,
+            label="GitHub release attestation verification",
+            check=False,
+        )
+        if release_completed.returncode == 0:
+            asset_completed = _run_command(
+                (
+                    gh,
+                    "release",
+                    "verify-asset",
+                    tag,
+                    str(package_path),
+                    "--repo",
+                    repository,
+                    "--format",
+                    "json",
+                ),
+                cwd=cwd,
+                timeout=120,
+                label="GitHub package attestation verification",
+                check=False,
+            )
+            if asset_completed.returncode == 0:
+                return
+        if attempt < 11:
+            time.sleep(5)
+    raise PublicationError(
+        "GitHub release attestations did not verify.\n"
+        f"release_stdout={release_completed.stdout if release_completed else ''}\n"
+        f"release_stderr={release_completed.stderr if release_completed else ''}\n"
+        f"asset_stdout={asset_completed.stdout if asset_completed else ''}\n"
+        f"asset_stderr={asset_completed.stderr if asset_completed else ''}"
+    )
+
+
 def _validate_publication_record(
     publication: Mapping[str, object],
 ) -> tuple[str, str, str]:
@@ -507,6 +581,8 @@ def _validate_publication_record(
         raise PublicationError("unexpected publication record schemaVersion")
     if publication.get("status") != PUBLICATION_STATUS:
         raise PublicationError("publication record status is not published")
+    if publication.get("releaseImmutable") is not True:
+        raise PublicationError("publication record does not require an immutable release")
     repository = publication.get("repository")
     tag = publication.get("tag")
     version = publication.get("packageVersion")
@@ -596,6 +672,7 @@ def publish_release(args: argparse.Namespace) -> dict[str, object]:
     gh = args.gh or shutil.which("gh")
     if not gh:
         raise PublicationError("GitHub CLI is required")
+    _require_immutable_releases_enabled(gh, repository, cwd=source_root)
     checker_script = args.evidence_checker_script.expanduser().resolve()
     manifest = _PROMOTION.verify_promotion_directory(
         promotion_dir,
@@ -679,6 +756,7 @@ def publish_release(args: argparse.Namespace) -> dict[str, object]:
             "kind": PUBLICATION_KIND,
             "schemaVersion": PUBLICATION_SCHEMA_VERSION,
             "status": PUBLICATION_STATUS,
+            "releaseImmutable": True,
             "createdAt": datetime.now(UTC).isoformat(),
             "repository": repository,
             "tag": args.tag,
@@ -707,6 +785,7 @@ def publish_release(args: argparse.Namespace) -> dict[str, object]:
                     "Commit-bound, Developer ID signed and notarized compatibility runtime.",
                     "",
                     f"- Source commit: `{source_commit}`",
+                    "- GitHub immutable release: `required`",
                     f"- Package SHA-256: `{package_sha256}`",
                     (f"- Promotion manifest SHA-256: `{sha256_file(manifest_path)}`"),
                     (f"- Publication record SHA-256: `{publication_record_sha256}`"),
@@ -814,6 +893,13 @@ def publish_release(args: argparse.Namespace) -> dict[str, object]:
             tag=args.tag,
             publication=publication,
             publication_record_path=publication_record_path,
+        )
+        _verify_release_attestations(
+            gh,
+            repository,
+            args.tag,
+            package_path,
+            cwd=source_root,
         )
         return publication
     except BaseException:
