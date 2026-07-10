@@ -173,7 +173,10 @@ Publish a promoted compatibility package only after its source commit is clean,
 pushed, and tagged on the fork with the independent tag namespace:
 
 ```sh
-VERSION=0.1.2
+gh api --method PUT repos/jkaunert/omnigent/immutable-releases
+gh api repos/jkaunert/omnigent/immutable-releases
+
+VERSION=0.1.3
 git tag -a "stock-codex-compat-v${VERSION}" -m \
   "Omnigent Stock Codex Compatibility ${VERSION}" <promoted-source-commit>
 git push origin "stock-codex-compat-v${VERSION}"
@@ -187,15 +190,19 @@ uv run python scripts/publish_stock_codex_compat_release.py \
 
 The publisher verifies the promotion directory first, requires the local and
 remote tag to resolve to the promoted source commit, refuses a preexisting
-release, creates a draft release, uploads the package, release evidence,
+release, and refuses to start unless GitHub repository release immutability is
+enabled. It creates a draft release, uploads the package, release evidence,
 promotion manifest, `SHA256SUMS`, and `publication-record.json`, then downloads
 the complete draft asset set and re-hashes it. Only after that draft check passes
 does it publish a stable release. It then accesses the public GitHub API and
 downloads every asset without credentials, verifies all hashes again, and
-requires the release body to contain the publication-record SHA-256. A failure
-before publication deletes the attempted draft and partial publication output.
-The package remains authenticated independently by its pinned SHA-256 plus its
-Developer ID signature, notarization ticket, and Gatekeeper acceptance.
+requires `immutable=true` plus the publication-record SHA-256 in the release
+body. Finally, `gh release verify` must validate GitHub's signed release
+attestation and `gh release verify-asset` must bind the local package bytes to
+that attestation. A failure before publication deletes the attempted draft and
+partial publication output. The package remains authenticated independently by
+its pinned SHA-256 plus its Developer ID signature, notarization ticket, and
+Gatekeeper acceptance.
 
 Verify the public release again without mutating GitHub:
 
@@ -221,17 +228,22 @@ real `/Library`, checks receipt and payload version, then removes the payload an
 receipt and confirms package, launcher, adapter, stock cache, and LaunchAgent
 state are absent. It does not upload the package, stock Codex, or auth material.
 
-The first completed public-channel proof is
-[`stock-codex-compat-v0.1.2`](https://github.com/jkaunert/omnigent/releases/tag/stock-codex-compat-v0.1.2),
+The production public-channel proof is
+[`stock-codex-compat-v0.1.3`](https://github.com/jkaunert/omnigent/releases/tag/stock-codex-compat-v0.1.3),
 published on 2026-07-10 from source commit
-`cb2520a9e748ccf5da987926ae6a70ad519994b0`. Its package SHA-256 is
-`42d61a2e93b384297d968bd1092d08eb26e4f5f62688a3c7b8908d063a97525b`,
+`22a1b355d8acd6d2411c03ee5ee8cc682ef3f8b5`. Its package SHA-256 is
+`6cadc5d884ae8225544ea26e26c8b4f7f713d72e2869eeccbeeca144d9917cc5`,
 promotion-manifest SHA-256 is
-`7d1675a5c9275b273782a63e4277d075eba5005c9df7922848fb74aa946f6713`,
+`eecbc19c11639ebec6f3f570a6784150292542ba8b9519473b91f7eda494a5e9`,
 and publication-record SHA-256 is
-`3f0dd33395c0ab295ae628ecb0a8b6345ab220df9891888a0df38a99265a865e`.
-Independent public verification and the disposable clean-Mac URL install and
-cleanup proof both passed without host package or auth upload.
+`707d1e8f0a6da94b9ef05eec7b28ed58d209cce04e08eec1b8e95635a5c64f81`.
+GitHub reports the release immutable and protects its tag and assets; both
+`gh release verify` and `gh release verify-asset` passed against GitHub's signed
+release attestation. Independent unauthenticated public verification and the
+disposable clean-Mac URL install and cleanup proof also passed without host
+package or auth upload. The earlier `0.1.2` release proved the publication flow
+before repository release immutability was enabled and is not the production
+channel target.
 
 For non-Tart targets, run
 `stock-codex-compat-pkg-nontart-clean-machine-preflight` before any package
