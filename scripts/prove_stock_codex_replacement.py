@@ -10856,6 +10856,7 @@ def _run_pkg_distribution_command(
     command: list[str],
     *,
     timeout: float,
+    check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
         command,
@@ -10864,7 +10865,7 @@ def _run_pkg_distribution_command(
         text=True,
         timeout=timeout,
     )
-    if completed.returncode != 0:
+    if check and completed.returncode != 0:
         raise SystemExit(
             "Signed/notarized pkg validation command failed.\n"
             f"command={command!r}\n"
@@ -10873,6 +10874,113 @@ def _run_pkg_distribution_command(
             f"stderr={completed.stderr}"
         )
     return completed
+
+
+def _notary_history_entries(
+    *,
+    xcrun: str,
+    notarytool_profile: str,
+) -> dict[str, dict[str, object]]:
+    completed = _run_pkg_distribution_command(
+        [
+            xcrun,
+            "notarytool",
+            "history",
+            "--keychain-profile",
+            notarytool_profile,
+            "--output-format",
+            "json",
+        ],
+        timeout=120,
+    )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit("notarytool history returned invalid JSON") from exc
+    history = payload.get("history") if isinstance(payload, dict) else None
+    if not isinstance(history, list):
+        raise SystemExit("notarytool history response omitted the history list")
+    entries: dict[str, dict[str, object]] = {}
+    for entry in history:
+        if not isinstance(entry, Mapping):
+            raise SystemExit("notarytool history contains an invalid entry")
+        submission_id = entry.get("id")
+        if not isinstance(submission_id, str) or not submission_id:
+            raise SystemExit("notarytool history entry omitted its submission id")
+        if submission_id in entries:
+            raise SystemExit("notarytool history contains a duplicate submission id")
+        entries[submission_id] = dict(entry)
+    return entries
+
+
+def _submit_notarization_with_recovery(
+    *,
+    xcrun: str,
+    package_path: Path,
+    notarytool_profile: str,
+) -> subprocess.CompletedProcess[str]:
+    before = _notary_history_entries(
+        xcrun=xcrun,
+        notarytool_profile=notarytool_profile,
+    )
+    command = [
+        xcrun,
+        "notarytool",
+        "submit",
+        str(package_path),
+        "--keychain-profile",
+        notarytool_profile,
+        "--output-format",
+        "json",
+        "--no-progress",
+    ]
+    completed = _run_pkg_distribution_command(
+        command,
+        timeout=1800,
+        check=False,
+    )
+    if completed.returncode == 0:
+        return completed
+
+    matching: list[tuple[str, dict[str, object]]] = []
+    for attempt in range(6):
+        after = _notary_history_entries(
+            xcrun=xcrun,
+            notarytool_profile=notarytool_profile,
+        )
+        matching = [
+            (submission_id, entry)
+            for submission_id, entry in after.items()
+            if submission_id not in before and entry.get("name") == package_path.name
+        ]
+        if matching or attempt == 5:
+            break
+        time.sleep(2)
+    if len(matching) != 1:
+        raise SystemExit(
+            "notarytool submit failed and its server-side submission could not be "
+            "uniquely recovered.\n"
+            f"command={command!r}\n"
+            f"exit={completed.returncode}\n"
+            f"new_matching_submission_ids={[item[0] for item in matching]!r}\n"
+            f"stdout={completed.stdout}\n"
+            f"stderr={completed.stderr}"
+        )
+    submission_id, entry = matching[0]
+    status = entry.get("status")
+    recovered_payload = {
+        "id": submission_id,
+        "status": status if isinstance(status, str) else "",
+    }
+    return subprocess.CompletedProcess(
+        command,
+        0,
+        stdout=json.dumps(recovered_payload),
+        stderr=(
+            "Recovered the uniquely matching server-side submission after "
+            f"notarytool exited with {completed.returncode}."
+        ),
+    )
 
 
 def _build_signed_notarized_stock_codex_compat_pkg(
@@ -10917,18 +11025,10 @@ def _build_signed_notarized_stock_codex_compat_pkg(
         source_repo_root=source_repo_root,
         expect_signed=True,
     )
-    notary_submit_completed = _run_pkg_distribution_command(
-        [
-            str(prerequisites.tool_paths["xcrun"]),
-            "notarytool",
-            "submit",
-            str(structure.package_path),
-            "--keychain-profile",
-            prerequisites.notarytool_profile,
-            "--output-format",
-            "json",
-        ],
-        timeout=1800,
+    notary_submit_completed = _submit_notarization_with_recovery(
+        xcrun=str(prerequisites.tool_paths["xcrun"]),
+        package_path=structure.package_path,
+        notarytool_profile=prerequisites.notarytool_profile,
     )
     notary_submission_id, submit_status = _notary_submit_result(notary_submit_completed)
     if not notary_submission_id:
@@ -10948,6 +11048,7 @@ def _build_signed_notarized_stock_codex_compat_pkg(
             prerequisites.notarytool_profile,
             "--output-format",
             "json",
+            "--no-progress",
         ],
         timeout=1800,
     )

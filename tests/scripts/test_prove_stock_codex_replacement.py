@@ -3301,10 +3301,20 @@ def test_stock_codex_compat_pkg_signed_notarized_runs_distribution_checks(
         command: list[str],
         *,
         timeout: float,
+        check: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         assert timeout > 0
         distribution_commands.append(command)
+        if command[1:3] == ["notarytool", "history"]:
+            assert check is True
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout='{"history":[]}',
+                stderr="",
+            )
         if command[1:3] == ["notarytool", "submit"]:
+            assert check is False
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -3355,14 +3365,125 @@ def test_stock_codex_compat_pkg_signed_notarized_runs_distribution_checks(
         output_path.resolve()
     )
     assert captured_build_args[captured_build_args.index("--version") + 1] == "1.2.3"
-    assert distribution_commands[0][1:3] == ["notarytool", "submit"]
-    assert "--wait" not in distribution_commands[0]
-    assert distribution_commands[0][-2:] == ["--output-format", "json"]
-    assert distribution_commands[1][1:3] == ["notarytool", "wait"]
-    assert "notary-submission-1" in distribution_commands[1]
-    assert distribution_commands[2][1:3] == ["stapler", "staple"]
-    assert distribution_commands[3][1:3] == ["stapler", "validate"]
-    assert distribution_commands[4][:5] == ["/usr/sbin/spctl", "-a", "-vv", "-t", "install"]
+    assert distribution_commands[0][1:3] == ["notarytool", "history"]
+    assert distribution_commands[1][1:3] == ["notarytool", "submit"]
+    assert "--wait" not in distribution_commands[1]
+    assert distribution_commands[1][-3:] == ["--output-format", "json", "--no-progress"]
+    assert distribution_commands[2][1:3] == ["notarytool", "wait"]
+    assert "notary-submission-1" in distribution_commands[2]
+    assert distribution_commands[2][-1] == "--no-progress"
+    assert distribution_commands[3][1:3] == ["stapler", "staple"]
+    assert distribution_commands[4][1:3] == ["stapler", "validate"]
+    assert distribution_commands[5][:5] == ["/usr/sbin/spctl", "-a", "-vv", "-t", "install"]
+
+
+def test_notary_submit_recovers_unique_server_submission_after_cli_crash(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "omnigent-stock-codex-compat.pkg"
+    package_path.write_bytes(b"signed package")
+    history_calls = 0
+
+    def fake_distribution_command(
+        command: list[str],
+        *,
+        timeout: float,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal history_calls
+        assert timeout > 0
+        if command[1:3] == ["notarytool", "history"]:
+            assert check is True
+            history_calls += 1
+            history = [
+                {
+                    "id": "old-submission",
+                    "name": package_path.name,
+                    "status": "Accepted",
+                }
+            ]
+            if history_calls > 1:
+                history.append(
+                    {
+                        "id": "recovered-submission",
+                        "name": package_path.name,
+                        "status": "In Progress",
+                    }
+                )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"history": history}),
+                stderr="",
+            )
+        assert command[1:3] == ["notarytool", "submit"]
+        assert check is False
+        assert command[-1] == "--no-progress"
+        return subprocess.CompletedProcess(command, -10, stdout="", stderr="")
+
+    monkeypatch.setattr(_MOD, "_run_pkg_distribution_command", fake_distribution_command)
+
+    completed = _MOD._submit_notarization_with_recovery(
+        xcrun="/usr/bin/xcrun",
+        package_path=package_path,
+        notarytool_profile="omnigent-notary",
+    )
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout) == {
+        "id": "recovered-submission",
+        "status": "In Progress",
+    }
+    assert "exited with -10" in completed.stderr
+    assert history_calls == 2
+
+
+def test_notary_submit_recovery_rejects_multiple_new_matching_submissions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "omnigent-stock-codex-compat.pkg"
+    package_path.write_bytes(b"signed package")
+    history_calls = 0
+
+    def fake_distribution_command(
+        command: list[str],
+        *,
+        timeout: float,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal history_calls
+        assert timeout > 0
+        if command[1:3] == ["notarytool", "history"]:
+            assert check is True
+            history_calls += 1
+            history = []
+            if history_calls > 1:
+                history = [
+                    {"id": "new-1", "name": package_path.name},
+                    {"id": "new-2", "name": package_path.name},
+                ]
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"history": history}),
+                stderr="",
+            )
+        assert command[1:3] == ["notarytool", "submit"]
+        assert check is False
+        return subprocess.CompletedProcess(command, -10, stdout="", stderr="")
+
+    monkeypatch.setattr(_MOD, "_run_pkg_distribution_command", fake_distribution_command)
+
+    with pytest.raises(SystemExit, match="uniquely recovered"):
+        _MOD._submit_notarization_with_recovery(
+            xcrun="/usr/bin/xcrun",
+            package_path=package_path,
+            notarytool_profile="omnigent-notary",
+        )
+
+    assert history_calls == 2
 
 
 def test_stock_codex_compat_pkg_installer_lifecycle_blocks_without_root(
