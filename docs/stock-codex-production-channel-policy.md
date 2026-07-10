@@ -173,15 +173,16 @@ Publish a promoted compatibility package only after its source commit is clean,
 pushed, and tagged on the fork with the independent tag namespace:
 
 ```sh
-git tag -a stock-codex-compat-v0.1.0 -m \
-  "Omnigent Stock Codex Compatibility 0.1.0" <promoted-source-commit>
-git push origin stock-codex-compat-v0.1.0
+VERSION=0.1.2
+git tag -a "stock-codex-compat-v${VERSION}" -m \
+  "Omnigent Stock Codex Compatibility ${VERSION}" <promoted-source-commit>
+git push origin "stock-codex-compat-v${VERSION}"
 
 uv run python scripts/publish_stock_codex_compat_release.py \
-  --promotion-dir /absolute/path/to/promoted-0.1.0 \
-  --output-dir /absolute/path/to/publication-0.1.0 \
+  --promotion-dir "/absolute/path/to/promoted-${VERSION}" \
+  --output-dir "/absolute/path/to/publication-${VERSION}" \
   --repository jkaunert/omnigent \
-  --tag stock-codex-compat-v0.1.0
+  --tag "stock-codex-compat-v${VERSION}"
 ```
 
 The publisher verifies the promotion directory first, requires the local and
@@ -200,7 +201,7 @@ Verify the public release again without mutating GitHub:
 
 ```sh
 uv run python scripts/publish_stock_codex_compat_release.py \
-  --verify-only /absolute/path/to/publication-0.1.0/publication-record.json
+  --verify-only "/absolute/path/to/publication-${VERSION}/publication-record.json"
 ```
 
 Then prove the distribution channel from a disposable clean Mac rather than by
@@ -208,7 +209,7 @@ uploading the host package:
 
 ```sh
 uv run python scripts/prove_stock_codex_compat_published_release.py \
-  --publication-record /absolute/path/to/publication-0.1.0/publication-record.json \
+  --publication-record "/absolute/path/to/publication-${VERSION}/publication-record.json" \
   --ssh-target omnigent-clean@10.0.0.10 \
   --ssh-identity ~/.ssh/mba_github_ssh_key
 ```
@@ -219,6 +220,18 @@ checks SHA-256, Developer ID signature, staple, and Gatekeeper, installs into th
 real `/Library`, checks receipt and payload version, then removes the payload and
 receipt and confirms package, launcher, adapter, stock cache, and LaunchAgent
 state are absent. It does not upload the package, stock Codex, or auth material.
+
+The first completed public-channel proof is
+[`stock-codex-compat-v0.1.2`](https://github.com/jkaunert/omnigent/releases/tag/stock-codex-compat-v0.1.2),
+published on 2026-07-10 from source commit
+`cb2520a9e748ccf5da987926ae6a70ad519994b0`. Its package SHA-256 is
+`42d61a2e93b384297d968bd1092d08eb26e4f5f62688a3c7b8908d063a97525b`,
+promotion-manifest SHA-256 is
+`7d1675a5c9275b273782a63e4277d075eba5005c9df7922848fb74aa946f6713`,
+and publication-record SHA-256 is
+`3f0dd33395c0ab295ae628ecb0a8b6345ab220df9891888a0df38a99265a865e`.
+Independent public verification and the disposable clean-Mac URL install and
+cleanup proof both passed without host package or auth upload.
 
 For non-Tart targets, run
 `stock-codex-compat-pkg-nontart-clean-machine-preflight` before any package
