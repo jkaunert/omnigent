@@ -138,6 +138,7 @@ def _promotion_args(
         source_root / "pyproject.toml",
         '[project]\nname = "omnigent"\nversion = "0.3.0.dev0"\n',
     )
+    _write_file(source_root / _MOD.RELEASE_VERSION_RELATIVE_PATH, "0.1.0\n")
     scripts_root = source_root / "scripts"
     proof_script = _write_file(scripts_root / "prove.py")
     candidate_script = _write_file(scripts_root / "candidate.py")
@@ -189,7 +190,7 @@ def _install_success_fakes(
         _MOD,
         "_release_tool_provenance",
         lambda _root, path, *, label: {
-            "path": f"scripts/{path.name}",
+            "path": path.relative_to(source_root).as_posix(),
             "sha256": _MOD.sha256_file(path),
             "gitBlob": "d" * 40,
             "label": label,
@@ -228,7 +229,7 @@ def _install_success_fakes(
                     f"{_MOD.PRODUCER_PREFIX}package_sha256={package_sha256}",
                     f"{_MOD.PRODUCER_PREFIX}source_bundle_sha256={'b' * 64}",
                     f"{_MOD.PRODUCER_PREFIX}identifier=ai.omnigent.stock-codex-compat",
-                    f"{_MOD.PRODUCER_PREFIX}version=0.3.0.dev0",
+                    f"{_MOD.PRODUCER_PREFIX}version=0.1.0",
                     (
                         f"{_MOD.PRODUCER_PREFIX}signature_status="
                         "signed by a developer certificate issued by Apple for distribution"
@@ -271,7 +272,7 @@ def _install_success_fakes(
                 expand_dir / "PackageInfo",
                 (
                     '<pkg-info identifier="ai.omnigent.stock-codex-compat" '
-                    'version="0.3.0.dev0" install-location="/" />\n'
+                    'version="0.1.0" install-location="/" />\n'
                 ),
             )
             _write_file(
@@ -279,7 +280,7 @@ def _install_success_fakes(
                 json.dumps(
                     {
                         "packageIdentifier": "ai.omnigent.stock-codex-compat",
-                        "packageVersion": "0.3.0.dev0",
+                        "packageVersion": "0.1.0",
                         "sourceBundleSha256": "b" * 64,
                     }
                 ),
@@ -315,11 +316,15 @@ def test_promote_release_builds_validates_and_writes_manifest_last(
     assert manifest["source"]["commit"] == _COMMIT
     assert manifest["source"]["pushed"] is True
     assert manifest["package"]["packageIdentifier"] == ("ai.omnigent.stock-codex-compat")
+    assert manifest["package"]["packageVersion"] == "0.1.0"
+    assert manifest["releaseVersion"]["version"] == "0.1.0"
     assert manifest["package"]["notarySubmissionId"] == _NOTARY_ID
     assert manifest["artifacts"]["package"]["sha256"] == _MOD.sha256_file(package_path)
     assert manifest["artifacts"]["releaseEvidence"]["sha256"] == (_MOD.sha256_file(evidence_path))
     assert manifest["releaseEvidence"]["stockCodexVersion"] == "0.144.1"
     assert manifest["releaseEvidence"]["liveThreadId"] == "thread-live"
+    producer_command = calls[0][1]
+    assert producer_command[producer_command.index("--pkg-version") + 1] == "0.1.0"
     assert [label for label, _command in calls] == [
         "signed/notarized package producer",
         "clean-machine release candidate",
@@ -521,6 +526,23 @@ def test_promote_release_requires_explicit_signing_identity(
     args.pkg_sign_identity = None
 
     with pytest.raises(_MOD.PromotionError, match="pkg-sign-identity"):
+        _MOD.promote_release(args)
+
+    assert not output_dir.exists()
+
+
+def test_promote_release_rejects_nonstable_compatibility_version(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source_root, output_dir, args = _promotion_args(monkeypatch, tmp_path)
+    (source_root / _MOD.RELEASE_VERSION_RELATIVE_PATH).write_text(
+        "0.1.0-rc1\n",
+        encoding="utf-8",
+    )
+    _install_success_fakes(monkeypatch, source_root=source_root)
+
+    with pytest.raises(_MOD.PromotionError, match=r"stable MAJOR.MINOR.PATCH"):
         _MOD.promote_release(args)
 
     assert not output_dir.exists()

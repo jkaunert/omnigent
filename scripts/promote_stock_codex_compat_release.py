@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -18,16 +19,19 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-import tomllib
-
 PROMOTION_KIND = "omnigent-stock-codex-compat-release-promotion"
-PROMOTION_SCHEMA_VERSION = 1
+PROMOTION_SCHEMA_VERSION = 2
+SUPPORTED_PROMOTION_SCHEMA_VERSIONS = {1, PROMOTION_SCHEMA_VERSION}
 PROMOTION_STATUS = "promoted"
 PACKAGE_FILENAME = "omnigent-stock-codex-compat.pkg"
 EVIDENCE_FILENAME = "release-evidence.json"
 MANIFEST_FILENAME = "promotion-manifest.json"
 PACKAGE_MANIFEST_RELATIVE_PATH = Path(
     "Payload/Library/Application Support/Omnigent/stock-codex-compat/pkg-manifest.json"
+)
+RELEASE_VERSION_RELATIVE_PATH = Path("packaging/stock-codex-compat/VERSION")
+STABLE_RELEASE_VERSION_PATTERN = re.compile(
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 )
 PRODUCER_PROOF = "stock-codex-compat-pkg-signed-notarized"
 PRODUCER_PREFIX = "stock_codex_compat_pkg_signed_notarized_"
@@ -256,16 +260,18 @@ def git_provenance(source_root: Path) -> dict[str, object]:
     }
 
 
-def _read_project_version(source_root: Path) -> str:
-    pyproject_path = source_root / "pyproject.toml"
+def _read_release_version(source_root: Path) -> str:
+    version_path = source_root / RELEASE_VERSION_RELATIVE_PATH
     try:
-        payload = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise PromotionError(f"could not read project version: {pyproject_path}") from exc
-    project = payload.get("project")
-    version = project.get("version") if isinstance(project, Mapping) else None
-    if not isinstance(version, str) or not version:
-        raise PromotionError(f"project.version is missing: {pyproject_path}")
+        version = version_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise PromotionError(
+            f"could not read compatibility-package release version: {version_path}"
+        ) from exc
+    if not STABLE_RELEASE_VERSION_PATTERN.fullmatch(version):
+        raise PromotionError(
+            f"compatibility-package release version must be stable MAJOR.MINOR.PATCH: {version!r}"
+        )
     return version
 
 
@@ -352,7 +358,7 @@ def _validate_producer_fields(
     fields: Mapping[str, object],
     *,
     package_path: Path,
-    project_version: str,
+    expected_package_version: str,
     notarytool_profile: str,
     expected_signing_identity: str,
 ) -> dict[str, object]:
@@ -380,10 +386,10 @@ def _validate_producer_fields(
     package_identifier = fields.get("identifier")
     if not isinstance(package_identifier, str) or not package_identifier:
         raise PromotionError("signed package producer omitted the package identifier")
-    if fields.get("version") != project_version:
+    if fields.get("version") != expected_package_version:
         raise PromotionError(
-            "signed package version does not match project.version: "
-            f"{fields.get('version')!r} != {project_version!r}"
+            "signed package version does not match the release version: "
+            f"{fields.get('version')!r} != {expected_package_version!r}"
         )
     sign_identity = fields.get("sign_identity")
     if sign_identity != expected_signing_identity:
@@ -413,7 +419,7 @@ def _validate_producer_fields(
         "packageSha256": package_sha256,
         "sourceBundleSha256": source_bundle_sha256,
         "packageIdentifier": package_identifier,
-        "packageVersion": project_version,
+        "packageVersion": expected_package_version,
         "signingIdentity": sign_identity,
         "signingIdentitySource": fields.get("sign_identity_source"),
         "signingKeychain": fields.get("signing_keychain"),
@@ -656,10 +662,12 @@ def verify_promotion_directory(
     manifest = _load_json(manifest_path, label="promotion manifest")
     if manifest.get("kind") != PROMOTION_KIND:
         raise PromotionError(f"unexpected promotion kind: {manifest.get('kind')!r}")
-    if manifest.get("schemaVersion") != PROMOTION_SCHEMA_VERSION:
-        raise PromotionError(
-            f"unexpected promotion schemaVersion: {manifest.get('schemaVersion')!r}"
-        )
+    schema_version = manifest.get("schemaVersion")
+    if (
+        not isinstance(schema_version, int)
+        or schema_version not in SUPPORTED_PROMOTION_SCHEMA_VERSIONS
+    ):
+        raise PromotionError(f"unexpected promotion schemaVersion: {schema_version!r}")
     if manifest.get("status") != PROMOTION_STATUS:
         raise PromotionError(f"promotion status={manifest.get('status')!r}")
     source = manifest.get("source")
@@ -678,6 +686,27 @@ def verify_promotion_directory(
     source_repo_root = source.get("repoRoot")
     if not isinstance(source_repo_root, str) or not Path(source_repo_root).is_absolute():
         raise PromotionError("promotion source repoRoot is invalid")
+    release_version_record = manifest.get("releaseVersion")
+    if schema_version == PROMOTION_SCHEMA_VERSION:
+        if not isinstance(release_version_record, Mapping):
+            raise PromotionError("promotion manifest omitted releaseVersion")
+        if release_version_record.get("path") != RELEASE_VERSION_RELATIVE_PATH.as_posix():
+            raise PromotionError("promotion releaseVersion path is invalid")
+        _validate_sha256(
+            release_version_record.get("sha256"),
+            label="release version SHA-256",
+        )
+        _validate_git_oid(
+            release_version_record.get("gitBlob"),
+            label="release version Git blob",
+        )
+        release_version = release_version_record.get("version")
+        if not isinstance(release_version, str) or not STABLE_RELEASE_VERSION_PATTERN.fullmatch(
+            release_version
+        ):
+            raise PromotionError("promotion releaseVersion is not stable MAJOR.MINOR.PATCH")
+    else:
+        release_version = None
     release_tools = _validated_release_tools(manifest)
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, Mapping):
@@ -722,6 +751,8 @@ def verify_promotion_directory(
         raise PromotionError("promotion package summary omitted package identifier")
     if not isinstance(package_version, str) or not package_version:
         raise PromotionError("promotion package summary omitted package version")
+    if release_version is not None and package_version != release_version:
+        raise PromotionError("promotion package version does not match releaseVersion")
     source_bundle_sha256 = _validate_sha256(
         package_summary.get("sourceBundleSha256"),
         label="promotion source bundle SHA-256",
@@ -764,6 +795,10 @@ def verify_promotion_directory(
             raise PromotionError(f"promotion command does not match releaseTools path: {name}")
     if _command_option_value(producer_command, "--pkg-output-path") != package_build_path:
         raise PromotionError("producer command does not name the promoted package")
+    if release_version is not None and (
+        _command_option_value(producer_command, "--pkg-version") != release_version
+    ):
+        raise PromotionError("producer command does not name the stable release version")
     if _command_option_value(candidate_command, "--pkg-path") != package_build_path:
         raise PromotionError("release candidate command does not name the promoted package")
     if _command_option_value(candidate_command, "--evidence-output") != evidence_build_path:
@@ -817,7 +852,12 @@ def verify_promotion_directory(
     return manifest
 
 
-def _producer_command(args: argparse.Namespace, *, package_path: Path) -> tuple[str, ...]:
+def _producer_command(
+    args: argparse.Namespace,
+    *,
+    package_path: Path,
+    package_version: str,
+) -> tuple[str, ...]:
     command = [
         args.python_executable,
         str(args.proof_script),
@@ -825,6 +865,8 @@ def _producer_command(args: argparse.Namespace, *, package_path: Path) -> tuple[
         PRODUCER_PROOF,
         "--pkg-output-path",
         str(package_path),
+        "--pkg-version",
+        package_version,
         "--notarytool-profile",
         args.notarytool_profile,
     ]
@@ -960,7 +1002,13 @@ def promote_release(args: argparse.Namespace) -> dict[str, object]:
             label="release evidence checker",
         ),
     }
-    project_version = _read_project_version(source_root)
+    package_version = _read_release_version(source_root)
+    release_version_record = _release_tool_provenance(
+        source_root,
+        (source_root / RELEASE_VERSION_RELATIVE_PATH).resolve(),
+        label="compatibility-package release version",
+    )
+    release_version_record["version"] = package_version
     output_dir: Path = args.output_dir
     try:
         output_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -973,7 +1021,11 @@ def promote_release(args: argparse.Namespace) -> dict[str, object]:
     evidence_path = output_dir / EVIDENCE_FILENAME
     manifest_path = output_dir / MANIFEST_FILENAME
     try:
-        producer_command = _producer_command(args, package_path=package_path)
+        producer_command = _producer_command(
+            args,
+            package_path=package_path,
+            package_version=package_version,
+        )
         print("promotion_phase=signed-notarized-package")
         producer = _run_command(
             producer_command,
@@ -988,7 +1040,7 @@ def promote_release(args: argparse.Namespace) -> dict[str, object]:
         package_record = _validate_producer_fields(
             producer_fields,
             package_path=package_path,
-            project_version=project_version,
+            expected_package_version=package_version,
             notarytool_profile=args.notarytool_profile,
             expected_signing_identity=args.pkg_sign_identity,
         )
@@ -1039,6 +1091,7 @@ def promote_release(args: argparse.Namespace) -> dict[str, object]:
             "status": PROMOTION_STATUS,
             "createdAt": datetime.now(UTC).isoformat(),
             "source": provenance,
+            "releaseVersion": release_version_record,
             "releaseTools": release_tools,
             "artifacts": {
                 "package": {

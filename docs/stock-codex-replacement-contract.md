@@ -221,6 +221,7 @@ The current spike proves the first narrow adapter behavior:
 | Isolated Codex launcher activation rehearsal | `replacement-ready` for temporary PATH shadowing, pinned stock-Codex delegation, no-recursion lookup, and rollback | `scripts/prove_stock_codex_replacement.py --proof launcher-activation` creates a temporary versioned pinned target under `omnigent/codex-stock/<version>/codex` by copying the current stock Codex binary, creates a temporary `codex` shim, prepends only that temp shim directory to `PATH` inside the proof process, and proves `codex` resolves to the shim during activation. The shim exports `OMNIGENT_STOCK_CODEX_PATH=<pinned target>` before delegation, and Omnigent's central Codex resolver selects that pinned binary instead of the shadowed `codex` command. The proof still verifies the sanitized PATH no longer points at the shim and can resolve the original stock Codex at `/opt/homebrew/bin/codex`, whose realpath was `/opt/homebrew/Caskroom/codex/0.142.2/codex-aarch64-apple-darwin`; it also verifies the delegate shape `/Users/joshuakaunert/.local/bin/uvx --from /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit omnigent codex`. After the scoped activation, `PATH` lookup restores to `/opt/homebrew/bin/codex`. This proves a rollback-first launcher shape can avoid recursive `codex` lookup and can target a managed pinned stock-Codex binary, not a persistent shell alias, app launcher, production-default mutation, persistent provisioner execution, remote downloader/update channel, or live Codex TUI launch. |
 | Persistent Omnigent `codex` launcher/default | `replacement-ready` for the current-host Homebrew-bin default with rollback | `scripts/install_omnigent_codex_launcher.py` installs a managed launcher at the selected `codex` path, writes a manifest, preserves `codex --version` by delegating it to the pinned stock binary, probes with `--omnigent-launcher-probe`, exports `OMNIGENT_STOCK_CODEX_PATH` before normal delegation to `uvx --from <repo> omnigent codex`, backs up an existing unmanaged target, and uninstalls only when the target carries the Omnigent marker. `omnigent.inner.codex_executor._find_codex_cli()` detects the managed launcher marker and manifest so inner Omnigent sessions resolve to the pinned stock binary instead of recursing into the launcher. On 2026-06-28, `/opt/homebrew/bin/codex` was replaced by the managed launcher, the original Homebrew symlink was preserved at `/opt/homebrew/bin/codex.omnigent-backup-20260628T091032Z`, `codex --version` returned `codex-cli 0.142.2`, `codex --omnigent-launcher-probe` returned `OMNIGENT_CODEX_PERSISTENT_LAUNCHER_OK`, and `scripts/prove_stock_codex_replacement.py --proof graph --live-proof-timeout 180` with no explicit `--codex-path` resolved to `/Users/joshuakaunert/.local/omnigent/codex-stock/0.142.2/codex` and passed in 33.3s after an actual rollback/reinstall cycle. Rollback command: `uvx --from /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit python /Users/joshuakaunert/Developer/HarnessEngineering/omnigent-upstream-audit/scripts/install_omnigent_codex_launcher.py --uninstall --launcher-path /opt/homebrew/bin/codex --manifest-path /Users/joshuakaunert/.local/omnigent/launchers/codex.json`. This proves current-host default mutation and rollback execution, not a remote download/update channel, clean-auth onboarding, cross-machine portability, or app-bundle launcher mutation. |
 | Immutable stock-Codex compatibility release promotion | `replacement-ready` for the first commit-bound direct clean-Mac package/evidence/manifest transaction | `scripts/promote_stock_codex_compat_release.py` promoted clean pushed source commit `985c7295f347caafd238cfc4c036bff3615e7310` into immutable directory `omnigent-stock-codex-compat-0.3.0.dev0-985c7295f347`. The live command used explicit signer `Developer ID Installer: Joshua Kaunert (HSRQC9N69B)` and notary profile `OmnigentExperiment`, produced package SHA-256 `adae5f4359fd66f62354de6a57fc8284a0e46771d5ba850b21729ab93e296302`, source-bundle SHA-256 `b186fb1d344301258e30cf2f00e6e12129f363ff06b8a1fb1959bf124ce5dac9`, accepted notary submission `6563c3a9-57db-475b-a329-959a7427376d`, release-evidence SHA-256 `9b08ae3e783e24687a765af36db68d29375ab8342fdee251d8526f286817d36a`, and promotion-manifest SHA-256 `0d006703bd75fb67c26d7f3eed70c263efdc45cbc1993da1fc54c7256b3ed26d`. All five direct-target steps selected official stock Codex `0.144.1` and reported `replacement-ready`; no host stock Codex or auth was uploaded. A standalone `--verify-only` rerun passed, and a final direct-target preflight proved no receipt, payload, launcher, manifest, adapter root, stock cache, or LaunchAgent residue while revalidating signature, staple, and Gatekeeper acceptance. Focused adversarial coverage includes partial-output cleanup, local/remote provenance rejection, tracked-tool binding, exact signer checks, symlink/tamper rejection, embedded metadata drift, and relocated-directory verification. Artifact upload, trusted publication of the manifest digest, detached manifest signing, release version finalization, and rollout/feed policy remain separate release steps. |
+| Public stock-Codex compatibility release channel | `implemented; live publication pending` for stable versioning, controlled GitHub publication, public asset verification, and clean-target URL installation | `packaging/stock-codex-compat/VERSION` owns stable installer version `0.1.0` independently from Omnigent's lockstep PyPI version. `scripts/publish_stock_codex_compat_release.py` requires tag `stock-codex-compat-v0.1.0` to resolve locally and remotely to the promoted source commit, drafts a release on `jkaunert/omnigent`, uploads the package/evidence/manifest plus `SHA256SUMS` and a publication record, re-downloads and hashes the draft assets, publishes only after that check, then verifies the public API and every asset without credentials. `scripts/prove_stock_codex_compat_published_release.py` verifies that public record, sends only a script to a marked disposable Mac, downloads the package from the public asset URL on that target, verifies SHA-256/signature/staple/Gatekeeper, installs and checks receipt/payload version, and removes package state. Adversarial tests cover tag namespace, release-body digest anchoring, asset-set and hash mismatch, failed-draft cleanup, no-package-upload command shape, and cleanup-marker enforcement. This row does not claim the production gap closed until the real `0.1.0` promotion, remote tag, public release, unauthenticated asset verification, and clean-Mac URL install all pass. |
 
 2026-07-09 direct-auth release supersession note: the historical status text in
 the direct release/auth rows above predates operator-completed wrapper login.
@@ -1262,6 +1263,34 @@ evidence and found no package receipt, payload, launcher, launcher manifest,
 adapter root, stock cache, or LaunchAgent on the disposable target. This
 follow-up evidence note is not part of the promoted payload; the immutable
 package remains bound to the source commit recorded above.
+
+Stable public compatibility release gate:
+
+```bash
+uv run python scripts/publish_stock_codex_compat_release.py \
+  --promotion-dir /absolute/path/to/promoted-0.1.0 \
+  --output-dir /absolute/path/to/publication-0.1.0 \
+  --repository jkaunert/omnigent \
+  --tag stock-codex-compat-v0.1.0
+
+uv run python scripts/publish_stock_codex_compat_release.py \
+  --verify-only /absolute/path/to/publication-0.1.0/publication-record.json
+
+uv run python scripts/prove_stock_codex_compat_published_release.py \
+  --publication-record /absolute/path/to/publication-0.1.0/publication-record.json \
+  --ssh-target omnigent-clean@10.0.0.10 \
+  --ssh-identity ~/.ssh/mba_github_ssh_key
+```
+
+The publisher requires the independent compatibility version from
+`packaging/stock-codex-compat/VERSION`; it does not change the root Omnigent
+version or SDK dependency pins. It requires a matching remote
+`stock-codex-compat-v<version>` tag at the promoted source commit, verifies all
+draft assets before publishing, anchors the publication-record SHA-256 in the
+release body, and re-downloads all public assets without credentials. The
+clean-target proof downloads the package directly from that public release URL,
+not from the development host. The first real `0.1.0` run remains required
+before this gate can move from implemented to `replacement-ready`.
 
 Non-Tart clean-machine preflight:
 

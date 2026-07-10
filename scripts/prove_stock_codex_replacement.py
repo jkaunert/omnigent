@@ -10881,6 +10881,7 @@ def _build_signed_notarized_stock_codex_compat_pkg(
     source_repo_root: Path,
     prerequisites: StockCodexCompatPkgSigningPrerequisites,
     package_path: Path | None = None,
+    package_version: str | None = None,
 ) -> _SignedNotarizedStockCodexCompatPkg:
     """Build, notarize, staple, and Gatekeeper-check one pkg under ``root``."""
     assert prerequisites.sign_identity is not None
@@ -10905,6 +10906,8 @@ def _build_signed_notarized_stock_codex_compat_pkg(
     ]
     if prerequisites.signing_keychain is not None:
         build_args.extend(["--signing-keychain", str(prerequisites.signing_keychain)])
+    if package_version is not None:
+        build_args.extend(["--version", package_version])
     payload = _run_stock_codex_compat_pkg_builder_cli_json(
         build_args,
         repo_root=source_repo_root,
@@ -11165,6 +11168,7 @@ def run_stock_codex_compat_pkg_signed_notarized_proof(
     signing_keychain: Path | None,
     notarytool_profile: str | None,
     package_output_path: Path | None = None,
+    package_version: str | None = None,
 ) -> StockCodexCompatPkgSignedNotarizedProof:
     """Build, sign, notarize, staple, and Gatekeeper-check the compatibility pkg."""
     source_repo_root = Path(__file__).resolve().parents[1]
@@ -11217,6 +11221,7 @@ def run_stock_codex_compat_pkg_signed_notarized_proof(
             source_repo_root=source_repo_root,
             prerequisites=prerequisites,
             package_path=package_output_path,
+            package_version=package_version,
         )
         structure = signed_pkg.structure
         return StockCodexCompatPkgSignedNotarizedProof(
@@ -29537,6 +29542,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--pkg-version",
+        default=None,
+        help=(
+            "Optional independent compatibility-package version for "
+            "stock-codex-compat-pkg-signed-notarized. Other package proofs "
+            "continue to use the repository project version by default."
+        ),
+    )
+    parser.add_argument(
         "--pkg-path",
         type=Path,
         default=None,
@@ -29688,6 +29702,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     requested_proof = "tool-plane" if args.proof == "mcp-tools" else args.proof
+    if (
+        args.pkg_version is not None
+        and requested_proof != "stock-codex-compat-pkg-signed-notarized"
+    ):
+        raise SystemExit(
+            "--pkg-version is supported only by "
+            "stock-codex-compat-pkg-signed-notarized"
+        )
     if requested_proof == "pinned-codex-provision":
         if args.apple_bundle is not None:
             raise SystemExit("pinned-codex-provision does not use --apple-bundle; omit it.")
@@ -30220,6 +30242,7 @@ def main() -> int:
                 signing_keychain=args.pkg_sign_keychain,
                 notarytool_profile=args.notarytool_profile,
                 package_output_path=args.pkg_output_path,
+                package_version=args.pkg_version,
             )
         )
         return 0

@@ -37,6 +37,14 @@ promotion/rollback planning without promoting persistent pointers. Automatic
 update scheduling, staged rollout policy, pre-release channel adoption, and
 persistent launcher pointer promotion are separate product decisions.
 
+The stock-Codex compatibility installer has an independent release version at
+`packaging/stock-codex-compat/VERSION`. It does not reuse or mutate the root
+Omnigent `project.version`, because that version belongs to the three lockstep
+PyPI packages documented in `RELEASING.md`. Compatibility installer releases
+use stable `MAJOR.MINOR.PATCH` values and tags shaped as
+`stock-codex-compat-v<version>` so they cannot collide with or trigger the
+upstream `vX.Y.Z` PyPI/GitHub release workflow.
+
 ## Rollback
 
 Provisioned payloads live in versioned cache directories:
@@ -160,6 +168,57 @@ must archive the `.pkg`, release evidence JSON, and promotion manifest together,
 and publish the manifest SHA-256 through the trusted release channel. The
 promotion script does not upload or publish those artifacts and the manifest is
 not a detached signature by itself.
+
+Publish a promoted compatibility package only after its source commit is clean,
+pushed, and tagged on the fork with the independent tag namespace:
+
+```sh
+git tag -a stock-codex-compat-v0.1.0 -m \
+  "Omnigent Stock Codex Compatibility 0.1.0" <promoted-source-commit>
+git push origin stock-codex-compat-v0.1.0
+
+uv run python scripts/publish_stock_codex_compat_release.py \
+  --promotion-dir /absolute/path/to/promoted-0.1.0 \
+  --output-dir /absolute/path/to/publication-0.1.0 \
+  --repository jkaunert/omnigent \
+  --tag stock-codex-compat-v0.1.0
+```
+
+The publisher verifies the promotion directory first, requires the local and
+remote tag to resolve to the promoted source commit, refuses a preexisting
+release, creates a draft release, uploads the package, release evidence,
+promotion manifest, `SHA256SUMS`, and `publication-record.json`, then downloads
+the complete draft asset set and re-hashes it. Only after that draft check passes
+does it publish a stable release. It then accesses the public GitHub API and
+downloads every asset without credentials, verifies all hashes again, and
+requires the release body to contain the publication-record SHA-256. A failure
+before publication deletes the attempted draft and partial publication output.
+The package remains authenticated independently by its pinned SHA-256 plus its
+Developer ID signature, notarization ticket, and Gatekeeper acceptance.
+
+Verify the public release again without mutating GitHub:
+
+```sh
+uv run python scripts/publish_stock_codex_compat_release.py \
+  --verify-only /absolute/path/to/publication-0.1.0/publication-record.json
+```
+
+Then prove the distribution channel from a disposable clean Mac rather than by
+uploading the host package:
+
+```sh
+uv run python scripts/prove_stock_codex_compat_published_release.py \
+  --publication-record /absolute/path/to/publication-0.1.0/publication-record.json \
+  --ssh-target omnigent-clean@10.0.0.10 \
+  --ssh-identity ~/.ssh/mba_github_ssh_key
+```
+
+That proof verifies the public release first, sends only a shell program over
+SSH, downloads the package on the target from the public GitHub asset URL,
+checks SHA-256, Developer ID signature, staple, and Gatekeeper, installs into the
+real `/Library`, checks receipt and payload version, then removes the payload and
+receipt and confirms package, launcher, adapter, stock cache, and LaunchAgent
+state are absent. It does not upload the package, stock Codex, or auth material.
 
 For non-Tart targets, run
 `stock-codex-compat-pkg-nontart-clean-machine-preflight` before any package

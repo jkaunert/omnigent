@@ -3336,6 +3336,7 @@ def test_stock_codex_compat_pkg_signed_notarized_runs_distribution_checks(
         signing_keychain=None,
         notarytool_profile="omnigent-notary",
         package_output_path=output_path,
+        package_version="1.2.3",
     )
 
     assert proof.status == "replacement-ready"
@@ -3353,6 +3354,7 @@ def test_stock_codex_compat_pkg_signed_notarized_runs_distribution_checks(
     assert captured_build_args[captured_build_args.index("--output") + 1] == str(
         output_path.resolve()
     )
+    assert captured_build_args[captured_build_args.index("--version") + 1] == "1.2.3"
     assert distribution_commands[0][1:3] == ["notarytool", "submit"]
     assert "--wait" not in distribution_commands[0]
     assert distribution_commands[0][-2:] == ["--output-format", "json"]
