@@ -119,6 +119,81 @@ def test_validate_tag_uses_independent_compatibility_namespace() -> None:
         _MOD._validate_tag("v0.1.0", version="0.1.0")
 
 
+def test_gh_release_payload_normalizes_draft_release_view(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    def fake_run_command(
+        command: Any,
+        *,
+        cwd: Path,
+        timeout: float,
+        label: str,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, timeout, label, check
+        command_tuple = tuple(command)
+        commands.append(command_tuple)
+        return subprocess.CompletedProcess(
+            command_tuple,
+            0,
+            stdout=(
+                '{"tagName":"stock-codex-compat-v0.1.0",'
+                '"isDraft":true,"isPrerelease":false,'
+                '"url":"https://github.com/jkaunert/omnigent/releases/tag/'
+                'untagged-0123456789abcdef","body":"notes",'
+                '"assets":[{"name":"artifact.pkg","size":12,'
+                '"url":"https://github.com/jkaunert/omnigent/releases/download/'
+                'stock-codex-compat-v0.1.0/artifact.pkg"}]}\n'
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(_MOD, "_run_command", fake_run_command)
+
+    payload = _MOD._gh_release_payload(
+        "/usr/bin/gh",
+        _REPOSITORY,
+        _TAG,
+        cwd=tmp_path,
+    )
+
+    assert commands == [
+        (
+            "/usr/bin/gh",
+            "release",
+            "view",
+            _TAG,
+            "--repo",
+            _REPOSITORY,
+            "--json",
+            "tagName,isDraft,isPrerelease,url,body,assets",
+        )
+    ]
+    assert payload == {
+        "tag_name": _TAG,
+        "draft": True,
+        "prerelease": False,
+        "html_url": (
+            "https://github.com/jkaunert/omnigent/releases/tag/untagged-0123456789abcdef"
+        ),
+        "body": "notes",
+        "assets": [
+            {
+                "name": "artifact.pkg",
+                "browser_download_url": _MOD._release_asset_url(
+                    _REPOSITORY,
+                    _TAG,
+                    "artifact.pkg",
+                ),
+                "size": 12,
+            }
+        ],
+    }
+
+
 def test_verify_release_payload_requires_record_digest_and_exact_assets(
     tmp_path: Path,
 ) -> None:
@@ -133,7 +208,9 @@ def test_verify_release_payload_requires_record_digest_and_exact_assets(
         "tag_name": _TAG,
         "draft": True,
         "prerelease": False,
-        "html_url": _MOD._release_url(_REPOSITORY, _TAG),
+        "html_url": (
+            "https://github.com/jkaunert/omnigent/releases/tag/untagged-0123456789abcdef"
+        ),
         "body": f"publication record: {record_sha256}",
         "assets": [
             *[
@@ -173,6 +250,20 @@ def test_verify_release_payload_requires_record_digest_and_exact_assets(
         _MOD.PUBLICATION_RECORD_FILENAME,
     }
 
+    payload["html_url"] = "https://github.com/other/repository/releases/tag/untagged-bad"
+    with pytest.raises(_MOD.PublicationError, match="draft release URL"):
+        _MOD._verify_release_payload(
+            payload,
+            repository=_REPOSITORY,
+            tag=_TAG,
+            publication=publication,
+            publication_record_sha256=record_sha256,
+            expect_draft=True,
+        )
+
+    payload["html_url"] = (
+        "https://github.com/jkaunert/omnigent/releases/tag/untagged-0123456789abcdef"
+    )
     payload["body"] = "digest omitted"
     with pytest.raises(_MOD.PublicationError, match=r"omit.*digest"):
         _MOD._verify_release_payload(

@@ -233,7 +233,16 @@ def _gh_release_payload(
     cwd: Path,
 ) -> dict[str, object]:
     completed = _run_command(
-        (gh, "api", f"repos/{repository}/releases/tags/{tag}"),
+        (
+            gh,
+            "release",
+            "view",
+            tag,
+            "--repo",
+            repository,
+            "--json",
+            "tagName,isDraft,isPrerelease,url,body,assets",
+        ),
         cwd=cwd,
         timeout=60,
         label="GitHub release inspection",
@@ -244,7 +253,26 @@ def _gh_release_payload(
         raise PublicationError("GitHub release inspection returned invalid JSON") from exc
     if not isinstance(payload, dict):
         raise PublicationError("GitHub release inspection did not return an object")
-    return payload
+    assets = payload.get("assets")
+    normalized_assets: list[dict[str, object]] = []
+    if isinstance(assets, list):
+        for asset in assets:
+            if isinstance(asset, Mapping):
+                normalized_assets.append(
+                    {
+                        "name": asset.get("name"),
+                        "browser_download_url": asset.get("url"),
+                        "size": asset.get("size"),
+                    }
+                )
+    return {
+        "tag_name": payload.get("tagName"),
+        "draft": payload.get("isDraft"),
+        "prerelease": payload.get("isPrerelease"),
+        "html_url": payload.get("url"),
+        "body": payload.get("body"),
+        "assets": normalized_assets,
+    }
 
 
 def _expected_assets(
@@ -318,7 +346,15 @@ def _verify_release_payload(
         raise PublicationError(f"GitHub release draft state is not {expect_draft}")
     if payload.get("prerelease") is not False:
         raise PublicationError("stable compatibility release cannot be a prerelease")
-    if payload.get("html_url") != _release_url(repository, tag):
+    release_url = payload.get("html_url")
+    expected_release_url = _release_url(repository, tag)
+    draft_url_prefix = f"https://github.com/{repository}/releases/tag/untagged-"
+    if expect_draft:
+        if release_url != expected_release_url and (
+            not isinstance(release_url, str) or not release_url.startswith(draft_url_prefix)
+        ):
+            raise PublicationError("GitHub draft release URL is invalid")
+    elif release_url != expected_release_url:
         raise PublicationError("GitHub release URL does not match publication record")
     body = payload.get("body")
     if not isinstance(body, str) or publication_record_sha256 not in body:
