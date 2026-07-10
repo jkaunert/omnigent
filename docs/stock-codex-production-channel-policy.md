@@ -115,9 +115,12 @@ production-shaped install path. `stock-codex-compat-pkg-clean-vm-remote-acquisit
 copies only the signed/notarized package, a URL-backed channel manifest, and the
 remote proof script into the VM, then installs into the VM's real `/Library` and
 downloads/verifies the official OpenAI GitHub archive there. The live extension
-`stock-codex-compat-pkg-clean-vm-live` adds only proof-scoped copied stock auth,
-does not upload the host stock Codex binary, and runs a real model turn through
-the installed compatibility launcher after in-VM acquisition. When the harness
+`stock-codex-compat-pkg-clean-vm-live` can use either proof-scoped copied auth for
+legacy Tart rehearsal or an already-authenticated remote `CODEX_HOME` in place
+for direct-SSH release evidence. Neither mode uploads the host stock Codex
+binary, and the direct mode does not upload credential contents. Both run a real
+model turn through the installed compatibility launcher after in-VM
+acquisition. When the harness
 starts Tart itself, the package-consuming clean-VM gates first run a
 marker-gated cleanup of known proof-owned launcher, cache, auth, update-agent,
 payload, and receipt state so repeat runs cannot pass or fail because of stale
@@ -137,7 +140,11 @@ scraping. The offline verifier
 `scripts/check_stock_codex_compat_release_evidence.py` should then be run
 against the archived `.pkg` and evidence JSON to re-hash the package and fail
 closed on schema drift, non-official channel evidence, non-ready steps, Tart
-count mismatch, or host stock-Codex upload.
+count mismatch, or host stock-Codex upload. Direct-SSH release evidence also
+fails closed unless it names an absolute remote existing auth home, reports the
+matching available `auth.json`, and records `authUploaded=false` for onboarding,
+persistence, and live. The recorded command must name the same SSH target and
+remote auth home.
 
 For non-Tart targets, run
 `stock-codex-compat-pkg-nontart-clean-machine-preflight` before any package

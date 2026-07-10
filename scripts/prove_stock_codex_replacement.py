@@ -13513,6 +13513,39 @@ def _run_clean_vm_ssh_command(
     )
 
 
+def _probe_clean_vm_remote_codex_auth(
+    remote_codex_home: str,
+    *,
+    ssh_path: str,
+    ssh_target: str,
+    ssh_port: int,
+    ssh_identity: Path | None = None,
+    timeout: float = 30,
+) -> subprocess.CompletedProcess[str]:
+    """Verify persistent remote auth metadata without reading credential contents."""
+    script = r'''
+set -euo pipefail
+remote_codex_home="$1"
+marker="$HOME/.omnigent-stock-codex-compat-clean-user-ok"
+auth_path="$remote_codex_home/auth.json"
+[ -f "$marker" ] || exit 70
+[ -s "$auth_path" ] || exit 71
+[ "$(stat -f '%Lp' "$auth_path")" = "600" ] || exit 72
+printf 'stock_codex_compat_remote_auth_probe=replacement-ready\n'
+'''
+    remote_command = (
+        f"/bin/bash -lc {shlex.quote(script)} -- {shlex.quote(remote_codex_home)}"
+    )
+    return _run_clean_vm_ssh_command(
+        remote_command,
+        ssh_path=ssh_path,
+        ssh_target=ssh_target,
+        ssh_port=ssh_port,
+        ssh_identity=ssh_identity,
+        timeout=timeout,
+    )
+
+
 def _wait_for_clean_vm_ssh(
     *,
     ssh_path: str,
@@ -15128,6 +15161,12 @@ fi
 if [ "$proof_mode" = "auth-persistence-existing" ] && [ -z "$remote_auth_codex_home" ]; then
   fail "existing-auth persistence proof requires remote CODEX_HOME"
 fi
+if [ "$proof_mode" = "live-existing" ] && [ -n "$live_auth_json" ]; then
+  fail "existing-auth live proof must not receive uploaded auth json"
+fi
+if [ "$proof_mode" = "live-existing" ] && [ -z "$remote_auth_codex_home" ]; then
+  fail "existing-auth live proof requires remote CODEX_HOME"
+fi
 if [ "$proof_mode" = "auth-login-existing" ] && [ -n "$live_auth_json" ]; then
   fail "existing-auth login proof must not receive uploaded auth json"
 fi
@@ -15135,6 +15174,7 @@ if [ "$proof_mode" = "auth-login-existing" ] && [ -z "$remote_auth_codex_home" ]
   fail "existing-auth login proof requires remote CODEX_HOME"
 fi
 if [ "$proof_mode" = "auth-persistence-existing" ] || \
+   [ "$proof_mode" = "live-existing" ] || \
    [ "$proof_mode" = "auth-login-existing" ]; then
   case "$remote_auth_codex_home/" in
     "$proof_root/"*|"$adapter_root/"*|"$clean_cache_root/"*|"$clean_codex_home/"*|"$live_codex_home/"*)
@@ -15150,9 +15190,12 @@ if [ "$proof_mode" = "auth-login-existing" ]; then
   [ ! -e "$remote_auth_codex_home/auth.json" ] || \
     fail "existing-auth login CODEX_HOME already contains auth.json: $remote_auth_codex_home"
 fi
-if [ "$proof_mode" = "auth-persistence-existing" ]; then
+if [ "$proof_mode" = "auth-persistence-existing" ] || \
+   [ "$proof_mode" = "live-existing" ]; then
   [ -s "$remote_auth_codex_home/auth.json" ] || \
     fail "existing-auth CODEX_HOME does not contain auth.json: $remote_auth_codex_home"
+  [ "$(stat -f '%Lp' "$remote_auth_codex_home/auth.json")" = "600" ] || \
+    fail "existing-auth CODEX_HOME auth.json must have mode 600"
 fi
 grep -q '"url"' "$channel_manifest" || fail "remote acquisition channel manifest lacks url"
 if grep -q '"path"' "$channel_manifest"; then
@@ -16123,10 +16166,37 @@ PY
   printf 'stock_codex_compat_pkg_clean_vm_update_agent_launchctl_bootout=unloaded\n'
 fi
 
-if [ -n "$live_auth_json" ]; then
-  mkdir -p "$live_codex_home"
-  cp "$live_auth_json" "$live_codex_home/auth.json"
-  chmod 600 "$live_codex_home/auth.json"
+if [ -n "$live_auth_json" ] || [ "$proof_mode" = "live-existing" ]; then
+  if [ "$proof_mode" = "live-existing" ]; then
+    live_codex_home="$remote_auth_codex_home"
+    CODEX_HOME="$live_codex_home" \
+      OMNIGENT_STOCK_CODEX_PATH="$provisioned_codex" \
+      uvx --from "$user_runtime_root" python - \
+        "$live_codex_home" <<'PY'
+import stat
+import sys
+from pathlib import Path
+
+from omnigent import codex_native
+
+codex_home = Path(sys.argv[1])
+auth_path = codex_home / "auth.json"
+source = codex_native._resolve_codex_auth_source()
+reason = codex_native._codex_auth_unavailable_reason()
+if source.auth_path != auth_path:
+    raise SystemExit(
+        f"existing-auth live resolved wrong path: {source.auth_path} != {auth_path}"
+    )
+if reason is not None:
+    raise SystemExit(f"expected available existing auth for live proof, got {reason!r}")
+if stat.S_IMODE(auth_path.stat().st_mode) != 0o600:
+    raise SystemExit("existing-auth live auth.json must have mode 0o600")
+PY
+  else
+    mkdir -p "$live_codex_home"
+    cp "$live_auth_json" "$live_codex_home/auth.json"
+    chmod 600 "$live_codex_home/auth.json"
+  fi
   live_output_path="$proof_root/live-output.jsonl"
   live_stderr_path="$proof_root/live-stderr.txt"
   live_prompt="$(
@@ -16684,6 +16754,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
     remote_channel: _OfficialStockCodexRemoteChannel | None = None,
     live_auth_path: Path | None = None,
     live_auth_source: str | None = None,
+    live_remote_codex_home: str | None = None,
     update_agent: bool = False,
     auth_onboarding: bool = False,
     auth_login: bool = False,
@@ -16704,6 +16775,18 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
         "scp": shutil.which("scp"),
         "tart": shutil.which("tart"),
     }
+    if live_auth_path is not None and live_remote_codex_home is not None:
+        raise SystemExit(
+            "stock-codex-compat-pkg-clean-vm-live requires exactly one auth "
+            "source: a proof-scoped uploaded auth file or a remote existing "
+            "CODEX_HOME."
+        )
+    if live_remote_codex_home is not None and not live_remote_codex_home.startswith("/"):
+        raise SystemExit(
+            "stock-codex-compat-pkg-clean-vm-live remote CODEX_HOME must be absolute."
+        )
+    live_requested = live_auth_path is not None or live_remote_codex_home is not None
+    requested_live_auth_upload = live_auth_path is not None
     requested_auth_persistence_upload = auth_persistence_auth_path is not None
 
     def decorate_clean_vm_proof(
@@ -16714,8 +16797,10 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
         return replace(
             proof,
             proof_variant=(
-                "official-remote-channel-live-model"
-                if live_auth_path is not None
+                "official-remote-channel-live-model-existing"
+                if live_remote_codex_home is not None
+                else "official-remote-channel-live-model"
+                if live_requested
                 else "official-remote-channel-update-agent"
                 if update_agent
                 else "official-remote-channel-auth-onboarding"
@@ -16737,10 +16822,18 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
             archive_executable=remote_channel.archive_executable,
             channel_policy=remote_channel.policy_name,
             host_stock_codex_uploaded=False,
-            live_auth_path=live_auth_path,
-            live_auth_source=live_auth_source,
-            live_auth_uploaded=live_auth_path is not None,
-            live_model_turn_requested=live_auth_path is not None,
+            live_auth_path=(
+                Path(live_remote_codex_home) / "auth.json"
+                if live_remote_codex_home is not None
+                else live_auth_path
+            ),
+            live_auth_source=(
+                f"remote-existing-codex-home:{live_remote_codex_home}"
+                if live_remote_codex_home is not None
+                else live_auth_source
+            ),
+            live_auth_uploaded=requested_live_auth_upload,
+            live_model_turn_requested=live_requested,
             update_agent_requested=update_agent,
             auth_onboarding_requested=auth_onboarding,
             auth_login_requested=auth_login,
@@ -16765,7 +16858,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
     if (
         sum(
             (
-                live_auth_path is not None,
+                live_requested,
                 update_agent,
                 auth_onboarding,
                 auth_login,
@@ -17109,6 +17202,11 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                         remote_command_parts.append(auth_persistence_remote_codex_home)
                     else:
                         remote_command_parts.append("auth-persistence")
+                if live_remote_codex_home is not None:
+                    if proof_auth_path is None:
+                        remote_command_parts.append("")
+                    remote_command_parts.append("live-existing")
+                    remote_command_parts.append(live_remote_codex_home)
                 remote_command_args = tuple(remote_command_parts)
                 if update_agent:
                     success_sentinel = (
@@ -17130,7 +17228,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                         "stock_codex_compat_pkg_clean_vm_auth_persistence_status="
                         "replacement-ready"
                     )
-                elif live_auth_path is None:
+                elif not live_requested:
                     success_sentinel = (
                         "stock_codex_compat_pkg_clean_vm_remote_acquisition_status="
                         "replacement-ready"
@@ -17454,7 +17552,7 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                         )
                     )
             live_output_evidence = None
-            if live_auth_path is not None:
+            if live_requested:
                 live_output_evidence = _parse_clean_vm_live_output_evidence(
                     remote_output
                 )
@@ -17478,6 +17576,36 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                             tart_ip=tart_ip,
                             remote_work_dir=remote_work_dir,
                             remote_status="live-evidence-missing",
+                            remote_output_preview=_preview_text(
+                                remote_output,
+                                limit=12000,
+                            ),
+                            tart_started=tart_started,
+                        )
+                    )
+                if (
+                    live_remote_codex_home is not None
+                    and live_output_evidence[6] != Path(live_remote_codex_home)
+                ):
+                    return finalize_clean_vm_proof(
+                        _blocked_stock_codex_compat_pkg_clean_vm_proof(
+                            tool_paths=tool_paths,
+                            missing_prerequisites=(
+                                "clean VM live proof used the wrong remote CODEX_HOME",
+                            ),
+                            stock_codex_path=stock_codex_path,
+                            stock_codex_version=stock_codex_version,
+                            stock_codex_sha256=stock_codex_sha256,
+                            package_path=package_path,
+                            package_sha256=package_sha256,
+                            tart_name=clean_vm_tart_name,
+                            ssh_target=resolved_target,
+                            ssh_identity=clean_vm_ssh_identity,
+                            ssh_user=clean_vm_ssh_user,
+                            ssh_port=clean_vm_ssh_port,
+                            tart_ip=tart_ip,
+                            remote_work_dir=remote_work_dir,
+                            remote_status="live-codex-home-mismatch",
                             remote_output_preview=_preview_text(
                                 remote_output,
                                 limit=12000,
@@ -17635,6 +17763,38 @@ def run_stock_codex_compat_pkg_clean_vm_proof(
                             tart_ip=tart_ip,
                             remote_work_dir=remote_work_dir,
                             remote_status="auth-persistence-upload-state-mismatch",
+                            remote_output_preview=_preview_text(
+                                remote_output,
+                                limit=12000,
+                            ),
+                            tart_started=tart_started,
+                        )
+                    )
+                if (
+                    auth_persistence_remote_codex_home is not None
+                    and auth_persistence_codex_home
+                    != Path(auth_persistence_remote_codex_home)
+                ):
+                    return finalize_clean_vm_proof(
+                        _blocked_stock_codex_compat_pkg_clean_vm_proof(
+                            tool_paths=tool_paths,
+                            missing_prerequisites=(
+                                "clean VM auth-persistence proof used the wrong "
+                                "remote CODEX_HOME",
+                            ),
+                            stock_codex_path=stock_codex_path,
+                            stock_codex_version=stock_codex_version,
+                            stock_codex_sha256=stock_codex_sha256,
+                            package_path=package_path,
+                            package_sha256=package_sha256,
+                            tart_name=clean_vm_tart_name,
+                            ssh_target=resolved_target,
+                            ssh_identity=clean_vm_ssh_identity,
+                            ssh_user=clean_vm_ssh_user,
+                            ssh_port=clean_vm_ssh_port,
+                            tart_ip=tart_ip,
+                            remote_work_dir=remote_work_dir,
+                            remote_status="auth-persistence-codex-home-mismatch",
                             remote_output_preview=_preview_text(
                                 remote_output,
                                 limit=12000,
@@ -18049,6 +18209,7 @@ def run_stock_codex_compat_pkg_clean_vm_release_proof(
     clean_vm_ssh_user: str | None,
     clean_vm_ssh_port: int,
     clean_vm_start_tart: bool,
+    remote_codex_home: str | None = None,
 ) -> StockCodexCompatPkgCleanVmReleaseProof:
     """Run the release-scoped clean-VM package proof aggregate."""
     stock_codex_path = stock_codex_path.expanduser().resolve()
@@ -18079,14 +18240,76 @@ def run_stock_codex_compat_pkg_clean_vm_release_proof(
     )
     if resolved_identity is not None and not resolved_identity.is_file():
         missing.append(f"missing clean VM SSH identity: {resolved_identity}")
-    auth_path, auth_source = _stock_replacement_auth_source()
-    auth_path = auth_path.expanduser().resolve()
-    auth_available = codex_native._codex_auth_json_has_available_credential(auth_path)
-    if not auth_available:
+    direct_ssh_release = (
+        clean_vm_ssh_target is not None and clean_vm_tart_name is None
+    )
+    if remote_codex_home is not None:
+        auth_path = Path(remote_codex_home) / "auth.json"
+        auth_source = f"remote-existing-codex-home:{remote_codex_home}"
+        auth_available = False
+        remote_auth_probe_allowed = True
+        if not remote_codex_home.startswith("/"):
+            missing.append("clean VM release remote CODEX_HOME must be absolute")
+            remote_auth_probe_allowed = False
+        if clean_vm_tart_name is not None or clean_vm_start_tart:
+            missing.append(
+                "clean VM release remote CODEX_HOME is supported only for a "
+                "direct SSH target"
+            )
+            remote_auth_probe_allowed = False
+        if not clean_vm_ssh_target:
+            missing.append(
+                "clean VM release remote CODEX_HOME requires a direct SSH target"
+            )
+            remote_auth_probe_allowed = False
+        if not tool_paths["ssh"]:
+            missing.append("missing executable on PATH: ssh")
+            remote_auth_probe_allowed = False
+        if resolved_identity is not None and not resolved_identity.is_file():
+            remote_auth_probe_allowed = False
+        if remote_auth_probe_allowed:
+            assert tool_paths["ssh"] is not None
+            assert clean_vm_ssh_target is not None
+            try:
+                remote_auth_probe = _probe_clean_vm_remote_codex_auth(
+                    remote_codex_home,
+                    ssh_path=tool_paths["ssh"],
+                    ssh_target=clean_vm_ssh_target,
+                    ssh_port=clean_vm_ssh_port,
+                    ssh_identity=resolved_identity,
+                )
+            except (OSError, subprocess.SubprocessError):
+                remote_auth_probe = None
+            auth_available = bool(
+                remote_auth_probe
+                and remote_auth_probe.returncode == 0
+                and "stock_codex_compat_remote_auth_probe=replacement-ready"
+                in remote_auth_probe.stdout
+            )
+            if not auth_available:
+                missing.append(
+                    "remote Codex auth source is not available with mode 600: "
+                    f"{auth_path}"
+                )
+    elif direct_ssh_release:
+        auth_path = None
+        auth_source = None
+        auth_available = False
         missing.append(
-            "current real Codex auth source is not available; clean VM release "
-            f"gate requires live/auth-persistence auth: {auth_path}"
+            "clean VM direct-SSH release requires --clean-vm-remote-codex-home; "
+            "host auth upload is not release eligible"
         )
+    else:
+        auth_path, auth_source = _stock_replacement_auth_source()
+        auth_path = auth_path.expanduser().resolve()
+        auth_available = codex_native._codex_auth_json_has_available_credential(
+            auth_path
+        )
+        if not auth_available:
+            missing.append(
+                "current real Codex auth source is not available; clean VM release "
+                f"gate requires live/auth-persistence auth: {auth_path}"
+            )
     remote_channel: _OfficialStockCodexRemoteChannel | None = None
     if not missing:
         remote_channel = _official_stock_codex_remote_channel()
@@ -18155,6 +18378,42 @@ def run_stock_codex_compat_pkg_clean_vm_release_proof(
                 proofs=tuple(proofs),
                 blocked_step=step_name,
             )
+        if remote_codex_home is not None and step_name in {
+            "auth-onboarding",
+            "auth-persistence",
+            "live",
+        }:
+            auth_uploaded = (
+                step_proof.live_auth_uploaded
+                if step_name == "live"
+                else step_proof.auth_persistence_auth_uploaded
+                if step_name == "auth-persistence"
+                else step_proof.auth_onboarding_auth_uploaded
+            )
+            if auth_uploaded is not False:
+                return _blocked_stock_codex_compat_pkg_clean_vm_release_proof(
+                    tool_paths=tool_paths,
+                    missing_prerequisites=(
+                        "clean VM direct-SSH release step did not prove no-upload "
+                        f"auth handling: {step_name}",
+                    ),
+                    stock_codex_path=stock_codex_path,
+                    stock_codex_version=stock_codex_version,
+                    stock_codex_sha256=stock_codex_sha256,
+                    package_path=resolved_package_path,
+                    package_sha256=package_sha256,
+                    tart_name=clean_vm_tart_name,
+                    ssh_target=clean_vm_ssh_target,
+                    ssh_identity=resolved_identity,
+                    ssh_user=clean_vm_ssh_user,
+                    ssh_port=clean_vm_ssh_port,
+                    auth_path=auth_path,
+                    auth_source=auth_source,
+                    auth_available=auth_available,
+                    remote_channel=remote_channel,
+                    proofs=tuple(proofs),
+                    blocked_step=step_name,
+                )
         if clean_vm_start_tart and not step_proof.tart_started:
             return _blocked_stock_codex_compat_pkg_clean_vm_release_proof(
                 tool_paths=tool_paths,
@@ -18210,12 +18469,25 @@ def run_stock_codex_compat_pkg_clean_vm_release_proof(
             "auth-persistence",
             {
                 "auth_persistence": True,
-                "auth_persistence_auth_path": auth_path,
-                "auth_persistence_auth_source": auth_source,
+                **(
+                    {"auth_persistence_remote_codex_home": remote_codex_home}
+                    if remote_codex_home is not None
+                    else {
+                        "auth_persistence_auth_path": auth_path,
+                        "auth_persistence_auth_source": auth_source,
+                    }
+                ),
             },
         ),
         ("update-agent", {"update_agent": True}),
-        ("live", {"live_auth_path": auth_path, "live_auth_source": auth_source}),
+        (
+            "live",
+            (
+                {"live_remote_codex_home": remote_codex_home}
+                if remote_codex_home is not None
+                else {"live_auth_path": auth_path, "live_auth_source": auth_source}
+            ),
+        ),
     ):
         blocked = run_step(step_name, **mode_kwargs)
         if blocked is not None:
@@ -29373,8 +29645,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Remote absolute CODEX_HOME for "
-            "stock-codex-compat-pkg-nontart-clean-machine-auth-login and "
+            "stock-codex-compat-pkg-clean-vm-release, "
+            "stock-codex-compat-pkg-nontart-clean-machine-auth-login, and "
             "stock-codex-compat-pkg-nontart-clean-machine-auth-persistence. "
+            "For the release aggregate it selects no-upload auth persistence "
+            "and live steps on a direct SSH target. "
             "For auth-login it must be a clean target path under the remote home; "
             "for auth-persistence it must already contain auth.json from a "
             "user-completed login. The proofs do not upload host credentials and "
@@ -30343,6 +30618,7 @@ def main() -> int:
                 clean_vm_ssh_user=args.clean_vm_ssh_user,
                 clean_vm_ssh_port=args.clean_vm_ssh_port,
                 clean_vm_start_tart=args.clean_vm_start_tart,
+                remote_codex_home=args.clean_vm_remote_codex_home,
             )
         )
         return 0

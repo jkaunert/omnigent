@@ -138,6 +138,20 @@ def expected_stock_codex_version(evidence: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _command_option_value(
+    evidence: Mapping[str, Any],
+    option: str,
+) -> str | None:
+    command = evidence.get("command")
+    if not isinstance(command, list) or command.count(option) != 1:
+        return None
+    option_index = command.index(option)
+    if option_index + 1 >= len(command):
+        return None
+    value = command[option_index + 1]
+    return value if isinstance(value, str) and value else None
+
+
 def _check_step_statuses(evidence: Mapping[str, Any]) -> list[str]:
     failures: list[str] = []
     step_order = evidence.get("stepOrder")
@@ -197,6 +211,14 @@ def _check_step_details(evidence: Mapping[str, Any], *, target_mode: str | None)
             if detail.get(tart_key) is not expected_tart_value:
                 failures.append(f"stepDetails[{step_name}][{tart_key}]={detail.get(tart_key)!r}")
         if step_name in {"auth-onboarding", "auth-persistence", "live"}:
+            if (
+                target_mode == DIRECT_SSH_TARGET_MODE
+                and detail.get("authUploaded") is not False
+            ):
+                failures.append(
+                    "stepDetails"
+                    f"[{step_name}][authUploaded]={detail.get('authUploaded')!r}"
+                )
             selected_command_path = detail.get("selectedCommandPath")
             if not _truthy_string(selected_command_path):
                 failures.append(
@@ -317,6 +339,33 @@ def validate_release_evidence(
         failures.append("tartName is missing for tart target mode")
     if target_mode == DIRECT_SSH_TARGET_MODE and not evidence.get("sshTarget"):
         failures.append("sshTarget is missing for direct SSH target mode")
+    if target_mode == DIRECT_SSH_TARGET_MODE:
+        auth_source = evidence.get("authSource")
+        auth_path = evidence.get("authPath")
+        remote_prefix = "remote-existing-codex-home:"
+        if not isinstance(auth_source, str) or not auth_source.startswith(remote_prefix):
+            failures.append(f"authSource={auth_source!r}")
+        else:
+            remote_codex_home = auth_source.removeprefix(remote_prefix)
+            expected_auth_path = str(Path(remote_codex_home) / "auth.json")
+            if not Path(remote_codex_home).is_absolute():
+                failures.append(f"authSource={auth_source!r}")
+            if auth_path != expected_auth_path:
+                failures.append(f"authPath={auth_path!r}")
+            if (
+                _command_option_value(evidence, "--clean-vm-remote-codex-home")
+                != remote_codex_home
+            ):
+                failures.append(
+                    "command --clean-vm-remote-codex-home does not match authSource"
+                )
+        if (
+            _command_option_value(evidence, "--clean-vm-ssh-target")
+            != evidence.get("sshTarget")
+        ):
+            failures.append("command --clean-vm-ssh-target does not match sshTarget")
+        if evidence.get("authAvailable") is not True:
+            failures.append(f"authAvailable={evidence.get('authAvailable')!r}")
 
     failures.extend(_check_step_statuses(evidence))
     failures.extend(_check_step_details(evidence, target_mode=target_mode))

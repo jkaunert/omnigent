@@ -98,6 +98,7 @@ def _ready_evidence(package_sha256: str) -> dict[str, Any]:
                 "status": "replacement-ready",
                 "remoteStatus": "replacement-ready",
                 "hostStockCodexUploaded": False,
+                "authUploaded": False,
                 "tartStarted": True,
                 "tartStopped": True,
                 "selectedCommandPath": (
@@ -113,6 +114,7 @@ def _ready_evidence(package_sha256: str) -> dict[str, Any]:
                 "status": "replacement-ready",
                 "remoteStatus": "replacement-ready",
                 "hostStockCodexUploaded": False,
+                "authUploaded": True,
                 "tartStarted": True,
                 "tartStopped": True,
                 "selectedCommandPath": (
@@ -143,6 +145,7 @@ def _ready_evidence(package_sha256: str) -> dict[str, Any]:
                 "status": "replacement-ready",
                 "remoteStatus": "replacement-ready",
                 "hostStockCodexUploaded": False,
+                "authUploaded": True,
                 "tartStarted": True,
                 "tartStopped": True,
                 "selectedCommandPath": (
@@ -161,14 +164,27 @@ def _ready_evidence(package_sha256: str) -> dict[str, Any]:
 
 def _direct_ready_evidence(package_sha256: str) -> dict[str, Any]:
     evidence = _ready_evidence(package_sha256)
+    remote_codex_home = "/Users/omnigent-clean/.codex-omnigent-wrapper-auth"
     evidence["targetMode"] = "direct-ssh"
     evidence["tartName"] = None
     evidence["sshTarget"] = "omnigent-clean@10.0.0.10"
+    evidence["command"] = [
+        "python",
+        "scripts/prove_stock_codex_replacement.py",
+        "--clean-vm-ssh-target",
+        evidence["sshTarget"],
+        "--clean-vm-remote-codex-home",
+        remote_codex_home,
+    ]
     evidence["tartStartedCount"] = 0
     evidence["tartStoppedCount"] = 0
+    evidence["authPath"] = f"{remote_codex_home}/auth.json"
+    evidence["authSource"] = f"remote-existing-codex-home:{remote_codex_home}"
     for detail in evidence["stepDetails"].values():
         detail["tartStarted"] = False
         detail["tartStopped"] = False
+    for step_name in ("auth-onboarding", "auth-persistence", "live"):
+        evidence["stepDetails"][step_name]["authUploaded"] = False
     return evidence
 
 
@@ -360,6 +376,58 @@ def test_release_evidence_checker_rejects_direct_ssh_tart_activity(
     assert "tart counts differ: started=1 stopped=0" in failures
     assert "tartStartedCount=1" in failures
     assert "stepDetails[live][tartStarted]=True" in failures
+
+
+def test_release_evidence_checker_rejects_direct_ssh_uploaded_auth(
+    tmp_path: Path,
+) -> None:
+    pkg_path = _write_package(tmp_path / "compat.pkg")
+    evidence = _direct_ready_evidence(_sha256(pkg_path))
+    evidence["stepDetails"]["live"]["authUploaded"] = True
+
+    failures = _MOD.validate_release_evidence(
+        evidence,
+        pkg_path=pkg_path,
+        package_sha256=_sha256(pkg_path),
+    )
+
+    assert "stepDetails[live][authUploaded]=True" in failures
+
+
+def test_release_evidence_checker_rejects_direct_ssh_host_auth_source(
+    tmp_path: Path,
+) -> None:
+    pkg_path = _write_package(tmp_path / "compat.pkg")
+    evidence = _direct_ready_evidence(_sha256(pkg_path))
+    evidence["authPath"] = "/Users/operator/.codex/auth.json"
+    evidence["authSource"] = "stock-default-home"
+
+    failures = _MOD.validate_release_evidence(
+        evidence,
+        pkg_path=pkg_path,
+        package_sha256=_sha256(pkg_path),
+    )
+
+    assert "authSource='stock-default-home'" in failures
+
+
+def test_release_evidence_checker_rejects_mismatched_remote_auth_command(
+    tmp_path: Path,
+) -> None:
+    pkg_path = _write_package(tmp_path / "compat.pkg")
+    evidence = _direct_ready_evidence(_sha256(pkg_path))
+    option_index = evidence["command"].index("--clean-vm-remote-codex-home")
+    evidence["command"][option_index + 1] = "/Users/omnigent-clean/.codex-other"
+
+    failures = _MOD.validate_release_evidence(
+        evidence,
+        pkg_path=pkg_path,
+        package_sha256=_sha256(pkg_path),
+    )
+
+    assert (
+        "command --clean-vm-remote-codex-home does not match authSource" in failures
+    )
 
 
 def test_release_evidence_checker_rejects_host_stock_upload(tmp_path: Path) -> None:

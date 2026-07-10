@@ -41,6 +41,17 @@ def _write_file(path: Path, text: str = "") -> Path:
 def _release_ready_stdout(*, direct_ssh: bool = False) -> str:
     tart_name = "None" if direct_ssh else "omnigent-clean"
     ssh_target = "omnigent-clean@10.0.0.10" if direct_ssh else "None"
+    auth_home = (
+        "/Users/omnigent-clean/.codex-omnigent-wrapper-auth"
+        if direct_ssh
+        else "/tmp"
+    )
+    auth_source = (
+        f"remote-existing-codex-home:{auth_home}"
+        if direct_ssh
+        else "stock-default-home"
+    )
+    auth_uploaded = "false" if direct_ssh else "true"
     tart_count = 0 if direct_ssh else 5
     step_tart_value = "false" if direct_ssh else "true"
     return "\n".join(
@@ -58,6 +69,9 @@ def _release_ready_stdout(*, direct_ssh: bool = False) -> str:
             "stock_codex_compat_pkg_clean_vm_release_channel_policy=official-openai-github-release",
             f"stock_codex_compat_pkg_clean_vm_release_tart_name={tart_name}",
             f"stock_codex_compat_pkg_clean_vm_release_ssh_target={ssh_target}",
+            f"stock_codex_compat_pkg_clean_vm_release_auth_path={auth_home}/auth.json",
+            f"stock_codex_compat_pkg_clean_vm_release_auth_source={auth_source}",
+            "stock_codex_compat_pkg_clean_vm_release_auth_available=True",
             f"stock_codex_compat_pkg_clean_vm_release_tart_started_count={tart_count}",
             f"stock_codex_compat_pkg_clean_vm_release_tart_stopped_count={tart_count}",
             (
@@ -86,6 +100,7 @@ def _release_ready_stdout(*, direct_ssh: bool = False) -> str:
                 '"threadId":null,"scheduledAction":null},'
                 '"auth-onboarding":{"status":"replacement-ready",'
                 '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
+                '"authUploaded":false,'
                 f'"tartStarted":{step_tart_value},"tartStopped":{step_tart_value},'
                 '"selectedCommandPath":"/Users/admin/.local/bin/omnigent-stock-codex-compat",'
                 '"selectedCommandVersion":"codex-cli 0.143.0",'
@@ -93,6 +108,7 @@ def _release_ready_stdout(*, direct_ssh: bool = False) -> str:
                 '"threadId":null,"scheduledAction":null},'
                 '"auth-persistence":{"status":"replacement-ready",'
                 '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
+                f'"authUploaded":{auth_uploaded},'
                 f'"tartStarted":{step_tart_value},"tartStopped":{step_tart_value},'
                 '"selectedCommandPath":"/Users/admin/.local/bin/omnigent-stock-codex-compat",'
                 '"selectedCommandVersion":"codex-cli 0.143.0",'
@@ -107,6 +123,7 @@ def _release_ready_stdout(*, direct_ssh: bool = False) -> str:
                 '"threadId":null,"scheduledAction":"up-to-date"},'
                 '"live":{"status":"replacement-ready",'
                 '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
+                f'"authUploaded":{auth_uploaded},'
                 f'"tartStarted":{step_tart_value},"tartStopped":{step_tart_value},'
                 '"selectedCommandPath":"/Users/admin/.local/bin/omnigent-stock-codex-compat",'
                 '"selectedCommandVersion":"codex-cli 0.143.0",'
@@ -175,6 +192,8 @@ def test_release_candidate_wrapper_builds_direct_ssh_command(tmp_path: Path) -> 
             "~/stock/codex",
             "--clean-vm-ssh-target",
             "omnigent-clean@10.0.0.10",
+            "--clean-vm-remote-codex-home",
+            "/Users/omnigent-clean/.codex-omnigent-wrapper-auth",
             "--clean-vm-ssh-identity",
             "~/.ssh/id_release",
         ]
@@ -193,6 +212,8 @@ def test_release_candidate_wrapper_builds_direct_ssh_command(tmp_path: Path) -> 
         str(Path("~/stock/codex").expanduser()),
         "--clean-vm-ssh-target",
         "omnigent-clean@10.0.0.10",
+        "--clean-vm-remote-codex-home",
+        "/Users/omnigent-clean/.codex-omnigent-wrapper-auth",
         "--clean-vm-ssh-identity",
         str(Path("~/.ssh/id_release").expanduser()),
     )
@@ -223,6 +244,26 @@ def test_release_candidate_wrapper_uses_environment_defaults(
     assert command[command.index("--clean-vm-ssh-user") + 1] == "release-admin"
     assert command[command.index("--clean-vm-ssh-port") + 1] == "2222"
     assert "--clean-vm-start-tart" in command
+
+
+def test_release_candidate_wrapper_requires_remote_auth_home_for_direct_ssh(
+    tmp_path: Path,
+) -> None:
+    proof_script = _write_file(tmp_path / "scripts" / "prove.py")
+    pkg_path = _write_file(tmp_path / "artifacts" / "compat.pkg")
+    args = _MOD.parse_args(
+        [
+            "--proof-script",
+            str(proof_script),
+            "--pkg-path",
+            str(pkg_path),
+            "--clean-vm-ssh-target",
+            "omnigent-clean@10.0.0.10",
+        ]
+    )
+
+    with pytest.raises(SystemExit, match="requires --clean-vm-remote-codex-home"):
+        _MOD.build_command(args)
 
 
 def test_release_candidate_wrapper_rejects_ambiguous_vm_target(tmp_path: Path) -> None:
@@ -429,6 +470,8 @@ def test_release_candidate_wrapper_writes_direct_ssh_evidence(
             str(pkg_path),
             "--clean-vm-ssh-target",
             "omnigent-clean@10.0.0.10",
+            "--clean-vm-remote-codex-home",
+            "/Users/omnigent-clean/.codex-omnigent-wrapper-auth",
             "--evidence-output",
             str(evidence_path),
         ]
@@ -442,6 +485,10 @@ def test_release_candidate_wrapper_writes_direct_ssh_evidence(
     assert evidence["tartStartedCount"] == 0
     assert evidence["tartStoppedCount"] == 0
     assert evidence["releaseCriteriaFailures"] == []
+    assert evidence["authSource"].startswith("remote-existing-codex-home:")
+    assert evidence["authAvailable"] is True
+    assert evidence["stepDetails"]["auth-persistence"]["authUploaded"] is False
+    assert evidence["stepDetails"]["live"]["authUploaded"] is False
     assert evidence["stepDetails"]["live"]["tartStarted"] is False
     assert evidence["stepDetails"]["live"]["threadId"] == "thread-live"
 
@@ -471,6 +518,8 @@ def test_release_candidate_wrapper_rejects_direct_ssh_tart_activity(
             str(pkg_path),
             "--clean-vm-ssh-target",
             "omnigent-clean@10.0.0.10",
+            "--clean-vm-remote-codex-home",
+            "/Users/omnigent-clean/.codex-omnigent-wrapper-auth",
             "--evidence-output",
             str(evidence_path),
         ]
@@ -495,11 +544,13 @@ def test_release_candidate_wrapper_rejects_direct_ssh_step_tart_activity(
         (
             '"live":{"status":"replacement-ready",'
             '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
+            '"authUploaded":false,'
             '"tartStarted":false,"tartStopped":false,'
         ),
         (
             '"live":{"status":"replacement-ready",'
             '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
+            '"authUploaded":false,'
             '"tartStarted":true,"tartStopped":false,'
         ),
     )
@@ -517,6 +568,8 @@ def test_release_candidate_wrapper_rejects_direct_ssh_step_tart_activity(
             str(pkg_path),
             "--clean-vm-ssh-target",
             "omnigent-clean@10.0.0.10",
+            "--clean-vm-remote-codex-home",
+            "/Users/omnigent-clean/.codex-omnigent-wrapper-auth",
             "--evidence-output",
             str(evidence_path),
         ]
@@ -525,6 +578,54 @@ def test_release_candidate_wrapper_rejects_direct_ssh_step_tart_activity(
     assert exit_code == 1
     evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
     assert "stepDetails[live][tartStarted]=True" in evidence[
+        "releaseCriteriaFailures"
+    ]
+
+
+def test_release_candidate_wrapper_rejects_direct_ssh_uploaded_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    proof_script = _write_file(tmp_path / "scripts" / "prove.py")
+    pkg_path = _write_file(tmp_path / "artifacts" / "compat.pkg")
+    evidence_path = tmp_path / "artifacts" / "uploaded-auth-evidence.json"
+    stdout = _release_ready_stdout(direct_ssh=True).replace(
+        '"live":{"status":"replacement-ready",'
+        '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
+        '"authUploaded":false,',
+        '"live":{"status":"replacement-ready",'
+        '"remoteStatus":"replacement-ready","hostStockCodexUploaded":false,'
+        '"authUploaded":true,',
+    )
+
+    monkeypatch.setattr(
+        _MOD.subprocess,
+        "run",
+        lambda _command, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+        ),
+    )
+
+    exit_code = _MOD.main(
+        [
+            "--proof-script",
+            str(proof_script),
+            "--pkg-path",
+            str(pkg_path),
+            "--clean-vm-ssh-target",
+            "omnigent-clean@10.0.0.10",
+            "--clean-vm-remote-codex-home",
+            "/Users/omnigent-clean/.codex-omnigent-wrapper-auth",
+            "--evidence-output",
+            str(evidence_path),
+        ]
+    )
+
+    assert exit_code == 1
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert "stepDetails[live][authUploaded]=True" in evidence[
         "releaseCriteriaFailures"
     ]
 

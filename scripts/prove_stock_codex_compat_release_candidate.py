@@ -25,6 +25,7 @@ ENV_SSH_TARGET = "OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_TARGET"
 ENV_SSH_USER = "OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_USER"
 ENV_SSH_IDENTITY = "OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_IDENTITY"
 ENV_SSH_PORT = "OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_SSH_PORT"
+ENV_REMOTE_CODEX_HOME = "OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_REMOTE_CODEX_HOME"
 ENV_EVIDENCE_OUTPUT = "OMNIGENT_STOCK_CODEX_COMPAT_RELEASE_EVIDENCE_OUTPUT"
 
 EVIDENCE_FIELD_MAP = {
@@ -87,6 +88,20 @@ def expected_stock_codex_version(evidence: Mapping[str, Any]) -> str | None:
     if isinstance(cask_version, str) and cask_version.strip():
         return f"codex-cli {cask_version.strip()}"
     return None
+
+
+def _command_option_value(
+    evidence: Mapping[str, Any],
+    option: str,
+) -> str | None:
+    command = evidence.get("command")
+    if not isinstance(command, list) or command.count(option) != 1:
+        return None
+    option_index = command.index(option)
+    if option_index + 1 >= len(command):
+        return None
+    value = command[option_index + 1]
+    return value if isinstance(value, str) and value else None
 
 
 def _env_path(name: str) -> Path | None:
@@ -160,6 +175,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=_env_int(ENV_SSH_PORT, 22),
         help=f"SSH port. Defaults to {ENV_SSH_PORT}, then 22.",
     )
+    parser.add_argument(
+        "--clean-vm-remote-codex-home",
+        default=os.environ.get(ENV_REMOTE_CODEX_HOME),
+        help=(
+            "Existing authenticated CODEX_HOME on a direct SSH target. Required "
+            "for direct-SSH release evidence and defaults to "
+            f"{ENV_REMOTE_CODEX_HOME}. Credential contents are not uploaded."
+        ),
+    )
     start_group = parser.add_mutually_exclusive_group()
     start_group.add_argument(
         "--start-tart",
@@ -232,6 +256,19 @@ def build_command(args: argparse.Namespace) -> tuple[str, ...]:
             "release-candidate gate requires --clean-vm-tart-name or --clean-vm-ssh-target."
         )
 
+    remote_codex_home = args.clean_vm_remote_codex_home
+    if tart_name and remote_codex_home:
+        raise SystemExit(
+            "--clean-vm-remote-codex-home is supported only with "
+            "--clean-vm-ssh-target."
+        )
+    if ssh_target and not remote_codex_home:
+        raise SystemExit(
+            "direct-SSH release evidence requires --clean-vm-remote-codex-home."
+        )
+    if remote_codex_home and not Path(remote_codex_home).is_absolute():
+        raise SystemExit("--clean-vm-remote-codex-home must be absolute.")
+
     start_tart = bool(tart_name) if args.start_tart is None else bool(args.start_tart)
     if start_tart and not tart_name:
         raise SystemExit("--start-tart requires --clean-vm-tart-name.")
@@ -251,6 +288,7 @@ def build_command(args: argparse.Namespace) -> tuple[str, ...]:
         command.extend(["--clean-vm-ssh-user", args.clean_vm_ssh_user or "admin"])
     if ssh_target:
         command.extend(["--clean-vm-ssh-target", ssh_target])
+        command.extend(["--clean-vm-remote-codex-home", remote_codex_home])
         if args.clean_vm_ssh_user:
             command.extend(["--clean-vm-ssh-user", args.clean_vm_ssh_user])
     if args.clean_vm_ssh_identity is not None:
@@ -397,6 +435,32 @@ def release_criteria_failures(evidence: dict[str, Any]) -> list[str]:
             failures.append(f"tartStartedCount={tart_started!r}")
         if tart_stopped != 0:
             failures.append(f"tartStoppedCount={tart_stopped!r}")
+        auth_source = evidence.get("authSource")
+        auth_path = evidence.get("authPath")
+        remote_prefix = "remote-existing-codex-home:"
+        if not isinstance(auth_source, str) or not auth_source.startswith(remote_prefix):
+            failures.append(f"authSource={auth_source!r}")
+        else:
+            remote_codex_home = auth_source.removeprefix(remote_prefix)
+            expected_auth_path = str(Path(remote_codex_home) / "auth.json")
+            if not Path(remote_codex_home).is_absolute():
+                failures.append(f"authSource={auth_source!r}")
+            if auth_path != expected_auth_path:
+                failures.append(f"authPath={auth_path!r}")
+            if (
+                _command_option_value(evidence, "--clean-vm-remote-codex-home")
+                != remote_codex_home
+            ):
+                failures.append(
+                    "command --clean-vm-remote-codex-home does not match authSource"
+                )
+        if (
+            _command_option_value(evidence, "--clean-vm-ssh-target")
+            != evidence.get("sshTarget")
+        ):
+            failures.append("command --clean-vm-ssh-target does not match sshTarget")
+        if evidence.get("authAvailable") is not True:
+            failures.append(f"authAvailable={evidence.get('authAvailable')!r}")
 
     step_details = evidence.get("stepDetails")
     if not isinstance(step_details, dict):
@@ -417,6 +481,14 @@ def release_criteria_failures(evidence: dict[str, Any]) -> list[str]:
                         f"stepDetails[{step_name}][{tart_key}]={detail.get(tart_key)!r}"
                     )
             if step_name in {"auth-onboarding", "auth-persistence", "live"}:
+                if (
+                    target_mode == DIRECT_SSH_TARGET_MODE
+                    and detail.get("authUploaded") is not False
+                ):
+                    failures.append(
+                        "stepDetails"
+                        f"[{step_name}][authUploaded]={detail.get('authUploaded')!r}"
+                    )
                 selected_command_path = detail.get("selectedCommandPath")
                 if not _truthy_string(selected_command_path):
                     failures.append(

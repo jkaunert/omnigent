@@ -6560,6 +6560,224 @@ def test_stock_codex_compat_pkg_clean_vm_release_runs_steps_in_order(
     assert "stock_codex_compat_pkg_clean_vm_release_tart_stopped_count=5" in output
 
 
+def test_stock_codex_compat_pkg_clean_vm_release_direct_ssh_reuses_remote_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = _write_codex_binary(
+        tmp_path / "stock" / "codex",
+        version="codex-cli 0.143.0",
+    )
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+    identity = tmp_path / "id_ed25519"
+    identity.write_text("identity\n")
+    remote_codex_home = "/Users/omnigent-clean/.codex-omnigent-wrapper-auth"
+    remote_channel = _MOD._OfficialStockCodexRemoteChannel(
+        policy_name="official-openai-github-release",
+        cask_token="codex",
+        cask_tap="github-releases/latest",
+        cask_homepage="https://github.com/openai/codex",
+        cask_version="0.143.0",
+        cask_url=(
+            "https://github.com/openai/codex/releases/download/"
+            "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+        ),
+        cask_sha256="c" * 64,
+        selected_version="codex-cli 0.143.0",
+        archive_executable="codex-aarch64-apple-darwin",
+    )
+    calls: list[dict[str, object]] = []
+    upload_state = {"live": False}
+
+    monkeypatch.setattr(
+        _MOD.shutil,
+        "which",
+        lambda name, path=None: (
+            {"ssh": "/usr/bin/ssh", "scp": "/usr/bin/scp"}.get(name)
+            if path is None
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_probe_clean_vm_remote_codex_auth",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["ssh"],
+            0,
+            stdout="stock_codex_compat_remote_auth_probe=replacement-ready\n",
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_stock_replacement_auth_source",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("direct release must not resolve host auth")
+        ),
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_official_stock_codex_remote_channel",
+        lambda: remote_channel,
+    )
+
+    def fake_clean_vm_proof(
+        stock_codex_path: Path,
+        **kwargs: object,
+    ) -> _MOD.StockCodexCompatPkgCleanVmProof:
+        if kwargs.get("auth_onboarding"):
+            step_name = "auth-onboarding"
+        elif kwargs.get("auth_persistence"):
+            step_name = "auth-persistence"
+        elif kwargs.get("update_agent"):
+            step_name = "update-agent"
+        elif kwargs.get("live_remote_codex_home"):
+            step_name = "live"
+        else:
+            step_name = "remote-acquisition"
+        calls.append({"step": step_name, **kwargs})
+        return _MOD.StockCodexCompatPkgCleanVmProof(
+            status="replacement-ready",
+            missing_prerequisites=(),
+            tool_paths={"ssh": "/usr/bin/ssh", "scp": "/usr/bin/scp"},
+            stock_codex_path=stock_codex_path,
+            stock_codex_version="codex-cli 0.143.0",
+            stock_codex_sha256=_MOD.sha256_file(stock_codex_path),
+            package_path=package_path,
+            package_sha256=_MOD.sha256_file(package_path),
+            tart_name=None,
+            ssh_target="omnigent-clean@10.0.0.10",
+            ssh_identity=identity,
+            ssh_user=None,
+            ssh_port=22,
+            tart_ip=None,
+            remote_work_dir=f"/tmp/{step_name}",
+            remote_status="replacement-ready",
+            remote_output_preview=step_name,
+            tart_started=False,
+            tart_stopped=False,
+            proof_variant=f"official-remote-channel-{step_name}",
+            cask_version=remote_channel.cask_version,
+            cask_url=remote_channel.cask_url,
+            cask_sha256=remote_channel.cask_sha256,
+            channel_policy=remote_channel.policy_name,
+            host_stock_codex_uploaded=False,
+            auth_onboarding_auth_uploaded=(
+                False if step_name == "auth-onboarding" else None
+            ),
+            auth_persistence_auth_uploaded=(
+                False if step_name == "auth-persistence" else None
+            ),
+            auth_persistence_auth_source=(
+                f"remote-existing-codex-home:{remote_codex_home}"
+                if step_name == "auth-persistence"
+                else None
+            ),
+            live_auth_uploaded=(
+                upload_state["live"] if step_name == "live" else None
+            ),
+            live_auth_source=(
+                f"remote-existing-codex-home:{remote_codex_home}"
+                if step_name == "live"
+                else None
+            ),
+            live_codex_home=(
+                Path(remote_codex_home) if step_name == "live" else None
+            ),
+        )
+
+    monkeypatch.setattr(
+        _MOD,
+        "run_stock_codex_compat_pkg_clean_vm_proof",
+        fake_clean_vm_proof,
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_clean_vm_release_proof(
+        stock_codex,
+        package_path=package_path,
+        clean_vm_ssh_target="omnigent-clean@10.0.0.10",
+        clean_vm_tart_name=None,
+        clean_vm_ssh_identity=identity,
+        clean_vm_ssh_user=None,
+        clean_vm_ssh_port=22,
+        clean_vm_start_tart=False,
+        remote_codex_home=remote_codex_home,
+    )
+
+    assert proof.status == "replacement-ready"
+    assert proof.auth_path == Path(remote_codex_home) / "auth.json"
+    assert proof.auth_source == f"remote-existing-codex-home:{remote_codex_home}"
+    assert proof.auth_available is True
+    assert [call["step"] for call in calls] == list(_MOD.CLEAN_VM_RELEASE_STEP_ORDER)
+    assert calls[2]["auth_persistence_remote_codex_home"] == remote_codex_home
+    assert "auth_persistence_auth_path" not in calls[2]
+    assert calls[4]["live_remote_codex_home"] == remote_codex_home
+    assert "live_auth_path" not in calls[4]
+    assert proof.proofs[2].auth_persistence_auth_uploaded is False
+    assert proof.proofs[4].live_auth_uploaded is False
+
+    calls.clear()
+    upload_state["live"] = True
+    blocked = _MOD.run_stock_codex_compat_pkg_clean_vm_release_proof(
+        stock_codex,
+        package_path=package_path,
+        clean_vm_ssh_target="omnigent-clean@10.0.0.10",
+        clean_vm_tart_name=None,
+        clean_vm_ssh_identity=identity,
+        clean_vm_ssh_user=None,
+        clean_vm_ssh_port=22,
+        clean_vm_start_tart=False,
+        remote_codex_home=remote_codex_home,
+    )
+
+    assert blocked.status == "blocked"
+    assert blocked.blocked_step == "live"
+    assert any("no-upload auth handling" in item for item in blocked.missing_prerequisites)
+
+
+def test_stock_codex_compat_pkg_clean_vm_release_direct_ssh_requires_remote_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = _write_codex_binary(tmp_path / "stock" / "codex")
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+    monkeypatch.setattr(
+        _MOD.shutil,
+        "which",
+        lambda name, path=None: f"/usr/bin/{name}" if path is None else None,
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_stock_replacement_auth_source",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("direct release must not resolve host auth")
+        ),
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_clean_vm_release_proof(
+        stock_codex,
+        package_path=package_path,
+        clean_vm_ssh_target="omnigent-clean@10.0.0.10",
+        clean_vm_tart_name=None,
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_user=None,
+        clean_vm_ssh_port=22,
+        clean_vm_start_tart=False,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.auth_source is None
+    assert proof.auth_available is False
+    assert any(
+        "host auth upload is not release eligible" in item
+        for item in proof.missing_prerequisites
+    )
+
+
 def test_stock_codex_compat_pkg_clean_vm_release_fails_fast_on_blocked_step(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6659,10 +6877,10 @@ def test_stock_codex_compat_pkg_clean_vm_release_fails_fast_on_blocked_step(
     proof = _MOD.run_stock_codex_compat_pkg_clean_vm_release_proof(
         stock_codex,
         package_path=package_path,
-        clean_vm_ssh_target="admin@192.0.2.10",
-        clean_vm_tart_name=None,
+        clean_vm_ssh_target=None,
+        clean_vm_tart_name="omnigent-clean",
         clean_vm_ssh_identity=None,
-        clean_vm_ssh_user=None,
+        clean_vm_ssh_user="admin",
         clean_vm_ssh_port=22,
         clean_vm_start_tart=False,
     )
@@ -7441,7 +7659,7 @@ def test_stock_codex_compat_pkg_clean_vm_auth_persistence_tracks_auth_source(
     uploaded_channel: dict[str, object] = {}
     remote_commands: list[str] = []
     remote_existing_codex_home = "/Users/admin/.codex-omnigent-existing-auth"
-    auth_source_state = {"uploaded": True}
+    auth_source_state = {"uploaded": True, "wrong_home": False}
 
     def fake_which(name: str, path: str | None = None) -> str | None:
         if path is not None:
@@ -7493,6 +7711,8 @@ def test_stock_codex_compat_pkg_clean_vm_auth_persistence_tracks_auth_source(
                 "/Users/admin/.omnigent-stock-codex-compat-clean-vm-remote-"
                 "acquisition-proof/auth-onboarding-codex-home"
                 if auth_source_state["uploaded"]
+                else "/Users/admin/.codex-wrong-home"
+                if auth_source_state["wrong_home"]
                 else remote_existing_codex_home
             )
             launcher_path = "/Users/admin/.local/bin/omnigent-stock-codex-compat"
@@ -7659,6 +7879,25 @@ def test_stock_codex_compat_pkg_clean_vm_auth_persistence_tracks_auth_source(
     assert bash_commands[0].endswith(
         f"'' auth-persistence-existing {remote_existing_codex_home}"
     )
+
+    auth_source_state["wrong_home"] = True
+    proof = _MOD.run_stock_codex_compat_pkg_clean_vm_proof(
+        stock_codex,
+        package_path=package_path,
+        clean_vm_ssh_target="admin@192.0.2.10",
+        clean_vm_tart_name=None,
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_user=None,
+        clean_vm_ssh_port=22,
+        clean_vm_start_tart=False,
+        remote_channel=remote_channel,
+        auth_persistence=True,
+        auth_persistence_remote_codex_home=remote_existing_codex_home,
+    )
+
+    assert proof.status == "blocked"
+    assert proof.remote_status == "auth-persistence-codex-home-mismatch"
+    assert any("wrong remote CODEX_HOME" in item for item in proof.missing_prerequisites)
 
 
 def test_stock_codex_compat_pkg_clean_vm_auth_persistence_blocks_upload_state_mismatch(
@@ -7998,6 +8237,153 @@ def test_stock_codex_compat_pkg_clean_vm_live_uploads_auth_but_not_stock_binary(
     assert len(bash_commands) == 1
     assert bash_commands[0].endswith("/auth.json")
     assert str(stock_codex) not in bash_commands[0]
+
+
+def test_stock_codex_compat_pkg_clean_vm_live_uses_remote_existing_auth_without_upload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stock_codex = _write_codex_binary(
+        tmp_path / "stock" / "codex",
+        version="codex-cli 0.142.5",
+    )
+    package_path = tmp_path / "artifacts" / "omnigent-stock-codex-compat.pkg"
+    package_path.parent.mkdir()
+    package_path.write_bytes(b"signed-notarized-pkg")
+    remote_codex_home = "/Users/omnigent-clean/.codex-omnigent-wrapper-auth"
+    remote_channel = _MOD._OfficialStockCodexRemoteChannel(
+        policy_name="official-openai-github-release",
+        cask_token="codex",
+        cask_tap="homebrew/cask",
+        cask_homepage="https://github.com/openai/codex",
+        cask_version="0.143.0",
+        cask_url=(
+            "https://github.com/openai/codex/releases/download/"
+            "rust-v0.143.0/codex-aarch64-apple-darwin.tar.gz"
+        ),
+        cask_sha256="d" * 64,
+        selected_version="codex-cli 0.143.0",
+        archive_executable="codex-aarch64-apple-darwin",
+    )
+    uploads: list[tuple[Path, str]] = []
+    remote_commands: list[str] = []
+
+    monkeypatch.setattr(
+        _MOD.shutil,
+        "which",
+        lambda name, path=None: (
+            {"ssh": "/usr/bin/ssh", "scp": "/usr/bin/scp"}.get(name)
+            if path is None
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        _MOD,
+        "_wait_for_clean_vm_ssh",
+        lambda **_kwargs: subprocess.CompletedProcess(
+            ["ssh"], 0, stdout="", stderr=""
+        ),
+    )
+
+    def fake_copy_clean_vm_file(
+        *,
+        source: Path,
+        remote_destination: str,
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        uploads.append((source, remote_destination))
+        return subprocess.CompletedProcess(["scp"], 0, stdout="", stderr="")
+
+    def fake_run_clean_vm_ssh_command(
+        remote_command: str,
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        remote_commands.append(remote_command)
+        if remote_command.startswith("/usr/bin/mktemp"):
+            return subprocess.CompletedProcess(
+                ["ssh"],
+                0,
+                stdout="/tmp/omnigent-stock-codex-compat-clean-vm-live.test\n",
+                stderr="",
+            )
+        if remote_command.startswith("chmod "):
+            return subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr="")
+        if remote_command.startswith("/bin/bash "):
+            live_evidence = {
+                "codexHome": remote_codex_home,
+                "commandSurface": "installed-compat-launcher",
+                "eventCount": 7,
+                "firstAgentMessagePreview": (
+                    "Routing: orchestrator-led\n\nSTOCK_CODEX_COMPAT_LIVE_OK"
+                ),
+                "launcherPath": (
+                    "/Users/omnigent-clean/.local/bin/"
+                    "omnigent-stock-codex-compat"
+                ),
+                "selectedCommandPath": (
+                    "/Users/omnigent-clean/.local/bin/"
+                    "omnigent-stock-codex-compat"
+                ),
+                "selectedCommandVersion": "codex-cli 0.143.0",
+                "threadId": "019f-live-existing-proof",
+                "workingDirectory": (
+                    "/Users/omnigent-clean/.local/omnigent/"
+                    "stock-codex-compat/runtime"
+                ),
+            }
+            return subprocess.CompletedProcess(
+                ["ssh"],
+                0,
+                stdout=(
+                    json.dumps(live_evidence, sort_keys=True)
+                    + "\nstock_codex_compat_pkg_clean_vm_live_status="
+                    "replacement-ready\n"
+                ),
+                stderr="",
+            )
+        if remote_command.startswith("rm -rf "):
+            return subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected remote command: {remote_command}")
+
+    monkeypatch.setattr(_MOD, "_copy_clean_vm_file", fake_copy_clean_vm_file)
+    monkeypatch.setattr(
+        _MOD,
+        "_run_clean_vm_ssh_command",
+        fake_run_clean_vm_ssh_command,
+    )
+
+    proof = _MOD.run_stock_codex_compat_pkg_clean_vm_proof(
+        stock_codex,
+        package_path=package_path,
+        clean_vm_ssh_target="omnigent-clean@10.0.0.10",
+        clean_vm_tart_name=None,
+        clean_vm_ssh_identity=None,
+        clean_vm_ssh_user=None,
+        clean_vm_ssh_port=22,
+        clean_vm_start_tart=False,
+        remote_channel=remote_channel,
+        live_remote_codex_home=remote_codex_home,
+    )
+
+    assert proof.status == "replacement-ready"
+    assert proof.proof_variant == "official-remote-channel-live-model-existing"
+    assert proof.live_auth_path == Path(remote_codex_home) / "auth.json"
+    assert proof.live_auth_source == f"remote-existing-codex-home:{remote_codex_home}"
+    assert proof.live_auth_uploaded is False
+    assert proof.live_model_turn_requested is True
+    assert proof.live_codex_home == Path(remote_codex_home)
+    assert [source.name for source, _destination in uploads] == [
+        "omnigent-stock-codex-compat.pkg",
+        "channel.json",
+        "clean_vm_proof.sh",
+    ]
+    bash_commands = [
+        command for command in remote_commands if command.startswith("/bin/bash ")
+    ]
+    assert len(bash_commands) == 1
+    assert bash_commands[0].endswith(
+        f"'' live-existing {remote_codex_home}"
+    )
 
 
 def test_clean_vm_live_output_evidence_requires_installed_launcher_surface() -> None:

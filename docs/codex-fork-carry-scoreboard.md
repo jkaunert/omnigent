@@ -331,14 +331,15 @@ The next gates should split by product mode:
   real `/Library`, bootstraps the user runtime, provisions stock Codex from the
   official OpenAI GitHub release channel inside the VM without uploading the
   host stock binary, classifies clean auth, rolls back user and package state,
-  and forgets the package receipt. The live clean-VM launcher gate is also green:
-  `stock-codex-compat-pkg-clean-vm-live` uploads only proof-scoped stock auth,
-  runs the installed `~/.local/bin/omnigent-stock-codex-compat` launcher with
-  the in-VM provisioned stock Codex, records parsed selected-launcher,
-  `CODEX_HOME`, working-directory, and thread
-  `019f3fd9-093f-7550-8474-3c67eb5fe6c9` evidence, and preserves the deterministic
-  `Routing: orchestrator-led` route evidence before
-  `STOCK_CODEX_COMPAT_LIVE_OK`. The clean-VM update-agent gate is green on the
+  and forgets the package receipt. The live clean-VM launcher gate is also green.
+  It supports the historical proof-scoped auth upload used for Tart rehearsal
+  and an existing remote `CODEX_HOME` mode for direct release evidence. The
+  direct mode uploads no credential contents, runs the installed
+  `~/.local/bin/omnigent-stock-codex-compat` launcher with the target-provisioned
+  stock Codex, records parsed launcher, `CODEX_HOME`, working-directory, and
+  thread evidence, and preserves deterministic `Routing: orchestrator-led`
+  evidence before `STOCK_CODEX_COMPAT_LIVE_OK`. The clean-VM update-agent gate is
+  green on the
   fixed signed/notarized package SHA-256
   `d0185a22380036b97703144f91bbcb701806c3638ebcbe98b2aa38df43baf581`: it
   writes the user LaunchAgent, loads/kickstarts/unloads it through launchd,
@@ -360,17 +361,21 @@ The next gates should split by product mode:
   can also emit a JSON release evidence artifact with package/channel hashes,
   per-step statuses, Tart start/stop counts, host-stock-upload status, and
   live/auth thread IDs so release review does not depend on terminal log
-  scraping. The current local evidence artifact
-  `omnigent-stock-codex-compat-github-latest.release-evidence.json` is green on
-  package SHA-256
-  `cfff83af6fd1dfc59ea1ed4928befe53929462eabd096e5c54d6171379be7ccc`,
-  official channel `0.143.0`, Tart `5/5`, and
-  `hostStockCodexUploadedAny=False`. The offline verifier
+  scraping. The current canonical direct-target artifact
+  `omnigent-stock-codex-compat-github-latest.direct-clean-mac.release-evidence.json`
+  is green on package SHA-256
+  `2bff223bc5ec67282a8b631bd708d5f354db06a0ab6626867f5ff84eb341e237`,
+  official channel `0.144.1`, zero Tart starts/stops,
+  `hostStockCodexUploadedAny=False`, and remote auth home
+  `/Users/omnigent-clean/.codex-omnigent-wrapper-auth`. Auth-onboarding,
+  auth-persistence, and live all record `authUploaded=False`; the latter two
+  completed real model threads through the installed wrapper. The offline verifier
   `scripts/check_stock_codex_compat_release_evidence.py` now re-hashes the
   archived package and fails closed on evidence schema drift, package hash
   mismatch, non-official channel evidence, non-ready steps, Tart count
-  mismatch, stale or missing clean-target selected stock-Codex versions, or
-  host stock-Codex upload. The direct-SSH clean-machine preflight runs that
+  mismatch, stale or missing clean-target selected stock-Codex versions, host
+  stock-Codex upload, direct-target host-auth selection, or any direct-target
+  credential upload. The direct-SSH clean-machine preflight runs that
   verifier before SSH readiness, upload, or remote inspection, so stale release
   evidence cannot promote a package candidate onto an operator-supplied target.
   The direct-SSH clean-machine install/provisioning gate is also green:
@@ -390,8 +395,8 @@ The next gates should split by product mode:
   `host_stock_codex_uploaded=False`, `auth_uploaded=False`,
   `command_executed=False`, and no Tart use. A follow-up preflight again proves
   no package/user/LaunchAgent residue.
-  The direct-SSH operator-assisted auth-login gate is now implemented as the
-  no-host-auth-upload preparation path:
+  The direct-SSH operator-assisted auth-login gate is green as the no-host-auth-
+  upload preparation path:
   `stock-codex-compat-pkg-nontart-clean-machine-auth-login` accepts
   `--clean-vm-remote-codex-home`, refuses Tart and uploaded credentials, requires
   that remote auth home to be clean and under the remote user's home, runs
@@ -399,17 +404,17 @@ The next gates should split by product mode:
   and provisions the signed package, executes the installed-launcher `login`
   command with that remote `CODEX_HOME`, waits for operator-completed auth within
   `--live-proof-timeout`, verifies the resulting `auth.json`, then preserves the
-  auth home while cleaning Omnigent/package state.
-  The no-host-auth-upload post-login verifier is now implemented but live-blocked
-  pending an operator-created remote auth home:
+  auth home while cleaning Omnigent/package state. The wrapper-created
+  `/Users/omnigent-clean/.codex-omnigent-wrapper-auth/auth.json` is mode `0600`.
+  The no-host-auth-upload post-login verifier is also green:
   `stock-codex-compat-pkg-nontart-clean-machine-auth-persistence` accepts
   `--clean-vm-remote-codex-home`, refuses Tart and uploaded credentials, runs
   release-evidence verification plus direct clean-machine preflight, and then
-  uses a preexisting remote `auth.json` for the installed-launcher live turn
-  while preserving that auth home and cleaning Omnigent/package state. The
-  current `omnigent-clean@10.0.0.10` target has no such authenticated remote
-  `CODEX_HOME` yet, so the next live step is to run the auth-login gate and
-  complete the target-side login.
+  uses that preexisting remote `auth.json` in place for the installed-launcher
+  live turn while preserving the auth home and cleaning Omnigent/package state.
+  The canonical five-step release aggregate now consumes the same remote home,
+  and fails closed unless onboarding, persistence, and live all prove
+  `authUploaded=False`.
   The production stock-Codex channel policy gate is green for official-source
   validation, clean-cache reuse before network access, fail-closed non-official
   URL rejection, resolver selection, explicit-download remote acquisition, SHA
