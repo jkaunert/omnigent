@@ -146,7 +146,7 @@ def test_gh_release_payload_normalizes_draft_release_view(
                 'untagged-0123456789abcdef","body":"notes",'
                 '"assets":[{"name":"artifact.pkg","size":12,'
                 '"url":"https://github.com/jkaunert/omnigent/releases/download/'
-                'stock-codex-compat-v0.1.0/artifact.pkg"}]}\n'
+                'untagged-0123456789abcdef/artifact.pkg"}]}\n'
             ),
             stderr="",
         )
@@ -185,7 +185,7 @@ def test_gh_release_payload_normalizes_draft_release_view(
                 "name": "artifact.pkg",
                 "browser_download_url": _MOD._release_asset_url(
                     _REPOSITORY,
-                    _TAG,
+                    "untagged-0123456789abcdef",
                     "artifact.pkg",
                 ),
                 "size": 12,
@@ -218,7 +218,7 @@ def test_verify_release_payload_requires_record_digest_and_exact_assets(
                     "name": artifact.name,
                     "browser_download_url": _MOD._release_asset_url(
                         _REPOSITORY,
-                        _TAG,
+                        "untagged-0123456789abcdef",
                         artifact.name,
                     ),
                     "size": artifact.stat().st_size,
@@ -229,7 +229,7 @@ def test_verify_release_payload_requires_record_digest_and_exact_assets(
                 "name": _MOD.PUBLICATION_RECORD_FILENAME,
                 "browser_download_url": _MOD._release_asset_url(
                     _REPOSITORY,
-                    _TAG,
+                    "untagged-0123456789abcdef",
                     _MOD.PUBLICATION_RECORD_FILENAME,
                 ),
                 "size": record.stat().st_size,
@@ -249,6 +249,26 @@ def test_verify_release_payload_requires_record_digest_and_exact_assets(
         *(path.name for path in artifact_paths),
         _MOD.PUBLICATION_RECORD_FILENAME,
     }
+
+    payload_assets = payload["assets"]
+    assert isinstance(payload_assets, list)
+    first_asset = payload_assets[0]
+    assert isinstance(first_asset, dict)
+    original_asset_url = first_asset["browser_download_url"]
+    first_asset["browser_download_url"] = str(original_asset_url).replace(
+        "untagged-0123456789abcdef",
+        "untagged-wrong",
+    )
+    with pytest.raises(_MOD.PublicationError, match="asset URL is wrong"):
+        _MOD._verify_release_payload(
+            payload,
+            repository=_REPOSITORY,
+            tag=_TAG,
+            publication=publication,
+            publication_record_sha256=record_sha256,
+            expect_draft=True,
+        )
+    first_asset["browser_download_url"] = original_asset_url
 
     payload["html_url"] = "https://github.com/other/repository/releases/tag/untagged-bad"
     with pytest.raises(_MOD.PublicationError, match="draft release URL"):

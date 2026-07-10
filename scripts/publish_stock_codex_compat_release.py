@@ -349,11 +349,14 @@ def _verify_release_payload(
     release_url = payload.get("html_url")
     expected_release_url = _release_url(repository, tag)
     draft_url_prefix = f"https://github.com/{repository}/releases/tag/untagged-"
+    asset_release_ref = tag
     if expect_draft:
         if release_url != expected_release_url and (
             not isinstance(release_url, str) or not release_url.startswith(draft_url_prefix)
         ):
             raise PublicationError("GitHub draft release URL is invalid")
+        if isinstance(release_url, str) and release_url.startswith(draft_url_prefix):
+            asset_release_ref = release_url.rsplit("/", 1)[-1]
     elif release_url != expected_release_url:
         raise PublicationError("GitHub release URL does not match publication record")
     body = payload.get("body")
@@ -383,7 +386,7 @@ def _verify_release_payload(
             f"GitHub release assets differ: {sorted(observed)} != {sorted(expected)}"
         )
     for name, (_digest, expected_size) in expected.items():
-        expected_url = _release_asset_url(repository, tag, name)
+        expected_url = _release_asset_url(repository, asset_release_ref, name)
         if observed[name] != expected_url:
             raise PublicationError(f"GitHub release asset URL is wrong: {name}")
         if expected_size >= 0 and observed_sizes[name] != expected_size:
