@@ -44,6 +44,14 @@ class Driver(Protocol):
         force so the call should be blocked (``tool_call_denied``); otherwise
         the call is dispatched and answered (``tool_calls`` populated)."""
 
+    async def run_mcp_tool_turn(self) -> TurnResult:
+        """Provoke an Omnigent MCP relay tool call.
+
+        Native transports use this to distinguish the Omnigent MCP bridge from
+        the vendor's own shell/tool surface. Unsupported transports return an
+        unmeasured result so the probe SKIPs.
+        """
+
     async def run_policy_turn(self, *, action: str) -> TurnResult:
         """Provoke a tool call under an explicit tool-call policy *action*
         (``"allow"`` or ``"ask"``), for the policy_allow / policy_ask probes.

@@ -284,6 +284,9 @@ class SdkInprocDriver:
             timeout=150.0,
         )
 
+    async def run_mcp_tool_turn(self) -> TurnResult:
+        return TurnResult(error="Omnigent MCP relay is not observable on sdk-inproc")
+
     async def run_policy_turn(self, *, action: str) -> TurnResult:
         """Return unmeasured because wrap-direct cannot observe ALLOW or ASK."""
         return TurnResult()

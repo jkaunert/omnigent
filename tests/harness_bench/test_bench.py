@@ -234,7 +234,9 @@ async def test_offline_render_produces_matrix() -> None:
     matrix = await run_bench(_OFFICIAL, live=False)
     assert not matrix.has_drift
     assert all(
-        cell.observed is Verdict.SKIPPED for report in matrix.reports for cell in report.cells
+        cell.observed in {Verdict.SKIPPED, Verdict.NOT_APPLICABLE}
+        for report in matrix.reports
+        for cell in report.cells
     )
     md = render_markdown(matrix)
     assert "Harness capability matrix" in md
@@ -635,7 +637,7 @@ async def test_provisioning_failure_skips_and_tears_down(monkeypatch: pytest.Mon
     report = await run_harness(profile, databricks_profile="oss", live=True)
 
     assert report.skipped_reason is not None and "provisioning failed" in report.skipped_reason
-    assert all(c.observed is Verdict.SKIPPED for c in report.cells)
+    assert all(c.observed in {Verdict.SKIPPED, Verdict.NOT_APPLICABLE} for c in report.cells)
     assert torn_down == [True], "provisioning-failure path must tear down the driver"
 
 

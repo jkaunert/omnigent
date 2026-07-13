@@ -16,6 +16,7 @@ import pytest
 
 from tests.harness_bench.driver import TurnResult
 from tests.harness_bench.native_tui_driver import NativeTuiDriver, native_vendor
+from tests.harness_bench.probes.omnigent_mcp import OmnigentMcpProbe
 from tests.harness_bench.probes.policy_allow import PolicyAllowProbe
 from tests.harness_bench.probes.policy_ask import PolicyAskProbe
 from tests.harness_bench.probes.policy_deny import PolicyDenyProbe
@@ -302,6 +303,69 @@ def test_tool_turn_skips_vendor_without_tool_mapping() -> None:
     assert not result.tool_calls
 
 
+def test_mcp_tool_turn_observes_prefixed_omnigent_tool() -> None:
+    client = _FakeClient(items=[_function_call_item("mcp__omnigent__sys_session_list")])
+    driver = _driver_with_fake("claude-native", client)
+
+    result = driver._drive_mcp_tool_turn()
+
+    assert result.completed
+    assert [call["name"] for call in result.tool_calls] == ["mcp__omnigent__sys_session_list"]
+    assert "mcp__omnigent__sys_session_list" in str(client.posted_events[-1])
+
+
+def test_mcp_tool_turn_rejects_unrelated_suffix_match() -> None:
+    client = _FakeClient(items=[_function_call_item("other_sys_session_list")])
+    driver = _driver_with_fake("claude-native", client)
+
+    result = driver._drive_mcp_tool_turn(timeout=0.01)
+
+    assert not result.completed
+    assert [call["name"] for call in result.tool_calls] == ["other_sys_session_list"]
+
+
+def test_mcp_tool_turn_retries_when_first_prompt_has_no_call() -> None:
+    client = _FakeClient(items=[])
+    driver = _driver_with_fake("claude-native", client)
+
+    result = driver._drive_mcp_tool_turn(timeout=0.01)
+
+    assert not result.completed
+    messages = [event for event in client.posted_events if event.get("type") == "message"]
+    assert len(messages) == 2
+    assert "empty argument object" in str(messages[-1])
+
+
+def test_mcp_tool_turn_advances_baseline_after_wrong_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient()
+    driver = _driver_with_fake("claude-native", client)
+    baselines: list[int] = []
+
+    def _poll(baseline: int, result: TurnResult, timeout: float) -> None:
+        baselines.append(baseline)
+        name = "Bash" if len(baselines) == 1 else "mcp__omnigent__sys_session_list"
+        result.tool_calls.append({"name": name})
+
+    monkeypatch.setattr(driver, "_poll_new_tool_calls", _poll)
+
+    result = driver._drive_mcp_tool_turn(timeout=0.01)
+
+    assert result.completed
+    assert baselines == [0, 1]
+
+
+def test_mcp_tool_turn_skips_non_mcp_native_relay() -> None:
+    client = _FakeClient()
+    driver = _driver_with_fake("pi-native", client)
+
+    result = driver._drive_mcp_tool_turn()
+
+    assert result.error and "no Omnigent MCP bridge" in result.error
+    assert client.posted_events == []
+
+
 async def test_probes_read_native_tool_result_as_supported() -> None:
     """The transport-agnostic probes turn the native TurnResults into verdicts."""
     profile = BenchProfile(
@@ -329,6 +393,12 @@ async def test_probes_read_native_tool_result_as_supported() -> None:
                 )
             return TurnResult(elicitation_requested=True)
 
+        async def run_mcp_tool_turn(self) -> TurnResult:
+            return TurnResult(
+                completed=True,
+                tool_calls=[{"name": "mcp__omnigent__sys_session_list"}],
+            )
+
     tool_result = await ToolCallingProbe().run(_Driver(), profile)
     assert tool_result.verdict is Verdict.SUPPORTED
     deny_result = await PolicyDenyProbe().run(_Driver(), profile)
@@ -337,6 +407,8 @@ async def test_probes_read_native_tool_result_as_supported() -> None:
     assert allow_result.verdict is Verdict.SUPPORTED
     ask_result = await PolicyAskProbe().run(_Driver(), profile)
     assert ask_result.verdict is Verdict.SUPPORTED
+    mcp_result = await OmnigentMcpProbe().run(_Driver(), profile)
+    assert mcp_result.verdict is Verdict.SUPPORTED
 
 
 def test_format_matches_server_wire_name() -> None:

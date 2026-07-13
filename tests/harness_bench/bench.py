@@ -185,9 +185,9 @@ async def run_harness(
     :param probes: Probes to run; defaults to :data:`ALL_PROBES`.
     :param databricks_profile: Gateway profile for live turns. Required
         for ``live=True``; its absence skips the whole harness.
-    :param live: When ``False``, produce a declared-only report (every
-        cell ``SKIPPED`` with an "offline" note) without spawning
-        anything — used for a fast ``--list``/dry render.
+    :param live: When ``False``, produce a declared-only report (applicable
+        cells ``SKIPPED`` with an "offline" note; others ``NOT_APPLICABLE``)
+        without spawning anything — used for a fast ``--list``/dry render.
     :param transport: ``--transport`` override; wins over the profile's
         family default (see :func:`resolve_driver_class`).
     :param fast: ``--fast`` — downgrade the SDK family to sdk-inproc (skip the

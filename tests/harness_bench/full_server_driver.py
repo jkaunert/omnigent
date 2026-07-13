@@ -113,6 +113,9 @@ class FullServerDriver:
     async def run_tool_turn(self, *, deny: bool) -> TurnResult:
         return await asyncio.to_thread(lambda: self.tool_probe_turn(deny=deny))
 
+    async def run_mcp_tool_turn(self) -> TurnResult:
+        return TurnResult(error="Omnigent MCP relay is a native-harness dimension")
+
     async def run_policy_turn(self, *, action: str) -> TurnResult:
         return await asyncio.to_thread(lambda: self.policy_probe_turn(action=action))
 

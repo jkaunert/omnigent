@@ -34,6 +34,7 @@ from tests._helpers.live_server import find_free_port
 from tests.e2e._harness_probes import cli_unavailable_reason
 from tests.harness_bench.driver import ProvisioningError, TurnResult, fill_snapshot_cost
 from tests.harness_bench.full_server import spawn_omnigent_server
+from tests.harness_bench.mcp_tools import is_target_omnigent_mcp_tool
 from tests.harness_bench.profile import BenchProfile
 from tests.harness_bench.runtime_env import (
     BenchRuntimeEnv,
@@ -137,6 +138,28 @@ _NATIVE_TOOL_PROVOCATION: dict[str, tuple[str, str]] = {
     "kimi-native": ("Bash", "Use the Bash tool to run this exact command: echo omnigent-bench-ok"),
 }
 
+_NATIVE_OMNIGENT_MCP_HARNESSES = frozenset(
+    {
+        "antigravity-native",
+        "claude-native",
+        "codex-native",
+        "cursor-native",
+        "goose-native",
+        "hermes-native",
+        "kiro-native",
+        "qwen-native",
+    }
+)
+_MCP_TOOL_PROMPT = (
+    "You must call the omnigent MCP tool mcp__omnigent__sys_session_list exactly once. "
+    "It may be displayed as sys_session_list by your client. Do not use a shell or any "
+    "other tool. After the tool returns, reply with done."
+)
+_MCP_TOOL_RETRY_PROMPT = (
+    "Call the available tool named sys_session_list now with an empty argument object. "
+    "This is required; do not answer from memory and do not use any other tool."
+)
+
 
 def native_vendor(harness: str) -> NativeVendor | None:
     """Derive the :class:`NativeVendor` for *harness* from its capabilities.
@@ -223,6 +246,9 @@ class NativeTuiDriver:
 
     async def run_tool_turn(self, *, deny: bool) -> TurnResult:
         return await asyncio.to_thread(self._drive_tool_turn, deny=deny)
+
+    async def run_mcp_tool_turn(self) -> TurnResult:
+        return await asyncio.to_thread(self._drive_mcp_tool_turn)
 
     async def run_policy_turn(self, *, action: str) -> TurnResult:
         return await asyncio.to_thread(self._drive_policy_turn, action=action)
@@ -563,6 +589,28 @@ class NativeTuiDriver:
             self._delete_tool_policy(policy_id)
 
         result.completed = _OUTPUT_DONE_EVENT in events or bool(result.tool_calls)
+        return result
+
+    def _drive_mcp_tool_turn(self, *, timeout: float = _TOOL_TURN_TIMEOUT_S) -> TurnResult:
+        """Call the read-only Omnigent MCP relay tool for this native harness."""
+        assert self._vendor is not None
+        result = TurnResult()
+        if self._vendor.harness not in _NATIVE_OMNIGENT_MCP_HARNESSES:
+            result.error = (
+                f"{self._vendor.harness!r} has no Omnigent MCP bridge; "
+                "its relayed tools use another native mechanism"
+            )
+            return result
+
+        baseline = self._tool_item_count()
+        for prompt in (_MCP_TOOL_PROMPT, _MCP_TOOL_RETRY_PROMPT):
+            calls_before = len(result.tool_calls)
+            self._post_message(prompt)
+            self._poll_new_tool_calls(baseline, result, timeout=timeout)
+            if any(is_target_omnigent_mcp_tool(call.get("name")) for call in result.tool_calls):
+                result.completed = True
+                break
+            baseline += len(result.tool_calls) - calls_before
         return result
 
     def _drive_policy_turn(self, *, action: str) -> TurnResult:

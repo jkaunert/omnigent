@@ -83,6 +83,7 @@ A profile's `transport` is a harness-family marker. The resolved driver is:
 | **Basic turn** | A turn completes and returns assistant text. | P0 |
 | **Streaming** | More than one output-text delta is emitted; a repeated single delta is `PARTIAL`. | P0 |
 | **Tool calling** | A tool call is surfaced and the turn closes after its result. | P0 |
+| **Omnigent MCP** | A native harness calls the read-only `sys_session_list` relay tool through its generated `omnigent` MCP server. | P1 |
 | **Policy DENY** | A tool-call policy blocks the call. | P0 |
 | **Policy ALLOW** | A tool call proceeds while an explicit allow policy is attached. | P1 |
 | **Policy ASK** | An ask policy raises an approval elicitation. | P1 |
@@ -101,6 +102,7 @@ transport; it does not claim the harness lacks the capability.
 | --- | --- | --- | --- |
 | Basic turn, Streaming, Model override, Interrupt | End-to-end through server + runner | End-to-end through server + runner + vendor CLI | Wrap boundary only |
 | Tool calling | Server-dispatched builtin | Vendor tool mirrored as a session item | Request-level wrap tool |
+| Omnigent MCP | Not applicable | Generated `omnigent` MCP relay when supported by the vendor | Not applicable |
 | Policy DENY | Fixed policy in the agent spec | Session CEL policy + native policy hook | Not observable |
 | Policy ALLOW / ASK | Fixed policy; ASK observes and resolves an elicitation | Temporary session CEL policy; ASK observes and resolves an elicitation | Not observable |
 | Cost tracking | Session snapshot | Session snapshot when the vendor forwards usage | Completed-response usage when forwarded |
